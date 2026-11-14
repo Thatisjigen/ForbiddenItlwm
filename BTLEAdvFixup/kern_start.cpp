@@ -4,7 +4,7 @@
 //
 // Separate Lilu plugin: lets bluetoothd use extended LE advertising on a third-party
 // controller. It only patches a process in memory, and does nothing without its boot
-// flag. See docs/HOW-IT-WORKS.md. Nothing on disk changes.
+// flag, or a MediaTek card for the MediaTek mode. See docs/HOW-IT-WORKS.md. Nothing on disk changes.
 #include <Headers/kern_api.hpp>
 #include <Headers/kern_user.hpp>
 #include <Headers/kern_util.hpp>
@@ -27,6 +27,12 @@ static uint32_t revalidations {};
 static bool patchScanning {};
 // Experimental, off by default: -btleadvnodupfilter turns bluetoothd's scan duplicate filter off.
 static bool patchDuplicateFilter {};
+// A MediaTek controller, whose HCI hook belongs to SimpleMtkBtPatcher (see kMediaTekPatches): never with -btleadv;
+// forced with -mtkawdl, kept off with -mtkawdloff, otherwise on once mediaTekProbe finds a MediaTek card.
+static bool mediaTekMode {};
+// The page hook changes bluetoothd only once a mode is on: at start with -btleadv or -mtkawdl, or when mediaTekProbe
+// finds the card. Before that, and on any other machine, it hands every page on unchanged.
+static bool patchesOn {};
 
 // The original bytes of every bluetoothd page a kext patched, for APFS's integrity check (BTLEAdvVerify.hpp, #62).
 // This hook sees BlueToolFixup's patches too when it runs outside BlueToolFixup's, that is when BTLEAdvFixup loads
@@ -41,6 +47,10 @@ static thread_call_t publishCall {};
 
 static void patched_cs_validate_page(vnode_t vp, memory_object_t pager, memory_object_offset_t page_offset,
                                      const void *data, int *validated_p, int *tainted_p, int *nx_p) {
+    if (!__atomic_load_n(&patchesOn, __ATOMIC_ACQUIRE)) {
+        FunctionCast(patched_cs_validate_page, orig_cs_validate)(vp, pager, page_offset, data, validated_p, tainted_p, nx_p);
+        return;
+    }
     char path[PATH_MAX];
     int pathlen = PATH_MAX;
     if (vn_getpath(vp, path, &pathlen) != 0 || LIKELY(strcmp(path, "/usr/sbin/bluetoothd") != 0)) {
@@ -68,6 +78,11 @@ static void patched_cs_validate_page(vnode_t vp, memory_object_t pager, memory_o
         if ((!patch.scanningOnly || patchScanning) && (!patch.dupFilter || patchDuplicateFilter))
             KernelPatcher::findAndReplace(const_cast<void *>(data), PAGE_SIZE, patch.find, patch.size,
                                           patch.replace, patch.size);
+    for (size_t i = 0; mediaTekMode && i < BTLEAdv::kMediaTekPatchCount; i++) {
+        const auto &patch = BTLEAdv::kMediaTekPatches[i];
+        KernelPatcher::findAndReplace(const_cast<void *>(data), PAGE_SIZE, patch.find, patch.size, patch.replace,
+                                      patch.size);
+    }
     if (!keep)
         return;
     // Every recorded patch back, BlueToolFixup's included when its hook isn't in this chain. Only after a validation
@@ -512,6 +527,31 @@ static IOReturn patched_pipe_io(void *that, IOMemoryDescriptor *dataBuffer, uint
     return FunctionCast(patched_pipe_io, orig_pipe_io)(that, dataBuffer, bytesTransferred, completion, completionTimeoutMs);
 }
 
+// The MediaTek mode without a boot flag: the Wi-Fi half of an MT7921 family card, with the PCI IDs the MediaTek Wi-Fi
+// driver matches (MT7920, MT7921, RZ608, MT7922, RZ616); its Bluetooth half is the USB controller SimpleMtkBtPatcher
+// serves. A thread call of low priority waits for it, up to a minute, off the boot path: PCI devices are registered
+// long before bluetoothd starts.
+static thread_call_t mediaTekProbeCall {};
+static void mediaTekProbe(thread_call_param_t, thread_call_param_t) {
+    bool found = false;
+    if (OSDictionary *match = IOService::serviceMatching("IOPCIDevice")) {
+        if (OSString *pci = OSString::withCString("0x792014c3 0x796114c3 0x060814c3 0x792214c3 0x061614c3")) {
+            match->setObject("IOPCIPrimaryMatch", pci);
+            pci->release();
+            if (IOService *card = IOService::waitForMatchingService(match, 60ULL * NSEC_PER_SEC)) {
+                found = true;
+                card->release();
+            }
+        }
+        match->release();
+    }
+    if (found) {
+        mediaTekMode = true;
+        __atomic_store_n(&patchesOn, true, __ATOMIC_RELEASE);
+    }
+    noteHook("BTLEAdvMediaTek", found ? 1 : 0);
+}
+
 static const char *usbHostPaths[] {"/System/Library/Extensions/IOUSBHostFamily.kext/Contents/MacOS/IOUSBHostFamily"};
 static KernelPatcher::KextInfo usbHostInfo {"com.apple.iokit.IOUSBHostFamily", usbHostPaths, 1, {true}, {}, KernelPatcher::KextInfo::Unloaded};
 static const char *apfsPaths[] {"/System/Library/Extensions/apfs.kext/Contents/MacOS/apfs"};
@@ -541,11 +581,21 @@ PluginConfiguration ADDPR(config) {
     KernelVersion::Tahoe,
 #endif
     []() {
-        // Off unless asked for, so this kext can sit in the EFI doing nothing.
-        if (!checkKernelArgument("-btleadv"))
+        // Off unless asked for, or on a MediaTek card, so this kext can sit in the EFI doing nothing anywhere else.
+        // The MediaTek Wi-Fi driver's AirDrop support is on by default and needs this half: -mtkawdloff turns both
+        // off, -mtkawdl skips the search for the card.
+        const bool intel = checkKernelArgument("-btleadv");
+        const bool mediaTekOff = !intel && checkKernelArgument("-mtkawdloff");
+        mediaTekMode = !intel && !mediaTekOff && checkKernelArgument("-mtkawdl");
+        const bool probe = !intel && !mediaTekOff && !mediaTekMode;
+        if (probe && !(mediaTekProbeCall = thread_call_allocate_with_priority(mediaTekProbe, nullptr, THREAD_CALL_PRIORITY_LOW)))
+            SYSLOG("btleadv", "no thread call to look for a MediaTek card, it stays off");
+        if (!intel && !mediaTekMode && !mediaTekProbeCall)
             return;
-        // Advertising alone, to compare with both.
-        patchScanning = !checkKernelArgument("-btlenoscan");
+        __atomic_store_n(&patchesOn, intel || mediaTekMode, __ATOMIC_RELEASE);
+        // Advertising alone, to compare with both. On MediaTek scanning stays legacy: extended scanning needs
+        // the LE event mask bit that only the HCI hook sets, and the duplicate filter patches are scanning ones.
+        patchScanning = intel && !checkKernelArgument("-btlenoscan");
         patchDuplicateFilter = checkKernelArgument("-btleadvnodupfilter");
         // For the integrity check of bluetoothd's patched pages (#62). Without any of these it stays off and the
         // pages are patched as before.
@@ -586,6 +636,16 @@ PluginConfiguration ADDPR(config) {
                 }
                 noteHook("BTLEAdvVerifyHook", routed ? 1 : 0);
             });
+        if (!intel) {
+            // SimpleMtkBtPatcher routes IOUSBHostDevice::deviceRequest: a second route of it makes Lilu panic,
+            // and the hook below only acts on Intel controllers anyway.
+            noteHook("BTLEAdvHookRouted", 0);
+            if (mediaTekMode)
+                noteHook("BTLEAdvMediaTek", 1);
+            else
+                thread_call_enter(mediaTekProbeCall);
+            return;
+        }
         hciLock = IOLockAlloc();
         lengthLock = IOSimpleLockAlloc();
         if (!lengthLock)

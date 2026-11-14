@@ -241,4 +241,32 @@ static const Patch kPatches[] = {
 #endif
 };
 #undef BTLEADV_PATCH
+
+// MediaTek controllers (-mtkawdl). The HCI hook is not installed there: SimpleMtkBtPatcher already routes
+// IOUSBHostDevice::deviceRequest, and Lilu panics when two plugins route the same function. On Intel the hook
+// writes each advertising set's random address (0x2035) right after the set is created (0x2036). Without it the
+// set is enabled with no address and the controller answers 0x12, in a halt and restart loop: at stack start
+// bluetoothd sends 0x2035 for sets that do not exist yet, the controller refuses them, the completion still
+// updates the 7-byte-per-set address cache, and the send before Enable is skipped because the cache matches.
+// This drops that "unchanged" branch, so bluetoothd writes the address before every Enable, when the set exists:
+//   xor r8d, [rax+rcx+0xd0e]; mov edx, [rdx+rdi+3]; xor edx, [rax+rcx+0xd11]; or edx, r8d; je +0x80 -> nop6
+// The site and the edit come from BtLeDlFix (thanhnndev/mt7925-macos-wifi, kexts/BtLeDlFix, BSD-3-Clause-Clear,
+// Copyright (c) 2026 thanhnndev and contributors), checked on 25G241 and 25G332; these are the 25G342 bytes,
+// which are the same, and they match once in its bluetoothd.
+#if !defined(BTLEADV_SEQUOIA) && !defined(BTLEADV_SONOMA)
+static const uint8_t resendAddressFind2673[] = {
+    0x44,0x33,0x84,0x08,0x0e,0x0d,0x00,0x00, 0x8b,0x54,0x3a,0x03, 0x33,0x94,0x08,0x11,0x0d,0x00,0x00,
+    0x44,0x09,0xc2, 0x0f,0x84,0x80,0x00,0x00,0x00 };
+static const uint8_t resendAddressReplace2673[] = {
+    0x44,0x33,0x84,0x08,0x0e,0x0d,0x00,0x00, 0x8b,0x54,0x3a,0x03, 0x33,0x94,0x08,0x11,0x0d,0x00,0x00,
+    0x44,0x09,0xc2, 0x66,0x0f,0x1f,0x44,0x00,0x00 };
+static_assert(sizeof(resendAddressFind2673) == sizeof(resendAddressReplace2673), "patch size");
+static const Patch kMediaTekPatches[] = {
+    Patch{resendAddressFind2673, resendAddressReplace2673, sizeof(resendAddressFind2673), false, false},
+};
+static constexpr size_t kMediaTekPatchCount = sizeof(kMediaTekPatches) / sizeof(kMediaTekPatches[0]);
+#else
+static const Patch *const kMediaTekPatches = nullptr;   // no MediaTek set for Sequoia or Sonoma
+static constexpr size_t kMediaTekPatchCount = 0;
+#endif
 }
