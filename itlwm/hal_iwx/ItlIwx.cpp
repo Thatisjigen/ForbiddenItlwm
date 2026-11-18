@@ -8291,7 +8291,10 @@ awdlCoexBaHandle(struct iwx_softc *sc)
         // nothing arrives (DataRxUcast frozen, SYNs unanswered) until the phone opens a session itself, which
         // took about two minutes on 2026-11-15. canProbe (and #47's same-channel window) still applies only to a
         // real receive session. -itlawdlfilterbysession keeps the old rule for an A/B.
-        const bool wantOff = (awdlCoexBaFilterBySession ? receiveSession : awdlCoexBaPeerAdded) &&
+        // Only with the listener on its own context (-itlawdlcoexmulti): shared with the station's (MultiState
+        // off), the station-lifetime rule stopped Mac → iPhone sends, and the session rule fixed it (#63).
+        const bool sessionRule = awdlCoexBaFilterBySession || !awdlCoexMultiActive;
+        const bool wantOff = (sessionRule ? receiveSession : awdlCoexBaPeerAdded) &&
             answerNow >= awdlCoexBaProbeUntilUS;
         if (wantOff != awdlCoexBaFilterOff) {
             awdlCoexBaFilter.off = wantOff;
