@@ -31,6 +31,8 @@ The driver only starts AirDrop on macOS builds whose Wi-Fi stack was checked: Ta
 
 Apple devices use channel 149 or 44 for AirDrop on 5 GHz, and each picks one by its own country rules (Japan, Germany and Russia, for example, use 44). From 0.6.0 the listener follows the iPhone: once it has heard the iPhone, it moves to the channel the iPhone uses (`ITLAWDLCoexPeer5GHz` shows which: 44, 149, or 1 for neither). Before it has heard one, it starts on 149.
 
+**It moves to 6 for about 15 s every minute:** that's the search for a device it hasn't heard yet (from the next release, #35). A listener on 149 never hears a phone that uses only 44, so while no device's schedule has been heard it waits on 6, where every Apple device spends a slot, then follows the device it finds. `ITLAWDLCoexSearch6` shows a search in progress and `ITLAWDLCoexSearch6Dwells` counts them; it stops as soon as a device is heard. `-itlawdlnosearch6` turns it off.
+
 The firmware opens channel 149 only after a nearby network tells it the country.
 - Make sure some 5 GHz network that advertises a country is in range. Switching on an iPhone's Personal Hotspot nearby, without joining it, has worked.
 - Wait a minute after it appears.

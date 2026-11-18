@@ -182,6 +182,14 @@ static uint64_t awdlCoexLastMoveUS;
 // without AWDL data (#68). ITLAWDLCoexMovesSettleDropped counts choices that changed before they settled.
 static constexpr uint64_t kAwdlCoexMoveSettleUS = 60000000ULL, kAwdlCoexMoveQuietUS = 30000000ULL;
 static int awdlCoexSettleWant, awdlCoexSettleGen = -1;
+// The search on 6 for a device not heard yet (#35); -itlawdlnosearch6 turns it off. Wait 30 s after the listener is
+// added, then spend 15 s of every 60 s on 6 while no device's schedule is fresh.
+static constexpr uint64_t kAwdlCoexSearch6StartUS = 30000000ULL, kAwdlCoexSearch6CycleUS = 60000000ULL,
+    kAwdlCoexSearch6DwellUS = 15000000ULL;
+static bool awdlCoexNoSearch6, awdlCoexSearch6Active;
+static uint64_t awdlCoexAddedAtUS;
+static int awdlCoexSearch6Gen = -1;
+static uint32_t awdlCoexSearch6Dwells;
 static uint8_t awdlCoexSettleWidth;
 static uint64_t awdlCoexSettleSinceUS;
 static uint32_t awdlCoexMovesSettleDropped;
@@ -6731,6 +6739,8 @@ static void awdlCoexPublish()
         root->setProperty("ITLAWDLCoexMoves", awdlCoexMoves, 32);
         root->setProperty("ITLAWDLCoexMoveFailures", awdlCoexMoveFailures, 32);
         root->setProperty("ITLAWDLCoexMovesSettleDropped", awdlCoexMovesSettleDropped, 32);
+        root->setProperty("ITLAWDLCoexSearch6", awdlCoexSearch6Active);
+        root->setProperty("ITLAWDLCoexSearch6Dwells", awdlCoexSearch6Dwells, 32);
         root->setProperty("ITLAWDLCoexCountryNotices", awdlCoexCountryNotices, 32);
         root->setProperty("ITLAWDLCoexCountryAnswers", awdlCoexCountryAnswers, 32);
         root->setProperty("ITLAWDLCoexCountryLastStatus", awdlCoexCountryLastStatus, 32);
@@ -15549,7 +15559,28 @@ awdlCoexPickOwn(struct iwx_softc *sc, uint8_t *width)
     const bool names149 = peerFresh && awdlCoexPeerNames(awdlCoexPeerSeq, 149);
     int pick = 0;
     uint8_t w = IWX_PHY_VHT_CHANNEL_MODE20;
-    if (names44 && tryChannel(44, true, &w))
+    // Search on 6 (#35): with no device's schedule heard, a listener on 149 never hears a phone that uses only
+    // 44 (Russia, Germany), so it never follows it there. Every device spends a slot on 6, so for a while in each
+    // cycle the listener waits there; once a schedule is heard, the rules below take over at once (moves from 6
+    // aren't held). Not while a schedule is fresh, and not in the first kAwdlCoexSearch6StartUS.
+    const uint64_t searchNowUS = awdlUptimeUS();
+    if (awdlCoexSearch6Gen != awdlCoexGeneration) {   // a new listener: its search clock starts now
+        awdlCoexSearch6Gen = awdlCoexGeneration;
+        awdlCoexAddedAtUS = searchNowUS;
+    }
+    const bool search6 = !awdlCoexNoSearch6 && !peerFresh && awdlCoexAddedAtUS &&
+        searchNowUS - awdlCoexAddedAtUS >= kAwdlCoexSearch6StartUS && usable(6) &&
+        (searchNowUS - awdlCoexAddedAtUS - kAwdlCoexSearch6StartUS) % kAwdlCoexSearch6CycleUS < kAwdlCoexSearch6DwellUS;
+    if (search6 != awdlCoexSearch6Active) {
+        awdlCoexSearch6Active = search6;
+        if (search6)
+            ++awdlCoexSearch6Dwells;
+        awdlCoexPublish();
+    }
+    if (search6) {
+        w = IWX_PHY_VHT_CHANNEL_MODE20;
+        pick = 6;
+    } else if (names44 && tryChannel(44, true, &w))
         pick = 44;
     // 149 as before, unless the phone uses only 44: then it never comes to 149 (#35), and 6 is better.
     else if ((names149 || !names44) && tryChannel(149, names149, &w))
@@ -20765,6 +20796,7 @@ iwx_attach(struct iwx_softc *sc, struct pci_attach_args *pa)
             awdlBtCoexRequest = requestedCoexBt;
         awdlCoexSameBand = PE_parse_boot_argn("-itlawdlsameband", &dummy, sizeof(dummy));
         awdlCoexOverlap80 = PE_parse_boot_argn("-itlawdloverlap80", &dummy, sizeof(dummy));
+        awdlCoexNoSearch6 = PE_parse_boot_argn("-itlawdlnosearch6", &dummy, sizeof(dummy));
         awdlCoexStation44 = PE_parse_boot_argn("-itlawdlsta44", &dummy, sizeof(dummy));
         awdlCoexNoSharedBa = PE_parse_boot_argn("-itlawdlnosharedba", &dummy, sizeof(dummy));
         awdlCoexMultiState = awdlCoexMulti ? "not-added" : "off";
