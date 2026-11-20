@@ -1,5 +1,9 @@
 # AX211 idle-peer handoff: ordered hardware redo
 
+> Historical results on alpha.1 main `96ff71e` and its isolated handoff patch.
+> The branch has since been rebased to 0.6.0-beta.2; that hardware retest is
+> pending. This report's measurements and revisions remain unchanged.
+
 ## Result and scope
 
 On 2026-11-18, an AX211 sender repeatedly sent the same file to a native Mac,
