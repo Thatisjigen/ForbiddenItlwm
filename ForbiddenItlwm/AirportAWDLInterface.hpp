@@ -45,7 +45,7 @@ public:
 #endif
     // Pure in IO80211VirtualInterface on Tahoe, and in IO80211SkywalkInterface on Sequoia.
 #if __IO80211_TARGET != __MAC_14_4   // not a virtual on Sonoma
-    IOReturn setMacAddress(ether_addr&) override { return unsupported("setMacAddress"); }
+    IOReturn setMacAddress(ether_addr&) override;
 #endif
     IOReturn getSSID(apple80211_ssid_data*) override { return unsupported("getSSID"); }
     IOReturn getCHANNEL(apple80211_channel_data*) override { return unsupported("getCHANNEL"); }
@@ -163,6 +163,9 @@ private:
     bool dataTransmitEnabled = false;
     ItlAWDLNativeState nativeState;
     unsigned oobRequests = 0;
+#if __IO80211_TARGET != __MAC_14_4   // setMacAddress isn't a virtual on Sonoma
+    unsigned addressSetCalls = 0;
+#endif
     bool oobSampled = false, debugFlagsSet = false, debugFlagsWanted = false;
     IOReturn noteOobRequest(const apple80211_awdl_oob_request *, const char *);
     // Native 25G241 layout read from both the sender and Apple's Broadcom handler:

@@ -105,6 +105,25 @@ void ItlAWDLInterface::acceptNativeRequests()
                 forced ? "on (unverified build, -itlawdlanybuild)" : "on");
 }
 
+#if __IO80211_TARGET != __MAC_14_4   // not a virtual on Sonoma
+// wifip2pd sets a new, random address on awdl0 (it logged "Can't assign requested address" while this
+// was refused, #85). The address is ours to use: the announcement, data frames and receive filtering
+// all read localFrameAddress, and the firmware listener follows the address of the sync frames macOS
+// builds, changing its own before it sends anything. Nothing is published but the count.
+// From ann0see's diff in #85.
+IOReturn ItlAWDLInterface::setMacAddress(ether_addr &address)
+{
+    IOLock *lock = ensureConfigurationLock();
+    if (!lock)
+        return kIOReturnNoMemory;
+    IOLockLock(lock);
+    memcpy(localFrameAddress, &address, sizeof(localFrameAddress));
+    IOLockUnlock(lock);
+    setProperty("ItlwmAWDLAddressSetCalls", ++addressSetCalls, 32);
+    return kIOReturnSuccess;
+}
+#endif
+
 IOReturn ItlAWDLInterface::getAWDL_AF_TX_MODE(apple80211_awdl_af_tx_mode *data)
 {
     if (!nativeState.accept)
