@@ -24,7 +24,7 @@ What each one does:
 | `-itlawdlcoexdata` | Carries AirDrop's data through the listener, both ways |
 | `-itlawdlmitx` | Sends macOS's own AWDL announcement (its name and services) in the sync frames. Only on verified macOS builds: `ItlwmAWDLMiState` says `on`, `off` or `blocked: build not verified` |
 | `-itlawdlelicit` | Adds the extra AWDL fields Apple devices expect: election parameters, channel sequence and HT capabilities |
-| `-itlawdlcaps` | Reports two spatial streams and VHT to macOS and to peers, so the iPhone uses 80 MHz two-stream rates |
+| `-itlawdlcaps` | Reports VHT and the card's spatial streams to macOS and to peers, so the iPhone uses 80 MHz rates. Two streams on two-antenna cards; from 0.6.0-beta.3, one on one-antenna cards such as the 9461, 9462 and AX101 (#87). `ItlwmCardStreams` shows what the driver found |
 | `-itlawdlsvcmerge` | Merges macOS's service records into the announcement frames, which helps discovery |
 | `-itlawdlawsync` | Times idle sync frames to the iPhone's availability windows |
 | `itlawdlintcoal=4` | Shorter interrupt coalescing for the listener, for lower latency |
@@ -77,7 +77,7 @@ Not needed for AirDrop. Listed so you know what they do if you find them in a gu
 | `-itlawdlpoolprobe` | Probes the `awdl0` packet pools once at start and publishes the result. Diagnostic only |
 | `-btlenoscan` | BTLEAdvFixup: advertising fixes only, without the scanning changes. For comparison |
 | `-btleadvdbg`, `-btleadvbeta` | Lilu's standard debug and beta switches for BTLEAdvFixup |
-| `itlwm_he=1` | Wi-Fi 6 (802.11ax), from the upstream driver. One tester ran all their AirDrop tests with it without problems; not tested here, and speeds vary (#58) |
+| `itlwm_he=1` | Wi-Fi 6 (802.11ax), from the upstream driver. Not tested here. One tester ran all their AirDrop tests with it without problems (#58); on another's AX201, Wi-Fi dropped as soon as an AirDrop started, and AirDrop worked once it was removed (#83). Leave it off if you use AirDrop |
 | `-novht`, `-noht40` | Upstream: no 802.11ac, or no 40 MHz on the Mac's own Wi-Fi |
 
 ## Don't use
