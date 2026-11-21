@@ -22,6 +22,9 @@ derive(int sha256, const uint8_t *pmk, const uint8_t *aa, const uint8_t *spa,
     uint8_t buf[2 * kAddrLen + 2 * kNonceLen];
     int ret;
 
+    for (size_t i = 0; i < ptk_len; ++i)
+        ptk[i] = 0;
+
     /* Min(AA,SPA) || Max(AA,SPA) */
     ret = memcmp(aa, spa, kAddrLen) < 0;
     memcpy(&buf[0], ret ? aa : spa, kAddrLen);

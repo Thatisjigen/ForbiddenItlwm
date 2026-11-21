@@ -81,10 +81,13 @@ int main() {
         0x84,0x1e,0x1a,0x3d,0x7d,0x03,0xe9,0x39,0x9d,0xe3,0xc2,0x0c
     };
     uint8_t ptk[64];
+    memset(ptk, 0xff, sizeof(ptk));
     PTKDerivation::derive(1, pmk, aa, spa, anonce, snonce, ptk,
                           sizeof(ptk), testKdf, testPrf);
     assert(lastLabelLen == 22 && lastOutLen == 48);
     assert(memcmp(ptk, expected256, sizeof(expected256)) == 0);
+    for (size_t i = sizeof(expected256); i < sizeof(ptk); ++i)
+        assert(ptk[i] == 0);
 
     memset(ptk, 0, sizeof(ptk));
     PTKDerivation::derive(1, pmk, spa, aa, snonce, anonce, ptk,
