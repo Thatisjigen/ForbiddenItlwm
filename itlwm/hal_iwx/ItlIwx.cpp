@@ -8574,7 +8574,7 @@ awdlRxTask(void *arg)
                 rateResults->release();
             }
         root->setProperty("ITLAWDLFixedChannel", awdlFixedChannel, 32);
-        root->setProperty("ITLAWDLBtCoexMode", ItlAWDL::btCoexModeFor(awdlBtCoexRequest, IWX_BT_COEX_WIFI), 32);
+        root->setProperty("ITLAWDLBtCoexMode", ItlAWDL::btCoexModeFor(awdlBtCoexRequest, IWX_BT_COEX_NW), 32);
         root->setProperty("ITLAWDLRequestedCountry", awdlCountry);
         root->setProperty("ITLAWDLCountryScans", awdlCountryScans, 32);
         root->setProperty("ITLAWDLBackgroundScans", awdlBackgroundScans, 32);
@@ -17035,10 +17035,25 @@ iwx_send_bt_init_conf(struct iwx_softc *sc)
     XYLog("%s\n", __FUNCTION__);
     struct iwx_bt_coex_cmd bt_cmd;
     
-    // Monitor mode keeps Wi-Fi busy on 2.4 GHz, so an AWDL test boot may need a different
-    // balance with Bluetooth, which shares the radio. Default behaviour is unchanged.
-    bt_cmd.mode = htole32(ItlAWDL::btCoexModeFor(awdlBtCoexRequest, IWX_BT_COEX_WIFI));
-    bt_cmd.enabled_modules = 0;
+    // The default was IWX_BT_COEX_WIFI with no modules (OpenBSD's choice), which starves Bluetooth on a shared
+    // antenna: on an AX201, A2DP queue overruns and Bluetooth audio dropouts whenever the station was busy.
+    // Linux iwlwifi (mvm/coex.c, iwl_mvm_send_bt_init_conf) sends BT_COEX_NW with SYNC2SCO and HIGH_BAND_RET,
+    // plus MPLUT, the firmware's multi-priority table for Bluetooth traffic, whenever the firmware declares
+    // IWL_UCODE_TLV_CAPA_BT_MPLUT_SUPPORT (iwl_mvm_is_mplut_supported; IWL_MVM_BT_COEX_MPLUT is 1). The same here.
+    // itlawdlbtcoex=N still forces a mode for tests; any mode other than NW gets no modules.
+    const uint32_t btMode = ItlAWDL::btCoexModeFor(awdlBtCoexRequest, IWX_BT_COEX_NW);
+    bt_cmd.mode = htole32(btMode);
+    uint32_t btModules = 0;
+    if (btMode == IWX_BT_COEX_NW) {
+        btModules = IWX_BT_COEX_SYNC2SCO_ENABLED | IWX_BT_COEX_HIGH_BAND_RET;
+        if (isset(sc->sc_enabled_capa, IWX_UCODE_TLV_CAPA_BT_MPLUT_SUPPORT))
+            btModules |= IWX_BT_COEX_MPLUT_ENABLED;
+    }
+    bt_cmd.enabled_modules = htole32(btModules);
+    // Published here, at every firmware start: the AWDL summary that also shows the mode runs only in monitor mode.
+    auto *root = IORegistryEntry::getRegistryRoot();
+    root->setProperty("ITLAWDLBtCoexMode", btMode, 32);
+    root->setProperty("ITLAWDLBtCoexModules", btModules, 32);
     
     return iwx_send_cmd_pdu(sc, IWX_BT_CONFIG, 0, sizeof(bt_cmd),
                             &bt_cmd);
