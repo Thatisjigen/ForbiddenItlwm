@@ -15,6 +15,8 @@
 
 **Docs:** TROUBLESHOOTING covers an iPhone kept waiting by another Apple device nearby (#81), Universal Clipboard from the Mac with an AirDrop window open (#65), DFS channels without `-itlawdlcoexmulti` (#63) and turning Bluetooth off to join the iPhone's hotspot (#39). INSTALL: disable BlueToolFixup too if a macOS update still fails (#78). BOOT-FLAGS and ROADMAP: Wi-Fi 6 (`itlwm_he=1`) can drop Wi-Fi when AirDrop starts (#83). README: 9560/9461/9462 on 10th-gen and newer boards run on the part of the driver with AirDrop (#87); AirDrop with a Mac as the other device on the stock release (#81). TESTED-HARDWARE adds #45, #53, #77, #81, #83 and #87.
 
+**Tested on** the project's hackintosh (Tahoe 26.7.1, AX211, the tested flag set): AirDrop both ways, Bluetooth headphones, the listener on 149 at 80 MHz, `ItlwmCardStreams` 2. The channel-6 search was tested here with an earlier build (it found an iPhone in airplane mode and stopped). Not tested here: the Sonoma fix (one user's report), shared mode without `-itlawdlcoexmulti` (#63), SHA-256 networks (#84), one-antenna cards (#87), and the Sequoia and Sonoma builds (built and checked offline).
+
 BTLEAdvFixup is unchanged (0.9.3).
 
 ## 0.6.0-beta.2
