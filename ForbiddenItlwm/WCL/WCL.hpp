@@ -524,10 +524,7 @@ struct JoinRequest {
     uint32_t keyLength;
     uint32_t keyCipher;
     uint16_t keyIndex;
-    /*
-     * SAE hands over a raw passphrase (up to 63 bytes plus the terminator
-     * the PBKDF2 path appends); the legacy PSK is 32 bytes.
-     */
+    /* SAE passphrase: raw bytes up to 63; PSK: 32 bytes. */
     uint8_t key[64];
     uint8_t bssid[6];
     uint16_t channelSpec;

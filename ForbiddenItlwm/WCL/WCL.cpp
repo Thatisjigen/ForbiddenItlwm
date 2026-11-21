@@ -425,11 +425,7 @@ void AirportItlwmSkywalkInterface::publishWCLBeacon(const ieee80211_node *node, 
     metadata->capability = node->ni_capinfo;
     metadata->flags = AirportWCL::SSIDPresent | AirportWCL::RSSIValid;
     memcpy(metadata + 1, ies, length);
-    /*
-     * With WPA3 enabled, keep the AP's real AKM list so macOS can choose SAE
-     * for a WPA2/WPA3 transition network.  Without the flag, keep the
-     * historical behaviour of presenting the PSK option as plain WPA2.
-     */
+    /* Keep real AKMs so macOS can select SAE; otherwise present PSK as plain WPA2. */
     if (!ic->ic_wpa3)
         metadata->ieLength = uint32_t(AirportWCL::selectWPA2TransitionMode(
             reinterpret_cast<uint8_t *>(metadata + 1), length));
@@ -554,11 +550,7 @@ IOReturn AirportItlwmSkywalkInterface::startWCLJoin(AirportWCL::JoinRequest &joi
     ic->ic_flags &= ~(IEEE80211_F_AUTO_JOIN | IEEE80211_F_PSK);
     ic->ic_wcl_enterprise = enterprise;
 
-    /*
-     * SAE uses the same WPA parameter path as WPA2-Personal: net80211 still
-     * negotiates RSN with CCMP, but selects AKM SAE and uses the SAE password
-     * token instead of a PSK.
-     */
+    /* SAE uses the WPA path with AKM SAE and a password token instead of a PSK. */
     if (personal || sae || enterprise) {
         ieee80211_wpaparams wpa = {};
         wpa.i_enabled = 1;
@@ -595,16 +587,8 @@ IOReturn AirportItlwmSkywalkInterface::startWCLJoin(AirportWCL::JoinRequest &joi
             return kIOReturnBadArgument;
         }
         if (sae) {
-            /*
-             * WCL hands over the raw SAE password.  Derive the password
-             * token once; net80211 derives the PWE from it per peer.
-             */
-            /*
-             * Capability gating should prevent an SAE request while the
-             * flag is off, but a join racing the boot argument must not
-             * leave half-configured RSN state.  The token derivation also
-             * fails for an empty/oversized passphrase or SSID.
-             */
+            /* Derive the token from the raw SAE password; net80211 derives the PWE per peer. */
+            /* Fail cleanly on invalid passphrase/SSID or a join racing the flag. */
             if (!ic->ic_wpa3 ||
                 ieee80211_sae_password_to_pt(ic->ic_sae_pt, join.key,
                     join.keyLength, join.ssid, join.ssidLength) != 0) {
