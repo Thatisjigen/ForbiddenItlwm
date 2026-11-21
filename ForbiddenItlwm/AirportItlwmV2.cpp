@@ -2090,7 +2090,7 @@ IOReturn AirportItlwm::enable(IO80211SkywalkInterface *netif)
         return kIOReturnNotReady;
     _fCommandGate->enable();
     if (power_state)
-        enableAdapter(bsdInterface);
+        enableAdapterWhenPowered();
     return kIOReturnSuccess;
 }
 
@@ -2700,6 +2700,7 @@ setPOWER(OSObject *object,
         bool isRunning = (fHalService->get80211Controller()->ic_ac.ac_if.if_flags & IFF_RUNNING) != 0;
         if (pd->power_state[0] == 0) {
             fHalService->get80211Controller()->ic_wcl_mac_reconfig = false;
+            enableAwaitingPowerOn = false;
             changePowerStateToPriv(kPowerStateOff);
             if (fHalService->get80211Controller()->ic_ac.ac_if.if_flags & (IFF_UP | IFF_RUNNING)) {
                 net80211_ifstats(fHalService->get80211Controller());
@@ -2708,7 +2709,7 @@ setPOWER(OSObject *object,
         } else {
             changePowerStateToPriv(kPowerStateOn);
             if (!isRunning)
-                enableAdapter(bsdInterface);
+                enableAdapterWhenPowered();
         }
         power_state = (pd->power_state[0]);
     }
@@ -2721,6 +2722,7 @@ setPOWER(OSObject *object,
     if (pd->num_radios > 0) {
         bool isRunning = (fHalService->get80211Controller()->ic_ac.ac_if.if_flags & (IFF_UP | IFF_RUNNING)) != 0;
         if (pd->power_state[0] == 0) {
+            enableAwaitingPowerOn = false;
             changePowerStateToPriv(1);
             if (isRunning) {
                 net80211_ifstats(fHalService->get80211Controller());
@@ -2729,7 +2731,7 @@ setPOWER(OSObject *object,
         } else {
             changePowerStateToPriv(2);
             if (!isRunning)
-                enableAdapter(bsdInterface);
+                enableAdapterWhenPowered();
         }
         power_state = (pd->power_state[0]);
     }
@@ -2974,6 +2976,7 @@ void AirportItlwm::setPowerStateOff()
 {
     XYLog("%s\n", __FUNCTION__);
     pmPowerState = kPowerStateOff;
+    enableAwaitingPowerOn = false;
     disableAdapter(bsdInterface);
     pmPolicyMaker->acknowledgeSetPowerState();
 }
@@ -2983,4 +2986,28 @@ void AirportItlwm::setPowerStateOn()
     XYLog("%s\n", __FUNCTION__);
     pmPowerState = kPowerStateOn;
     pmPolicyMaker->acknowledgeSetPowerState();
+    // Wi-Fi was asked for while the card was still off (#38): start it now that it's powered.
+    if (enableAwaitingPowerOn && power_state) {
+        enableAwaitingPowerOn = false;
+        XYLog("%s: starting the deferred Wi-Fi enable\n", __FUNCTION__);
+        enableAdapter(bsdInterface);
+    }
+}
+
+// #38: on a full wake macOS can ask for Wi-Fi (setPOWER, or the interface's enable) a few milliseconds
+// before the power manager has powered the card back on (setPowerStateOn). The card then reads all-ones,
+// initialization fails, and nothing retried it, so Wi-Fi stayed off until it was toggled. While the
+// power state is off, remember the request instead, and start the adapter in setPowerStateOn. A power-off
+// or a Wi-Fi-off request in between drops it, so a dark wake never starts Wi-Fi. Before power management
+// is registered there is no power state to wait for, so Wi-Fi starts at once, as before.
+void AirportItlwm::enableAdapterWhenPowered()
+{
+    if (pmPolicyMaker && pmPowerState != kPowerStateOn) {
+        enableAwaitingPowerOn = true;
+        setProperty("ItlwmEnableDeferrals", ++enableDeferrals, 32);
+        XYLog("%s: power is off, starting Wi-Fi once it's on\n", __FUNCTION__);
+        return;
+    }
+    enableAwaitingPowerOn = false;
+    enableAdapter(bsdInterface);
 }
