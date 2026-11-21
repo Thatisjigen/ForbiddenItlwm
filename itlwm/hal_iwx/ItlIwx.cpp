@@ -14722,6 +14722,10 @@ iwx_rs_init(struct iwx_softc *sc, struct iwx_node *in, bool update)
     if (awdlBaTlc) {
         // The peer has no node here. High HT rates only: it leaves the channel often, and rate
         // control would otherwise take that for a bad link and drop far down.
+        // Start from an empty rate table: the HE and VHT helpers above filled it from the BSS node,
+        // including the 160 MHz entries of a 160 MHz router, which the firmware rejects for this
+        // 80 MHz-or-narrower peer with a UMAC assert (#83).
+        memset(cfg_cmd.ht_rates, 0, sizeof(cfg_cmd.ht_rates));
         cfg_cmd.mode = IWX_TLC_MNG_MODE_HT;
         cfg_cmd.ht_rates[IWX_TLC_NSS_1][IWX_TLC_MCS_PER_BW_80] = htole16(0xf0);
         cfg_cmd.ht_rates[IWX_TLC_NSS_2][IWX_TLC_MCS_PER_BW_80] = htole16(0xf0);

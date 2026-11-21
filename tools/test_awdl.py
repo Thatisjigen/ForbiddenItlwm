@@ -36,6 +36,7 @@ subprocess.run(["python3", str(root / "tests/awdl_reconnect_recovery.py")], chec
 # Joins in crowded places and on 802.1X networks: extracted net80211 bodies (#69, runmain).
 subprocess.run(["python3", str(root / "tests/node_cache_join.py")], check=True)
 subprocess.run(["python3", str(root / "tests/wcl_enterprise_link.py")], check=True)
+subprocess.run(["python3", str(root / "tests/awdl_tlc_rates.py")], check=True)
 # The pattern set for the bluetoothd installed here (PR #1); 26.7.1's set elsewhere.
 build = subprocess.check_output(["sw_vers", "-buildVersion"], text=True).strip()
 pattern_set = {"25G241": "2671", "25G332": "2672", "25G342": "2673"}.get(build, "2671")
