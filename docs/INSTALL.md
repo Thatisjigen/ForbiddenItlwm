@@ -20,7 +20,7 @@ This beta has been tested on one hackintosh: an HP Envy x360 13-bf with an Intel
 | Kext | Where from | Notes |
 | --- | --- | --- |
 | `ForbiddenItlwm.kext` | This repository, Tahoe, Sequoia or Sonoma build | Replaces `AirportItlwm.kext` |
-| `BTLEAdvFixup.kext` | This repository, Tahoe, Sequoia or Sonoma build | Lets macOS start Bluetooth LE advertising on an Intel controller |
+| `BTLEAdvFixup.kext` | This repository, Tahoe, Sequoia or Sonoma build | Lets macOS start Bluetooth LE advertising on an Intel controller, and replaces IntelBTPatcher. BlueToolFixup is still needed next to it |
 | `Lilu.kext` | [acidanthera/Lilu](https://github.com/acidanthera/Lilu) | Tested with 1.7.2 |
 | `IntelBluetoothFirmware.kext` | [OpenIntelWireless/IntelBluetoothFirmware](https://github.com/OpenIntelWireless/IntelBluetoothFirmware) | Tested with 2.5.1 |
 | `BlueToolFixup.kext` | [acidanthera/BrcmPatchRAM](https://github.com/acidanthera/BrcmPatchRAM) | Tested with 2.7.3 |
@@ -88,7 +88,7 @@ All of this goes on the **USB stick's** EFI.
    | 1 | `Lilu.kext` | `Contents/MacOS/Lilu` | |
    | 2 | `IntelBluetoothFirmware.kext` | `Contents/MacOS/IntelBluetoothFirmware` | |
    | 3 | `BlueToolFixup.kext` | `Contents/MacOS/BlueToolFixup` | `MinKernel` 21.0.0 |
-   | 4 | `BTLEAdvFixup.kext` | `Contents/MacOS/BTLEAdvFixup` | `MinKernel` 21.0.0 |
+   | 4 | `BTLEAdvFixup.kext` | `Contents/MacOS/BTLEAdvFixup` | `MinKernel` 21.0.0. After BlueToolFixup, so it can undo BlueToolFixup's patches for APFS's check too (#62) |
    | 5 | `ForbiddenItlwm.kext` | `Contents/MacOS/ForbiddenItlwm` | Replaces the old `AirportItlwm.kext` entry |
 
    **Recommended:** limit `ForbiddenItlwm.kext` and `BTLEAdvFixup.kext` to their macOS version with `MinKernel` and `MaxKernel`, so a stick moved to another macOS doesn't load the wrong build:
@@ -115,7 +115,7 @@ All of this goes on the **USB stick's** EFI.
    ioreg -l -w0 | grep -E '"ItlwmAWDL(InterfaceBuild|BuildCheck)"|"ITLAWDLCoex(Added|Channel|CountryLearned)"'
    ```
 
-   You should see `forbidden-0.6.0-beta.3` (`forbidden-0.6.0-beta.3-sequoia` on Sequoia, `forbidden-0.6.0-beta.3-sonoma` on Sonoma), `BuildCheck` `verified`, `Added` Yes, `Channel` 149 (or 44 where your iPhone uses 44, for example in Japan) and `CountryLearned` Yes. `Channel` 6 means the firmware hasn't opened 149 or 44: see [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
+   You should see `forbidden-0.6.0-beta.4` (`forbidden-0.6.0-beta.4-sequoia` on Sequoia, `forbidden-0.6.0-beta.4-sonoma` on Sonoma), `BuildCheck` `verified`, `Added` Yes, `Channel` 149 (or 44 where your iPhone uses 44, for example in Japan) and `CountryLearned` Yes. `Channel` 6 means the firmware hasn't opened 149 or 44: see [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
 4. Or run `bash tools/compat/check_compat.sh` again. It now also reads the listener's state.
 5. Turn on AirDrop on both devices. Contacts Only works when the iPhone and the Mac share an Apple Account or know each other as contacts. Otherwise use Everyone for 10 Minutes.
