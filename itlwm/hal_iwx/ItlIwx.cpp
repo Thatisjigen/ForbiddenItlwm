@@ -276,16 +276,16 @@ static uint32_t awdlSchedExtAdvertised;
 // the restart, since the driver's 512-line log ring is overwritten by then. The last 4 firmware error tables
 // (filled in iwx_nic_error), a count per init_task site, macOS's interface disables, and command waits that
 // ran out (with the command id). Stored only; published from the coex task (ITLFwCrashRecords, ITLFwRestarts).
-// The AWDL scheduler set is on by default. itlawdlsched=<bits> overrides it: 0 = off (the 0.6.0 behaviour), 1 = the
-// scheduler set (the default), 3 = the set plus its diagnostics (-itlschedskew, -itlawdlpmdebug, -itlfwcrashrec,
+// The AWDL scheduler is experimental and off by default (the 0.6.0-beta.4 behaviour). itlawdlsched=<bits> turns it
+// on: 1 = the scheduler set, 3 = the set plus its diagnostics (-itlschedskew, -itlawdlpmdebug, -itlfwcrashrec,
 // -itlrxloss). Each flag on its own still turns its part on.
 constexpr uint32_t kItlResWork = 0x1, kItlResDiag = 0x2;
 uint32_t itlAwdlSchedMask()
 {
     static uint32_t mask = 0xffffffffU;
     if (mask == 0xffffffffU) {
-        uint32_t v = kItlResWork;
-        mask = PE_parse_boot_argn("itlawdlsched", &v, sizeof(v)) ? v : kItlResWork;
+        uint32_t v = 0;
+        mask = PE_parse_boot_argn("itlawdlsched", &v, sizeof(v)) ? v : 0;
     }
     return mask;
 }

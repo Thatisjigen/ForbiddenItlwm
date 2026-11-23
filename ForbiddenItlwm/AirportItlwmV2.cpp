@@ -28,7 +28,7 @@ uint8_t itlAWDLPlanChannels[16];
 // can end, counted (they were silent before, apart from delivered and refused by the queue).
 volatile uint32_t itlAWDLRxParseBad, itlAWDLRxNotOurs, itlAWDLRxSelf, itlAWDLRxAllocFail, itlAWDLRxPrepFail,
     itlAWDLRxCopyFail, itlAWDLRxQueueFail, itlAWDLRxDelivered, itlAWDLRxDisabled;
-// ItlIwx.cpp: itlawdlsched=<bits>; 0x1 scheduler set (default), 0x2 diagnostics.
+// ItlIwx.cpp: itlawdlsched=<bits>; 0x1 scheduler set (experimental, off by default), 0x2 diagnostics.
 extern bool itlResFlag(const char *name, uint32_t bit);
 volatile uint32_t itlAWDLPlanVersion;
 // ItlIwx.cpp -itlschedmacchan: macOS's AWDL secondary master channel (0 = not set yet).

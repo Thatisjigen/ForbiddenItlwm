@@ -4,18 +4,18 @@
 
 ## Unreleased
 
-**AirDrop**
-- **The Mac now keeps AirDrop's timing as a real Mac does.** Until now the listener stayed on its channel all the time and ignored the plan macOS makes for AirDrop. The driver now follows that plan: it asks the firmware for airtime just before each of macOS's slots on the AirDrop channel, takes part in the AirDrop clock election by IO80211's own rules, and keeps its clock in step with the elected device's. It also tells other devices the schedule it really follows, listens and sends its sync frame on channel 6 in the slot every Apple device spends there, and gives macOS the availability-window events and AirDrop packet counts it uses to switch into AirDrop's fast mode. On by default; `itlawdlsched=0` turns all of it off (the 0.6.0-beta.4 behaviour). New keys under `ITLAWDLSched*`.
-- **The first send after the iPhone was idle no longer fails.** When the iPhone had been idle for a few minutes, the first AirDrop often failed and the second took long to connect. The Mac's announcement of its services reached the iPhone after its network announcement, so the iPhone set up the link to the Mac the slow way, and AirDrop's route check then failed. The driver now sends macOS's announcement first whenever its content changes, and in the slots macOS allows it.
+Nothing changes unless you add the new flags: by default the driver behaves like 0.6.0-beta.4.
 
-**Bluetooth**
-- **The Mac notices the iPhone's Bluetooth changes at once** (BTLEAdvFixup). `bluetoothd` asks the controller to report each device only once until the scan restarts. Intel controllers filter by address only, so when the iPhone changed what it advertises (for example to ask the Mac for a link), the Mac didn't see it until the next scan restart, up to about 10 s later, and sometimes not until Bluetooth was turned off and on. A Mac's own Bluetooth chip filters by content. BTLEAdvFixup now patches `bluetoothd` to scan without the duplicate filter, on every supported build. `-btleadvkeepdup` leaves the filter as it is.
+**AirDrop (experimental, `itlawdlsched=1`)**
+- **AirDrop timing as on a real Mac.** Without the flag the listener stays on its channel all the time and ignores the plan macOS makes for AirDrop. With `itlawdlsched=1` the driver follows that plan: it asks the firmware for airtime just before each of macOS's slots on the AirDrop channel, takes part in the AirDrop clock election by IO80211's own rules, and keeps its clock in step with the elected device's. It also tells other devices the schedule it really follows, listens and sends its sync frame on channel 6 in the slot every Apple device spends there, and gives macOS the availability-window events and AirDrop packet counts it uses to switch into AirDrop's fast mode. New keys under `ITLAWDLSched*`. `itlawdlsched=3` adds diagnostics for bug reports.
+- **With it, the first send after the iPhone was idle no longer fails.** When the iPhone had been idle for a few minutes, the first AirDrop often failed and the second took long to connect. The Mac's announcement of its services reached the iPhone after its network announcement, so the iPhone set up the link to the Mac the slow way, and AirDrop's route check then failed. With the flag the driver sends macOS's announcement first whenever its content changes, in the slots macOS allows it.
+
+**Bluetooth (experimental, `-btleadvnodupfilter`)**
+- **The Mac notices the iPhone's Bluetooth changes at once.** `bluetoothd` asks the controller to report each device only once until the scan restarts. Intel controllers filter by address only, so when the iPhone changed what it advertises (for example to ask the Mac for a link), the Mac didn't see it until the next scan restart, up to about 10 s later, and sometimes not until Bluetooth was turned off and on. A Mac's own Bluetooth chip filters by content. With `-btleadvnodupfilter`, BTLEAdvFixup patches `bluetoothd` to scan without the duplicate filter, on every supported build.
 
 **Tools:** `tools/check-my-mac.pl` checks, on your own Mac, every piece of Apple code the kexts depend on, without sending anything in. It needs only the Perl that ships with macOS: no Command Line Tools, Kernel Debug Kit or installer. See [CHECK-MY-MAC](docs/CHECK-MY-MAC.md).
 
-**Removed:** the early scheduler experiments that never worked (timed firmware events, a P2P Device listener, and the session-protection variants before the follower).
-
-**Tested on** the project's hackintosh (Tahoe 26.7.1, AX211, the tested flag set, one iPhone): AirDrop both ways, including the first send after the iPhone was idle, with the same code as a research build. Not tested here: the Sequoia and Sonoma builds (built, and checked offline against those macOS versions' files with `check-my-mac.pl`).
+**Tested on** the project's hackintosh (Tahoe 26.7.1, AX211, the tested flag set plus both new flags, one iPhone): AirDrop both ways, including the first send after the iPhone was idle, with the same code as a research build. Not tested here: the Sequoia and Sonoma builds (built, and checked offline against those macOS versions' files with `check-my-mac.pl`).
 
 ## 0.6.0-beta.4
 

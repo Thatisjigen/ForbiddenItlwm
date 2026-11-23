@@ -182,7 +182,7 @@ static_assert(sizeof(dupFilterFind) == sizeof(dupFilterReplace), "patch size");
 #endif
 
 // Every patch this build tries, in the order they're applied. scanningOnly ones are skipped with -btlenoscan.
-// dupFilter ones are also skipped with -btleadvkeepdup.
+// dupFilter ones are applied only with -btleadvnodupfilter (experimental).
 struct Patch { const uint8_t *find; const uint8_t *replace; size_t size; bool scanningOnly; bool dupFilter; };
 #define BTLEADV_PATCH(f, r, scan) Patch{f, r, sizeof(f), scan, false}
 static const Patch kPatches[] = {
