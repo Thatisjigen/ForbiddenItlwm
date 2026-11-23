@@ -48,6 +48,18 @@ An iPhone doesn't stay on one channel. Its sync frames carry a 16-slot channel s
 - **The send gate:** frames for the iPhone go out only while it is on our channel. While it is idle, they go only at the start of its availability windows. Before the gate, frames sent while the iPhone was away were lost. The losses made QUIC slow itself down, so Mac → iPhone ran at a fraction of the link speed.
 - **Peer pause:** while the iPhone is away, its firmware station queue is paused, so the firmware doesn't burn retries on it.
 
+### 3b. With `itlawdlsched=1`: following macOS's plan (experimental)
+
+Without the flag, the listener is on its channel all the time and the firmware decides when the radio serves it and when it serves the station. The Mac advertises "always on the listener's channel" and ignores the plan macOS's peer manager makes. With `itlawdlsched=1` the driver acts on that plan, as Apple's drivers do:
+- **macOS's plan:** IO80211's peer manager plans 16 slots of 64 TU (about 65 ms) for AirDrop, the Mac's Wi-Fi and channel 6, and hands the sequence to the driver (`setAWDL_*`). The driver keeps the listener on the channel macOS chose, falling back to its own choice if macOS names nothing usable.
+- **Airtime on request:** a second firmware context (a P2P Device context in the listener's binding) asks for session protection shortly before each run of AirDrop slots (`itlschedlead`, 12 ms by default) and ends it with the run, with no gap between back-to-back runs. This is the firmware's own mechanism for timed airtime; the Intel firmware has no AWDL scheduler.
+- **Channel 6:** in the slot every Apple device spends on channel 6, a channel-6 context listens, sends the sync frame and passes group data to `awdl0`. That slot is advertised as the station's, since unicast there couldn't be acknowledged.
+- **Advertising and timing:** the sync frames carry the schedule the driver really follows (plus free slots it fills while data flows), go out only inside an AirDrop slot so their timing is fresh, and follow the elected master's clock. The election itself follows IO80211's rules, on the time each frame was on air.
+- **What macOS expects from a driver:** availability-window start and end events, peer cache control, the AWDL packet counters macOS reads through its peer manager (at offsets checked per macOS build, so only on verified builds), the station's traffic counts its scheduler uses to size Wi-Fi time, the announcement (MI) first after it changes, and multicast held to each device's availability windows.
+- **Safety:** it starts once AWDL has been on and the listener settled for 3 s, stops while macOS has AWDL off, and resumes after a firmware restart.
+
+`ITLAWDLSched*` keys show its state; `itlawdlsched=3` adds diagnostics. The code is in `itlwm/hal_iwx/ItlIwx.cpp`, with the election and session rules in `include/AWDLElection.hpp` and `include/AWDLSessionFollow.hpp` (host-tested).
+
 ### 4. Speed: Block Ack and aggregation
 
 With `-itlawdlcoexbatx` the driver negotiates Block Ack with the iPhone and lets the firmware send A-MPDU aggregates at VHT 80 MHz two-stream rates. Receive Block Ack works too. `-itlawdlcaps` advertises the matching capabilities, so the iPhone sends at the same rates.
@@ -60,6 +72,7 @@ The `awdl0` transmit pool is 2048 packets. With the 128 used during bring-up, lo
 - patches `bluetoothd`'s pages in memory as they're validated (the way BlueToolFixup does) to take the "supported" path
 - keeps APFS's integrity check working on those pages (#62). The patches live in the copy of the file that macOS keeps in memory. `bluetoothd` is stored compressed, and APFS checks it in 16 KB blocks: when macOS drops one page of a block and reads it again, the check also covers the block's pages that are still in memory, patched, and fails, so `bluetoothd` crashed. BTLEAdvFixup keeps each patched page's original bytes (BlueToolFixup's too, since its hook runs around BlueToolFixup's) and hooks APFS's `apfs_vnop_verify`, the function decmpfs calls for this check, to give it a copy with the original bytes. The pages in memory are never changed by the check
 - adjusts outgoing HCI commands, such as the random address of each advertising set, and takes over IntelBTPatcher's fix-up before the first scan (IntelBTPatcher must be disabled, since Lilu panics if two plugins hook the same function)
+- with `-btleadvnodupfilter` (experimental), patches `bluetoothd` so it scans without the duplicate filter. Intel controllers filter duplicates by address only, so an iPhone's changed advertisement (asking the Mac for a link) was reported only at the next scan restart, up to about 10 s later
 - takes over IntelBTPatcher's fix for new LE HID devices (a mouse, a keyboard) that connect but never finish bonding: the Intel controller never sends LE Data Length Change on Tahoe, so `bluetoothd` waits for it forever ("No database exists"). BTLEAdvFixup hooks the controller's interrupt IN pipe, sends every LE Read Remote Features command twice more, and rewrites the two duplicate completions into the PHY Update Complete and LE Data Length Change events `bluetoothd` is missing. Devices that are already bonded skip discovery and never trigger this.
 
 Its byte patterns are exact bytes from specific `bluetoothd` builds: 25G241's (26.7.1) and 25G342's (26.7.3) for the Tahoe build, 24H241's (15.8.3) for the Sequoia build, which also match 15.8 (24H23) and 15.8.2 (24H232) unchanged, and 23J631's (14.8.9) for the Sonoma build. 26.7.2 (25G332) matches 26.7.3 except at its extendedConnection site, whose bytes get their own, longer pattern: the window covers the instructions on either side, so it identifies that build by itself. Each set is tried on every page, and only matches its own build. The four sites and the edits are the same on every build; only addresses and, on Sequoia, two vtable slots and one struct offset differ. On another build the patterns may not match, and then nothing is changed. `tools/compat/check_compat.sh` reports whether they match a tester's `bluetoothd`.
@@ -116,7 +129,7 @@ macOS publishes each interface's link-quality metric as `State:/Network/Interfac
 - **Cold iPhone → Mac connects** spend their time in AWDL service discovery, before any data connection:
   - The iPhone and Mac exchange service records in action frames.
   - While the iPhone is idle it sits on our channel in only a few slots, and the Mac's radio is often on the station's channel then.
-  - The current reading is that the firmware's time-sharing favours the station while the listener is idle. Improving this is the main open work.
+  - The current reading is that the firmware's time-sharing favours the station while the listener is idle. The experimental scheduler (3b) gives the listener its slots on request instead; it fixes the failed first send after the iPhone was idle, and faster cold connects are the next goal.
 
 ## Things worth knowing
 
@@ -139,7 +152,7 @@ These each took one or more test boots to learn.
 | `ForbiddenItlwm/AirportItlwmV2.cpp` | The macOS side: interface setup, Skywalk queues and pools, sync frame bridge, data in and out of `awdl0` |
 | `ForbiddenItlwm/AirportAWDLInterface.hpp`, `AWDLInactiveProtocol.hpp`, `AWDLRequestedValue.hpp` | `ItlAWDLInterface` and its stored settings |
 | `itlwm/hal_iwx/ItlIwx.cpp` | The radio side: the listener context, country handling, receive and transmit, Block Ack, the send gate |
-| `include/AWDL*.hpp` | Frame parsing and building, data framing, peer schedule, regulatory rules. Mostly host-testable |
+| `include/AWDL*.hpp` | Frame parsing and building, data framing, peer schedule, election and session rules, regulatory rules. Mostly host-testable |
 | `include/Airport/macOS26/` | Tahoe's native class declarations, for 25G241 |
 | `include/Airport/macOS15/` | Sequoia's native class declarations, for 15.8 (24H23, 24H241) |
 | `include/Airport/macOS14/`, `include/Airport/*.h` | Sonoma's AWDL declarations (generated from 23J631), and the non-WCL base classes it builds on |
@@ -151,5 +164,6 @@ These each took one or more test boots to learn.
 | `ForbiddenItlwm/AWDLBuildGuard.cpp`, `include/AWDLBuildGuard.hpp` | The macOS build check |
 | `tools/awdl_*.py` | Readers for the driver's registry diagnostics |
 | `tools/compat/` | Tester scripts |
+| `tools/check-my-mac.pl`, `tools/gen_check_my_mac.py` | Collects, on a user's Mac, what's needed to support a new macOS build; the generator of its tables ([CHECK-MY-MAC](CHECK-MY-MAC.md)) |
 
 Everything else (`itl80211`, `itlwm/hal_iwm`, `itlwm/hal_iwn`, `include/HAL`) is AirportItlwm's normal Wi-Fi driver.

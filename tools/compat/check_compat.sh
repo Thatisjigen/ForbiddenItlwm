@@ -486,6 +486,14 @@ if [ -n "$MARKER" ]; then
     for f in itlawdlintcoal itlawdltxqueue; do
         case " $ARGS" in *" $f="*) ;; *) MISSING="$MISSING $f=";; esac
     done
+    # The experimental flags from docs/BOOT-FLAGS.md: off unless set, named so reports show them.
+    EXPERIMENTAL=""
+    for t in $ARGS; do
+        case "$t" in itlawdlsched=*|itlsched*|-itlsched*|-btleadvnodupfilter) EXPERIMENTAL="$EXPERIMENTAL $t";; esac
+    done
+    [ -n "$EXPERIMENTAL" ] && info "Experimental boot flags set:$EXPERIMENTAL. Mention them when you report a result."
+    # macOS ignores the whole boot-args line when it is 1024 characters or longer.
+    [ "${#ARGS}" -ge 1024 ] && fail "boot-args is ${#ARGS} characters long; macOS ignores all of it from 1024. Shorten it."
     if [ -z "$MISSING" ]; then
         pass "All AirDrop boot flags of the tested set are set."
     else

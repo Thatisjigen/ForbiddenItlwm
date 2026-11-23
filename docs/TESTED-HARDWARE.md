@@ -20,8 +20,8 @@ Kexts used with ForbiddenItlwm:
 
 | Kext | Version |
 | --- | --- |
-| ForbiddenItlwm | 0.1.0-beta1, 0.2.0-beta1, 0.4.0-beta1's changes in development builds, 0.5.0-test1, 0.6.0-alpha.1's changes in a development build, 0.6.0-beta.1, 0.6.0-beta.2, 0.6.0-beta.3 and 0.6.0-beta.4 (Tahoe, listener on 149) |
-| BTLEAdvFixup | 0.8.0, 0.8.2's changes in a development build, 0.9.0, 0.9.1, 0.9.2, 0.9.3 and 0.9.4 (Tahoe) |
+| ForbiddenItlwm | 0.1.0-beta1, 0.2.0-beta1, 0.4.0-beta1's changes in development builds, 0.5.0-test1, 0.6.0-alpha.1's changes in a development build, 0.6.0-beta.1, 0.6.0-beta.2, 0.6.0-beta.3 and 0.6.0-beta.4 (Tahoe, listener on 149). The experimental AirDrop scheduler (`itlawdlsched=1`) in research builds and in 0.7.0-alpha.1's code |
+| BTLEAdvFixup | 0.8.0, 0.8.2's changes in a development build, 0.9.0, 0.9.1, 0.9.2, 0.9.3 and 0.9.4 (Tahoe); `-btleadvnodupfilter` in 0.7.0-alpha.1's code |
 | Lilu | 1.7.2 |
 | IntelBluetoothFirmware | 2.5.1 |
 | BlueToolFixup | 2.7.3 |
@@ -66,7 +66,7 @@ Which macOS builds AirDrop starts on, and what is known about each. Each macOS v
 | Sonoma | Other 14.4 to 14.8.x builds | The Sonoma kext runs as plain Wi-Fi; AirDrop stays off |
 | Any other build | | AirDrop stays off and normal Wi-Fi works |
 
-The driver checks the build itself when it starts. On a build it doesn't know, it keeps AirDrop off instead of risking a kernel panic. BTLEAdvFixup's patterns are exact bytes from specific `bluetoothd` builds (26.7.1, and 26.7.2 and 26.7.3, which share theirs, on Tahoe; 15.8, 15.8.2 and 15.8.3 on Sequoia; 14.8.9 on Sonoma). On other builds, `tools/compat/check_compat.sh` shows whether they still match.
+The driver checks the build itself when it starts. On a build it doesn't know, it keeps AirDrop off instead of risking a kernel panic. BTLEAdvFixup's patterns are exact bytes from specific `bluetoothd` builds (26.7.1, and 26.7.2 and 26.7.3, which share theirs, on Tahoe; 15.8, 15.8.2 and 15.8.3 on Sequoia; 14.8.9 on Sonoma). On other builds, `tools/compat/check_compat.sh` shows whether they still match, and the output of `tools/check-my-mac.pl`, posted in [discussion #98](https://github.com/retropineaple/ForbiddenItlwm/discussions/98), gives what's needed to add the build.
 
 ## User reports
 
@@ -103,7 +103,7 @@ Users on Reddit and GitHub have reported:
 | Intel AX201 (Lenovo AIO, Tiger Lake) | macOS Sequoia 15.8.2, with 0.6.0-alpha.1 in China: iPhone → Mac about 40 MB/s, Mac → iPhone 27–31 MB/s, block ack agreed (issue #24). With 0.5.4-beta.2: Handoff works, but its badge shows an old device name; Instant Hotspot doesn't (issue #40) |
 | Intel AX201 | macOS Sequoia 15.8.1, with 0.6.0-alpha.1, Mac's Wi-Fi and the listener both on 149: Mac → iPhone 28–30 MB/s, iPhone → Mac 36 MB/s, block ack agreed (issue #24) |
 | Intel AX211 (Dell XPS) | macOS 26.7.3, with 0.6.0-alpha.1 in the UK, router on 44: iPhone → Mac works on 44 (it didn't on 0.5.4); Mac → iPhone stalls (issues #17, #63, open) |
-| Intel AX201 (CNVi, Alder Lake or newer) | macOS 26.7.3: AirDrop with two iPads works both ways (iPad → Mac 24.5 MB/s on 0.6.0-beta.2); with an iPhone 17 Pro it fails, also on 0.6.0-beta.2 (issue #45, open) |
+| Intel AX201 (CNVi, Alder Lake or newer) | macOS 26.7.3: AirDrop with two iPads works both ways (iPad → Mac 24.5 MB/s on 0.6.0-beta.2); with an iPhone 17 Pro it fails, also on 0.6.0-beta.2. With 0.6.0-beta.3 the iPhone uses channel 44 and the iPad 149: with the iPads off, iPhone → Mac worked once, slowly, with the listener on 6; Mac → iPhone failed (issue #45, open) |
 | Intel AX210 | Sonoma 14.8.9, with 0.5.4-beta.2: the listener starts, but `awdl0` isn't created (issue #55) |
 | Intel AX200 | Sonoma 14.8.9, with the fix for #55 ([PR #77](https://github.com/retropineaple/ForbiddenItlwm/pull/77), in 0.6.0-beta.3): `awdl0` is created, AirDrop works both ways at 5–7 MB/s, listener on 149 at 20 MHz |
 | Intel AX201 (MSI, Tiger Lake) | macOS 26.7.1, with 0.5.4-beta.2: transfers fail. With 0.6.0-beta.2 and the full tested set, router on 44 at 80 MHz: AirDrop works both ways, iPhone → Mac 16 MB/s, Mac → iPhone 12.9 MB/s (issue #53) |
@@ -111,7 +111,9 @@ Users on Reddit and GitHub have reported:
 | Intel AX211 (desktop) | macOS Sequoia: Wi-Fi and Bluetooth work, AirDrop and Handoff don't (issue #35, open) |
 | Intel AX210 (desktop, PCIe adapter) | macOS Sequoia 15.8.3, with 0.6.0-beta.2: AirDrop both ways and Universal Clipboard with a Mac and with an iPad. An iPhone 17 waits while the Mac is awake, because the Mac holds block ack (issue #81, open) |
 | Intel AX201 (Comet Lake) | macOS 26.7.3 build 25G416 (beta), with 0.6.0-beta.2 and `-itlawdlanybuild`: AirDrop works both ways, iPhone → Mac 9.7 MB/s. With `itlwm_he=1`, Wi-Fi dropped as soon as an AirDrop started (issue #83, fixed in 0.6.0-beta.4, not yet confirmed by the reporter) |
-| Intel Wireless-AC 9461 (CNVi, Ice Lake) | macOS 26.7.3, with 0.6.0-beta.2: Wi-Fi works, and the AirDrop listener runs on 149 and hears an Apple device; transfers not reported yet (issue #87, open) |
+| Intel Wireless-AC 9461 (CNVi, Ice Lake) | macOS 26.7.3, with 0.6.0-beta.2: Wi-Fi works, and the AirDrop listener runs on 149 and hears an Apple device. With 0.6.0-beta.3 on a 2.4 GHz network: one stream reported correctly, but the listener sat on channel 6 and two Macs weren't listed (issue #87, open) |
+| Intel AX101 (CNVi, `so-a0-hr-b0` firmware) | macOS 26.7.3, with 0.6.0-beta.4: the firmware restarts every few seconds with the AirDrop flags on, in both listener modes, so transfers don't finish (issue #97, open) |
+| Intel Wireless-AC 7265 | macOS 26.7.3, with 0.6.0-beta.3: Wi-Fi works; no AirDrop, since the card runs on the part of the driver without AirDrop code and its Bluetooth 4.2 has no extended advertising (issue #95) |
 
 The project hasn't verified these reports. The platforms, and which features were tried, vary between them.
 

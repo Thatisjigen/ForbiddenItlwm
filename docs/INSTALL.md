@@ -9,6 +9,7 @@ This beta has been tested on one hackintosh: an HP Envy x360 13-bf with an Intel
   - **Sequoia:** `24H23` (15.8) and `24H241` (15.8.3) were checked offline, and `24H32` (15.8.1) and `24H232` (15.8.2) run those verified kernels. Use the Sequoia kexts. AirDrop transfers on Sequoia need 0.5.1-test1 or later.
   - **Sonoma (test build):** `23J631` (14.8.9) was checked offline. Use the Sonoma kexts. On other Sonoma 14.4+ builds the Sonoma kext runs as plain Wi-Fi.
   - On any other build the driver keeps AirDrop off and works as plain Wi-Fi.
+  - If your build isn't listed, run `perl tools/check-my-mac.pl` and paste its output in [discussion #98](https://github.com/retropineaple/ForbiddenItlwm/discussions/98), so support can be added ([CHECK-MY-MAC](CHECK-MY-MAC.md)).
 - **Use the kexts for your macOS version.** ForbiddenItlwm and BTLEAdvFixup are built separately for Tahoe, Sequoia and Sonoma. A ForbiddenItlwm built for the other version refuses to start, and BTLEAdvFixup's patterns won't match.
 - **Revert OCLP Wi-Fi root patches.** ForbiddenItlwm uses the Wi-Fi stack that ships with macOS. If you applied OpenCore Legacy Patcher's "Modern Wireless" root patches for an older AirportItlwm, revert them first. Also remove what that setup added to config.plist: a `Kernel → Block` entry for `com.apple.iokit.IOSkywalkFamily`, and injected `IOSkywalkFamily.kext` or `IO80211FamilyLegacy.kext`.
 - **Run the checker:** `bash tools/compat/check_compat.sh`. It tells you whether your card and Bluetooth are likely to work.
@@ -101,7 +102,7 @@ All of this goes on the **USB stick's** EFI.
 
    Set `IntelBTPatcher.kext` to `Enabled` = false if you have it. This is required. Make sure no `AirportItlwm.kext` or `itlwm.kext` entry is still enabled.
 
-3. **Boot arguments:** add the flags from [BOOT-FLAGS.md](BOOT-FLAGS.md) to `boot-args` under `NVRAM` → `Add` → `7C436110-AB2A-4BBB-A880-FE41995C9F82`. Keep your existing arguments. Because OpenCore only writes NVRAM keys listed under `Delete`, check that `boot-args` is listed there for the same GUID.
+3. **Boot arguments:** add the tested set from [BOOT-FLAGS.md](BOOT-FLAGS.md) to `boot-args` under `NVRAM` → `Add` → `7C436110-AB2A-4BBB-A880-FE41995C9F82`. Keep your existing arguments. Because OpenCore only writes NVRAM keys listed under `Delete`, check that `boot-args` is listed there for the same GUID. The experimental flags in BOOT-FLAGS are optional, for testers. macOS ignores `boot-args` longer than 1023 characters, so keep the line shorter than that.
 
 4. **Validate:** `plutil -lint config.plist`, and `ocvalidate` if you have it.
 
@@ -123,14 +124,14 @@ All of this goes on the **USB stick's** EFI.
 
 ## Before a macOS update
 
-Boot once without `-btleadv` (or with BTLEAdvFixup disabled), then update. While BTLEAdvFixup is active, `bluetoothd`'s patched pages are what the system reads, and an incremental update that checks the file can fail. If the update still fails, disable BlueToolFixup and BTLEAdvFixup too for the update (#78): BlueToolFixup patches `bluetoothd` the same way, whatever the flags. Then check that the new build is supported before turning `-btleadv` back on: see [the macOS builds](TESTED-HARDWARE.md#macos-builds).
+Boot once without `-btleadv` (or with BTLEAdvFixup disabled), then update. While BTLEAdvFixup is active, `bluetoothd`'s patched pages are what the system reads, and an incremental update that checks the file can fail. If the update still fails, disable BlueToolFixup and BTLEAdvFixup too for the update (#78): BlueToolFixup patches `bluetoothd` the same way, whatever the flags. Then check that the new build is supported before turning `-btleadv` back on: see [the macOS builds](TESTED-HARDWARE.md#macos-builds). If it isn't listed, run `perl tools/check-my-mac.pl` on the new build and post the output in [discussion #98](https://github.com/retropineaple/ForbiddenItlwm/discussions/98).
 
 ## Uninstalling
 
 On the stick (or your EFI, if you moved it there):
 1. Remove `ForbiddenItlwm.kext` and `BTLEAdvFixup.kext`, and their `Kernel` → `Add` entries.
 2. Put `AirportItlwm.kext` back.
-3. Remove the `-itlawdl*`, `itlawdl*` and `-btleadv` boot flags.
+3. Remove the `-itlawdl*`, `itlawdl*`, `itlsched*` and `-btleadv*` boot flags.
 4. Reboot.
 
 The driver writes nothing to disk. BTLEAdvFixup patches `bluetoothd` in memory only.

@@ -45,7 +45,7 @@ Users also report **AirPlay** working over this driver, from an iPad to the hack
 
 On any other build the driver keeps AirDrop off and works as plain Wi-Fi. [docs/TESTED-HARDWARE.md](docs/TESTED-HARDWARE.md) has every build and report.
 
-**Cards:** Intel Wi-Fi 6 and 6E cards. The project tests the AX211; users report the AX201, AX210, AX200 and an AX1690i working. Older 7000, 8000 and 9000-series cards (such as the 9260, and the 9560 on 8th and 9th-gen Intel boards) run on a part of the driver without AirDrop code, so they get normal Wi-Fi only. The 9560, 9461 and 9462 on 10th-gen (Ice Lake, Comet Lake) and newer boards run on the newer part, which has the AirDrop code; one is being tested ([#87](https://github.com/retropineaple/ForbiddenItlwm/issues/87)). `check_compat.sh` tells which part your card uses.
+**Cards:** Intel Wi-Fi 6 and 6E cards. The project tests the AX211; users report the AX201, AX210, AX200 and an AX1690i working. Older 7000, 8000 and 9000-series cards (such as the 7265, the 9260, and the 9560 on 8th and 9th-gen Intel boards) run on a part of the driver without AirDrop code, so they get normal Wi-Fi only ([#37](https://github.com/retropineaple/ForbiddenItlwm/issues/37)). The 9560, 9461 and 9462 on 10th-gen (Ice Lake, Comet Lake) and newer boards run on the newer part, which has the AirDrop code; one is being tested ([#87](https://github.com/retropineaple/ForbiddenItlwm/issues/87)). On one AX101 the firmware keeps restarting with AirDrop on ([#97](https://github.com/retropineaple/ForbiddenItlwm/issues/97), being investigated). `check_compat.sh` tells which part your card uses.
 
 **No OCLP Wi-Fi patches.** ForbiddenItlwm needs macOS's own Wi-Fi stack. If you used OpenCore Legacy Patcher's "Modern Wireless" root patch for an older AirportItlwm, revert it, and also remove what it added to `config.plist` (see [INSTALL](docs/INSTALL.md#before-you-start)). Left in place, they stop Wi-Fi from starting.
 
@@ -65,7 +65,7 @@ Read-only: it changes nothing and sends nothing anywhere. More in [tools/compat]
 
 The checker shows your country and whether channels 149 and 44 are open; [TROUBLESHOOTING](docs/TROUBLESHOOTING.md#the-listener-is-on-channel-6-or-countrylearned-is-no) explains the rest.
 
-**Your macOS build.** `perl tools/check-my-mac.pl` checks, on your Mac, every piece of Apple code the kexts rely on, and says whether your build matches. It reads two system files and sends nothing; paste its output when you report a build that isn't listed. More in [CHECK-MY-MAC](docs/CHECK-MY-MAC.md).
+**Your macOS build isn't supported yet?** Run `perl tools/check-my-mac.pl` and paste its output in [discussion #98](https://github.com/retropineaple/ForbiddenItlwm/discussions/98). It reads the Apple code the kexts rely on, on your Mac, and reports what's needed to add support for your build, so you don't have to send in system files. It sends nothing itself. More in [CHECK-MY-MAC](docs/CHECK-MY-MAC.md).
 
 ## Install
 
@@ -89,7 +89,7 @@ Please report what you find, working or not, in a [GitHub issue](https://github.
 ## Known limitations
 
 - **Mac → iPhone can still be slower than iPhone → Mac** on some setups ([#24](https://github.com/retropineaple/ForbiddenItlwm/issues/24), [#63](https://github.com/retropineaple/ForbiddenItlwm/issues/63)). 0.6.0's same-channel fix ([PR #47](https://github.com/retropineaple/ForbiddenItlwm/pull/47)) solved the main case (#22).
-- **Connects can be slow,** mostly iPhone → Mac.
+- **Connects can be slow,** mostly iPhone → Mac, and the first send after the iPhone was idle can fail (sending again works). The experimental AirDrop scheduler (`itlawdlsched=1`, see [BOOT-FLAGS](docs/BOOT-FLAGS.md#experimental)) fixes the failed first send on the project's hackintosh.
 - **Normal Wi-Fi loses some speed while AirDrop's listener runs** (they share the radio).
 - **A long list of boot flags,** sleep untested on the project's hackintosh (one user reports four of five nights fine; 0.6.0-beta.4 fixes the failed wake they caught, [#38](https://github.com/retropineaple/ForbiddenItlwm/issues/38)), tested with iPhones (users report iPads working, and AirDrop with a Mac as the other device, [#33](https://github.com/retropineaple/ForbiddenItlwm/issues/33), [#81](https://github.com/retropineaple/ForbiddenItlwm/issues/81)).
 - **Not working yet:**
@@ -108,11 +108,12 @@ What's planned: [ROADMAP](docs/ROADMAP.md).
 | Document | What's in it |
 | --- | --- |
 | [INSTALL](docs/INSTALL.md) | Building, OpenCore setup, first boot, uninstalling |
-| [BOOT-FLAGS](docs/BOOT-FLAGS.md) | The flags the beta needs |
+| [BOOT-FLAGS](docs/BOOT-FLAGS.md) | The flags the beta needs, and the experimental ones |
 | [TROUBLESHOOTING](docs/TROUBLESHOOTING.md) | When the iPhone can't see the Mac, it's slow, or Wi-Fi breaks |
 | [TESTED-HARDWARE](docs/TESTED-HARDWARE.md) | Every tested and reported machine, card and macOS build |
 | [ROADMAP](docs/ROADMAP.md) | What's being worked on and what's planned |
 | [HOW-IT-WORKS](docs/HOW-IT-WORKS.md) | How the driver gives macOS an AWDL radio |
+| [CHECK-MY-MAC](docs/CHECK-MY-MAC.md) | Sending in data so an unsupported macOS build can be added |
 | [tools/compat](tools/compat/README.md) | Compatibility checker, transfer measurement, hardware reports |
 | [CHANGELOG](CHANGELOG.md) | Releases |
 

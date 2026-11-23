@@ -39,8 +39,8 @@ Off by default; without them the driver behaves like 0.6.0-beta.4. Add them on t
 
 | Flag | Effect |
 | --- | --- |
-| `itlawdlsched=1` | The AirDrop scheduler: the driver follows macOS's AirDrop plan and clock, as a real Mac does (see the CHANGELOG). Fixes the failed first send after the iPhone was idle |
-| `itlawdlsched=3` | The scheduler plus its diagnostics (more I/O Registry keys under `ITLAWDLSched*`, firmware crash records in `ITLFwCrashRecords`). For bug reports |
+| `itlawdlsched=1` | The AirDrop scheduler: the driver follows macOS's AirDrop plan, channel and clock, as a real Mac does, and covers the channel-6 slot itself ([HOW-IT-WORKS](HOW-IT-WORKS.md#3b-with-itlawdlsched1-following-macoss-plan-experimental)). Fixes the failed first send after the iPhone was idle. It turns off the channel-6 search (`-itlawdlnosearch6`), which it no longer needs |
+| `itlawdlsched=3` | The scheduler plus its diagnostics: more I/O Registry keys under `ITLAWDLSched*`, firmware crash records in `ITLFwCrashRecords`, counts of AirDrop frames lost before reaching macOS, and `-itlawdlpmdebug`. For bug reports |
 | `itlschedlead=N` | With the scheduler: how early, in µs, the driver asks the firmware for each of macOS's slots (1000 to 20000, default 12000) |
 | `itlschedstartdelay=N` | With the scheduler: seconds it waits after AirDrop starts (0 to 60, default 3) |
 | `-btleadvnodupfilter` | BTLEAdvFixup turns off `bluetoothd`'s scan duplicate filter, so the Mac notices at once when the iPhone asks for a link, instead of up to about 10 s later |
@@ -68,8 +68,8 @@ These restore earlier behaviour, for A/B testing only. Leave them off.
 | `-itlawdlsameband` | Test (0.5.2): while the Mac's Wi-Fi is on 2.4 GHz, keep the listener on channel 6 instead of 149, so the radio doesn't time-share across bands. For setups where Wi-Fi keeps dropping with `-itlawdlcoexmulti` (#16) |
 | `-itlawdlsta44` | Test: while the Mac's own Wi-Fi is on channel 44 and the other device is seen on 44 too, keep the listener on 44 (at 80 MHz when allowed) instead of following the other device's 149 slots. For setups where the listener moves between 44 and 149 every few seconds (#68): the router on 44, and the other device on the same network. Confirmed with a MacBook Air M1 on an AX200; not tested with iPhones |
 | `-itlawdlnosamechprobe` | Turns off the same-channel fix for Mac → iPhone block ack ([PR #47](https://github.com/retropineaple/ForbiddenItlwm/pull/47)), on by default from 0.6.0. The old opt-in flag `-itlawdlcoexsamechprobe` is still accepted and changes nothing |
-| `-itlawdlfilterbysession` | Keeps the listener's promiscuous receive off only during a receive block-ack session, as before 0.6.0 (PR #57). From 0.6.0 it stays off while the iPhone's firmware station exists, which fixed stalled sends after the iPhone was idle. From the next release that applies only with `-itlawdlcoexmulti`; without it (the listener sharing the station's channel) the old rule is used, since the new one stopped Mac → iPhone there (#63), so this flag is then only needed with `-itlawdlcoexmulti` |
-| `-itlawdlnosearch6` | Turns off the search on channel 6: while no device's schedule has been heard, the listener spends 15 s of every minute on 6 to find a device that uses only 44 (#35). From the next release |
+| `-itlawdlfilterbysession` | Keeps the listener's promiscuous receive off only during a receive block-ack session, as before 0.6.0 (PR #57). From 0.6.0 it stays off while the iPhone's firmware station exists, which fixed stalled sends after the iPhone was idle. From 0.6.0-beta.3 that applies only with `-itlawdlcoexmulti`; without it (the listener sharing the station's channel) the old rule is used, since the new one stopped Mac → iPhone there (#63), so this flag is then only needed with `-itlawdlcoexmulti` |
+| `-itlawdlnosearch6` | Turns off the search on channel 6: while no device's schedule has been heard, the listener spends 15 s of every minute on 6 to find a device that uses only 44 (#35). From 0.6.0-beta.3. `itlawdlsched=1` sets it |
 | `-itlawdlnoirconcurrent` | Doesn't use passive channels next to the Mac's own Wi-Fi (0.6.0's rule, taken from Linux's rule for Wi-Fi Direct interfaces) |
 | `-itlawdloverlap80` | Uses 80 MHz on the listener's channel even when the Mac's Wi-Fi uses the same 80 MHz block with another main channel, as before 0.6.0 (#26) |
 | `-itlawdlnosharedba` | Turns off block ack when the listener shares your Wi-Fi's channel (without `-itlawdlcoexmulti`), as before 0.5.4 |
@@ -84,7 +84,7 @@ Not needed for AirDrop. Listed so you know what they do if you find them in a gu
 | Flag | Effect |
 | --- | --- |
 | `-itlmccprobe` | Records what the laptop's ACPI methods report about the Wi-Fi country, in the I/O Registry. Diagnostic only |
-| `-itlawdlpmdebug` | Asks macOS's AWDL peer manager for its debug flags. Diagnostic only |
+| `-itlawdlpmdebug` | Asks macOS's AWDL peer manager for its debug flags. Diagnostic only. `itlawdlsched=3` sets it |
 | `-itlawdldatacopy` | Publishes `ItlwmAWDLDataCopyAttempts`/`Success`, a receive-copy probe from the bring-up. Diagnostic only |
 | `-itlawdlpoolprobe` | Probes the `awdl0` packet pools once at start and publishes the result. Diagnostic only |
 | `-btlenoscan` | BTLEAdvFixup: advertising fixes only, without the scanning changes. For comparison |

@@ -1,7 +1,8 @@
-# Check whether your macOS build is supported
+# Help add support for your macOS build
 
-`tools/check-my-mac.pl` checks, on your own Mac, every piece of Apple code that ForbiddenItlwm and BTLEAdvFixup depend
-on, and prints a short report. It replaces sending in system files: nothing is uploaded, copied or changed.
+If your macOS build isn't supported yet, `tools/check-my-mac.pl` collects what's needed to add it. It reads, on your own
+Mac, every piece of Apple code that ForbiddenItlwm and BTLEAdvFixup depend on, and prints a short report to paste in
+[discussion #98](https://github.com/retropineaple/ForbiddenItlwm/discussions/98). It replaces sending in system files: nothing is uploaded, copied or changed.
 
 ## Run it
 
@@ -12,7 +13,7 @@ on, and prints a short report. It replaces sending in system files: nothing is u
    perl ~/Downloads/check-my-mac.pl
    ```
 
-3. Paste the whole output into the discussion thread.
+3. Paste the whole output in [discussion #98](https://github.com/retropineaple/ForbiddenItlwm/discussions/98).
 
 It needs nothing extra. Perl, `codesign`, `sw_vers` and `uname` come with every macOS, and you don't need the
 Command Line Tools, a Kernel Debug Kit or an installer. It runs in about a second and only reads two system files:
@@ -40,15 +41,16 @@ bluetoothd. It doesn't contain your user name, Mac name, serial number, network 
   then reads as invalid. That's expected, and the report says so. A broken signature without BTLEAdvFixup means the
   system files were modified, for example by OpenCore Legacy Patcher, so tell us if you use it.
 
-`RESULT: everything ... matches this build` means both kexts should work on your macOS build as far as these checks go.
-Anything else lists what differs.
+`RESULT: everything ... matches this build` means the code the kexts rely on is the same as on a supported build, so
+support can usually be added quickly. Anything else lists what differs, which is what we need to add it. Until a release
+adds your build, the driver keeps AirDrop off on it.
 
 ## Unsupported macOS versions (Ventura and older)
 
 The script also runs there. With no build to compare against it only reports what it measures, marked `(measured)`,
 and checks the imports against the Sonoma build. For a deeper look, add `--details report.txt`: it writes the full
 method lists of the IO80211 tables to that file (Apple's class and method names only, nothing about you), which you can
-attach to the discussion. This shows how far a port would be; it doesn't make that version supported.
+attach to your post in [discussion #98](https://github.com/retropineaple/ForbiddenItlwm/discussions/98). This shows how far a port would be; it doesn't make that version supported.
 
 ## For maintainers
 

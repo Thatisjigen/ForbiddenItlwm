@@ -96,7 +96,7 @@ Linux's driver reports the card's exact name, radio, firmware version and firmwa
 - **Wi-Fi card:** PCI IDs, the firmware the driver loaded, the driver's version and properties.
 - **Bluetooth:** the Intel controller's USB IDs and the controller summary.
 - **Loaded kexts:** the names and versions of third-party kexts.
-- **Boot flags:** only the AirDrop and Bluetooth ones.
+- **Boot flags:** only the AirDrop and Bluetooth ones, the experimental ones included.
 - **Wi-Fi interface:** supported channels, plus the current channel and width.
 - **Channel 149 and country:** whether the firmware has learned a country (the code itself only with `--include-country`), and the channels of nearby networks, without their names. On Linux, the state of channels 149 to 165.
 - **AirDrop driver:** its status counters, if its build is running.
