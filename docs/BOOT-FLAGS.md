@@ -1,8 +1,25 @@
 # Boot flags
 
-AirDrop is off unless its flags are set, so with none of them ForbiddenItlwm behaves like AirportItlwm. The beta needs a long list of flags. The tested set below is the one the project's results use, unless a result names other flags. The Tahoe, Sequoia and Sonoma builds use the same flags. Simpler defaults are planned.
+The Tahoe, Sequoia and Sonoma builds use the same flags. Which ones you need depends on the version you install: 0.7.0-alpha.2 turns AirDrop's tested set on by itself, while 0.7.0-alpha.1 and earlier need the whole set in `boot-args`.
 
-## The tested set
+## From 0.7.0-alpha.2
+
+**AirDrop's Wi-Fi flags are on by default.** The tested set below (everything in it except `-btleadv`) is what the driver does without any flags, including `itlawdlintcoal=4` and `itlawdltxqueue=4096`. Only BTLEAdvFixup still needs its flag, so add this to `boot-args`:
+
+```
+-btleadv
+```
+
+- **Updating from an older release?** You don't have to change `boot-args`. Every flag of the old tested set is still read and changes nothing, so a leftover set works exactly like the defaults. A value you set yourself, such as `itlawdltxqueue=2048`, still wins.
+- **The experimental flags** (`itlawdlsched=1`, `-btleadvnodupfilter`, see [Experimental](#experimental)) are still off unless you add them.
+- **To turn AirDrop off** and keep normal Wi-Fi, add `-itlawdloff`. It wins over every other AirDrop flag, old ones and the experimental ones included, and the driver then behaves like AirportItlwm. `ItlwmAWDLBuildCheck` says "off: -itlawdloff". It doesn't touch BTLEAdvFixup: with `-btleadv` still set, the Mac and the iPhone can still list each other over Bluetooth, but transfers fail. Leave out `-btleadv` too to turn AirDrop off completely.
+- **To turn one flag of the set off,** add its name with `no` after `-itlawdl`: `-itlawdlnocoexmulti` turns `-itlawdlcoexmulti` off, for example. That wins over the flag itself. For troubleshooting only.
+- **To go back to the old rule,** add `-itlawdlnodefaults`: then only the flags that are set count, and with none of them ForbiddenItlwm behaves like AirportItlwm. `ItlwmAWDLDefaults` in the I/O Registry says which rule is in use.
+- **Before a macOS update,** boot without `-btleadv` and `-btleadvnodupfilter` as before (BTLEAdvFixup's own advice). The Wi-Fi defaults don't need to be turned off for an update.
+
+## Up to 0.7.0-alpha.1: the tested set
+
+AirDrop is off unless its flags are set, so with none of them ForbiddenItlwm 0.7.0-alpha.1 or earlier behaves like AirportItlwm. The tested set below is the one the project's results use, unless a result names other flags. From 0.7.0-alpha.2 these are the defaults (see above).
 
 Add all of these to `boot-args`, on one line, separated by spaces:
 
@@ -35,7 +52,7 @@ What each one does:
 
 ## Experimental
 
-**These flags work only from 0.7.0-alpha.1;** older versions ignore them. They're off by default, and without them the driver behaves like 0.6.0-beta.4. Add them on top of the tested set to try them, and say in your report that you did.
+**These flags work only from 0.7.0-alpha.1;** older versions ignore them. They're off by default, and without them the driver behaves like 0.6.0-beta.4 with its tested set (from 0.7.0-alpha.2 that set is the default). Add them on top of the tested set to try them, and say in your report that you did.
 
 **What the scheduler needs.** Check `ioreg -l -w0 | grep '"ITLAWDLSchedSp"'`: it says whether the scheduler is running, and if not, why.
 - **The card:** in 0.7.0-alpha.1, AX210-family cards only: the AX210, the AX211, the AX411 (AX1690i), and Intel CNVi cards on Alder Lake and newer boards. From 0.7.0-alpha.2, also the AX200 family: the AX200 and cards on Ice, Comet or Tiger Lake boards (AX201, AX101, 9560 class), whose firmware has the same session feature. The scheduler hasn't been tested on those cards yet, so please report your results. In 0.7.0-alpha.1 the flag still turns off the channel-6 search on them, so leave it off there with that release.
@@ -57,6 +74,7 @@ What each one does:
 | Flag | Effect |
 | --- | --- |
 | `itlawdltxpool=N` | Size of the `awdl0` transmit packet pool, 896 to 8192. Default 2048. Below that, long Mac → iPhone transfers can stall |
+| `-itlawdloff` | From 0.7.0-alpha.2: turns AirDrop off, whatever other flags are set; normal Wi-Fi works as with AirportItlwm. `ItlwmAWDLBuildCheck` reads "off: -itlawdloff". Useful to tell a Wi-Fi problem from an AirDrop one |
 | `-itlawdlanybuild` | Starts AirDrop on a macOS build the driver hasn't verified. **Risk of a kernel panic.** Only for testing a new build, from a USB stick. From 0.6.0-beta.2 it also turns on the announcement (`-itlawdlmitx`), so other devices can list the Mac and AirDrop can really be tested; before, it stayed off there and nothing was listed. `ItlwmAWDLMiState` then reads "on (unverified build, -itlawdlanybuild)". From 0.7.0-alpha.2 it makes any build the list doesn't cover work like a verified one, including a listed kernel on an unlisted build and an "expected" Sequoia kernel: the announcement copy and the AirDrop packet counters both run, each behind a runtime check (the announcement's pointer and contents; the counters only once macOS's `getPeerManager()` returns a real `IO80211AWDLPeerManager`). The scheduler runs as on a verified build. It doesn't override the check of Apple's AWDL function table, and it doesn't affect BTLEAdvFixup, whose patterns must match the build's `bluetoothd` |
 | `itlawdlbtcoex=N` | Forces firmware Bluetooth coexistence mode N (0 off, 1 NW, 2 BT, 3 Wi-Fi). From 0.6.0-beta.4, mode 1 (NW, with SYNC2SCO, HIGH_BAND_RET and MPLUT when the firmware has it, as Linux) is the default; it once fixed choppy Bluetooth audio during AirDrop as `itlawdlbtcoex=1`. Other modes are sent without modules. `ITLAWDLBtCoexMode` and `ITLAWDLBtCoexModules` show what was sent |
 | `itlwm_scanout=N` | Longer off-channel visits for full scans while connected, N from 120 to 480 TU. By default each visit is capped at 120 TU, which fits one passive (DFS) channel before the 120 TU back home, so a full 5 GHz scan while connected can take 8–14 s and the Wi-Fi menu and Settings panel wait on it. 240–360 brought it to about 4.7 s on an AX210; 480 was slower. The 120 TU home time, low-latency scans and scans while not connected are unchanged. `ItlwmScanMaxOutTU` shows the value in use (#64) |
@@ -70,6 +88,7 @@ These restore earlier behaviour, for A/B testing only. Leave them off.
 
 | Flag | Effect |
 | --- | --- |
+| `-itlawdlnodefaults` | From 0.7.0-alpha.2: the tested set isn't on by default any more, only the flags that are set count, as up to 0.7.0-alpha.1. With no AirDrop flags the driver then behaves like AirportItlwm |
 | `-itlawdlcoexnogate` | Turns off the send gate, which holds frames for the iPhone while its schedule has it away |
 | `-itlawdlcoexcalwait` | Waits for a 300-frame calibration of the iPhone's schedule instead of assuming it straight away |
 | `-itlawdlsameband` | Test (0.5.2): while the Mac's Wi-Fi is on 2.4 GHz, keep the listener on channel 6 instead of 149, so the radio doesn't time-share across bands. For setups where Wi-Fi keeps dropping with `-itlawdlcoexmulti` (#16) |

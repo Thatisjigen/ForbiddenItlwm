@@ -239,6 +239,9 @@ static void itlAwStartFire(OSObject *owner, IOTimerEventSource *sender);
 #if defined(ITL_AWDL_NATIVE)
 #include "AirportAWDLInterface.hpp"
 #include <Airport/IO80211ManagementBuffer.h>
+// The tested set, on by default from 0.7.0-alpha.2 (AWDLBuildGuard.cpp).
+extern bool itlAWDLFlag(const char *name);
+extern bool itlAWDLDefaults();
 #include <AWDLManagementFrame.hpp>
 #include <AWDLLocalSchedule.hpp>
 #include <AWDLPeerProbe.hpp>
@@ -360,7 +363,6 @@ void ItlAWDLInterface::acceptNativeRequests()
 {
     nativeState.accept = true;
     setProperty("ItlwmAWDLNativeUp", true);
-    int debug = 0;
     debugFlagsWanted = itlResFlag("-itlawdlpmdebug", 0x2);
     peerCacheAccept = itlResFlag("-itlpeercache", 0x1);
     setProperty("ITLAWDLPeerCache", peerCacheAccept ? "on, no requests yet" : "off");
@@ -368,7 +370,7 @@ void ItlAWDLInterface::acceptNativeRequests()
     // builds. On any other build the copy is off, unless -itlawdlanybuild is set (itlAWDLBuildForced): then an
     // unverified build works like a verified one (other devices list the Mac only with it), with the pointer still
     // range-checked and the copy validated (storeMasterIndication), but the layout not known to match.
-    const bool wanted = PE_parse_boot_argn("-itlawdlmitx", &debug, sizeof(debug));
+    const bool wanted = itlAWDLFlag("-itlawdlmitx");
     const bool verified = itlAWDLBuildVerified();
     const bool forced = !verified && itlAWDLBuildForced();
     masterIndicationEnabled = wanted && (verified || forced);
@@ -649,7 +651,7 @@ static bool itlAWDLTwoStreams()
     static int cached = -1;
     if (cached < 0) {
         int dummy = 0;
-        cached = itlAWDLBuildAllowed() && PE_parse_boot_argn("-itlawdlcaps", &dummy, sizeof(dummy)) &&
+        cached = itlAWDLBuildAllowed() && itlAWDLFlag("-itlawdlcaps") &&
             !PE_parse_boot_argn("-itlawdlcapshtonly", &dummy, sizeof(dummy)) ? 1 : 0;
     }
     return cached == 1 && gItlAWDLCardStreams != 1;
@@ -1378,7 +1380,7 @@ IOReturn ItlAWDLInterface::initializeNetwork(IO80211Controller *controller,
     int dataCopyArgument = 0;
     dataCopyProbeEnabled = PE_parse_boot_argn("-itlawdldatacopy", &dataCopyArgument, sizeof(dataCopyArgument));
     // -itlawdlcoexdata (normal Wi-Fi with the listener) needs delivery, transmit and the queues enabled too.
-    const bool coexData = PE_parse_boot_argn("-itlawdlcoexdata", &dataCopyArgument, sizeof(dataCopyArgument));
+    const bool coexData = itlAWDLFlag("-itlawdlcoexdata");
     dataDeliverEnabled = coexData || PE_parse_boot_argn("-itlawdldatarx", &dataCopyArgument, sizeof(dataCopyArgument));
     // The copy counters belong to the -itlawdldatacopy probe; published as zeros without it, they read as a
     // failure next to working delivery (#7). ItlwmAWDLTransportReady was never set true by anything and is
@@ -1545,10 +1547,11 @@ IOReturn ItlAWDLInterface::initializeNetwork(IO80211Controller *controller,
     noteQueueState("ItlwmAWDLQueueStateAtRegistration");
     int dataTransmit = 0;
     if (PE_parse_boot_argn("-itlawdldatatx", &dataTransmit, sizeof(dataTransmit)) ||
-        PE_parse_boot_argn("-itlawdlcoexdata", &dataTransmit, sizeof(dataTransmit))) {
-        int requestedQueue = 0;
-        if (PE_parse_boot_argn("itlawdltxqueue", &requestedQueue, sizeof(requestedQueue)) &&
-            requestedQueue >= int(transmitFrameDefault) && requestedQueue <= int(transmitFrameCapacity))
+        itlAWDLFlag("-itlawdlcoexdata")) {
+        // The tested set's itlawdltxqueue=4096 is the default; a value that is set still wins.
+        int requestedQueue = itlAWDLDefaults() ? 4096 : 0;
+        PE_parse_boot_argn("itlawdltxqueue", &requestedQueue, sizeof(requestedQueue));
+        if (requestedQueue >= int(transmitFrameDefault) && requestedQueue <= int(transmitFrameCapacity))
             transmitFrameCount = unsigned(requestedQueue);
         // A second initialisation of the same object frees the first array instead of leaking it (audit D03).
         if (transmitFrames) {
@@ -1574,7 +1577,7 @@ IOReturn ItlAWDLInterface::initializeNetwork(IO80211Controller *controller,
     }
     int queueEnable = 0;
     if (PE_parse_boot_argn("-itlawdlqueueenable", &queueEnable, sizeof(queueEnable)) ||
-        PE_parse_boot_argn("-itlawdlcoexdata", &queueEnable, sizeof(queueEnable))) {
+        itlAWDLFlag("-itlawdlcoexdata")) {
         for (auto queue : packetQueues)
             queue->enable();
         noteQueueState("ItlwmAWDLQueueStateAfterEnable");
@@ -1602,8 +1605,7 @@ IO80211VirtualInterface *AirportItlwm::createVirtualInterface(ether_addr *addres
             interface->release();
             return nullptr;
         }
-        int nativeUp = 0;
-        if (PE_parse_boot_argn("-itlawdlnativeup", &nativeUp, sizeof(nativeUp)))
+        if (itlAWDLFlag("-itlawdlnativeup"))
             interface->acceptNativeRequests();
         interface->setProperty("ItlwmAWDLInterfaceBuild", ITL_FORBIDDEN_BUILD);
         setProperty("ItlwmAWDLFactoryStage", "initialized");
@@ -2256,11 +2258,13 @@ bool AirportItlwm::init(OSDictionary *properties)
     fAWDLInterface = nullptr;
     int awdlBootValue = 0;
     // AirDrop only starts on a macOS build whose Wi-Fi stack was verified (AWDLBuildGuard.cpp).
-    awdlInterfaceTest = itlAWDLBuildAllowed() &&
-        PE_parse_boot_argn("-itlawdliface", &awdlBootValue, sizeof(awdlBootValue));
+    awdlInterfaceTest = itlAWDLBuildAllowed() && itlAWDLFlag("-itlawdliface");
     setProperty("ItlwmAWDLBuildCheck", itlAWDLBuildStatus());
+    // From 0.7.0-alpha.2: whether the tested set is on without its flags (check_compat.sh reads this).
+    setProperty("ItlwmAWDLDefaults", itlAWDLDefaults() ? "on: the tested set needs no Wi-Fi flags" :
+                "off (-itlawdlnodefaults): only the flags that are set count");
     awdlRawSamples = PE_parse_boot_argn("-itlawdlsamples", &awdlBootValue, sizeof(awdlBootValue));
-    awdlExtendFrames = PE_parse_boot_argn("-itlawdlelicit", &awdlBootValue, sizeof(awdlBootValue));
+    awdlExtendFrames = itlAWDLFlag("-itlawdlelicit");
     awdlCreateRequests = 0;
     awdlManagementInputEnabled = false;
     awdlManagementActive = 0;

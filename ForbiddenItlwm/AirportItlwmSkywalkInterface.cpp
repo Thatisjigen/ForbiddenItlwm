@@ -598,6 +598,7 @@ getMCS_INDEX_SET(struct apple80211_mcs_index_set_data *ad)
 }
 
 extern bool itlAWDLBuildAllowed();
+extern bool itlAWDLFlag(const char *name);
 extern int itlAWDLNoteCardStreams(const struct ieee80211com *ic);
 // -itlawdlcaps: answer the native stack's HT and VHT capability requests. Without them it
 // assumes one HT stream and no VHT, and advertises that to AWDL peers in TLV 7 and leaves out
@@ -606,8 +607,7 @@ static bool itlAWDLAdvertiseCaps()
 {
     static int cached = -1;
     if (cached < 0) {
-        int dummy = 0;
-        cached = itlAWDLBuildAllowed() && PE_parse_boot_argn("-itlawdlcaps", &dummy, sizeof(dummy)) ? 1 : 0;
+        cached = itlAWDLBuildAllowed() && itlAWDLFlag("-itlawdlcaps") ? 1 : 0;
     }
     return cached == 1;
 }

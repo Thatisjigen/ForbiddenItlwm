@@ -235,6 +235,10 @@ fi
 MARKER=$(ioreg -l -w0 2>/dev/null | sed -n 's/.*"ItlwmAWDLInterfaceBuild" = "\([^"]*\)".*/\1/p' | head -1)
 if [ -n "$MARKER" ]; then
     pass "The AirDrop build is running: $MARKER."
+    # From 0.7.0-alpha.2, -itlawdloff turns AirDrop off on purpose: the driver then works as plain Wi-Fi.
+    case "$(ioreg -l -w0 2>/dev/null | sed -n 's/.*"ItlwmAWDLBuildCheck" = "\([^"]*\)".*/\1/p' | head -1)" in
+        "off: -itlawdloff") warn "AirDrop is turned off by -itlawdloff (normal Wi-Fi only). Remove it from boot-args to use AirDrop.";;
+    esac
 else
     info "ForbiddenItlwm's AirDrop interface isn't running (no ItlwmAWDLInterfaceBuild key). That's expected before installing it."
 fi
@@ -515,6 +519,13 @@ if [ -n "$MARKER" ]; then
     [ -n "$SIMULATION" ] && warn "Test-only simulation flags set:$SIMULATION. They fake the Wi-Fi width or AirDrop's channel; remove them for normal use."
     # macOS ignores the whole boot-args line when it is 1024 characters or longer.
     [ "${#ARGS}" -ge 1024 ] && fail "boot-args is ${#ARGS} characters long; macOS ignores all of it from 1024. Shorten it."
+    # From 0.7.0-alpha.2 the driver turns the Wi-Fi part of the tested set on by itself (ItlwmAWDLDefaults); only
+    # BTLEAdvFixup's -btleadv is still needed. Leftover flags from older releases change nothing.
+    DEFAULTS=$(ioreg -l -w0 2>/dev/null | sed -n 's/.*"ItlwmAWDLDefaults" = "\([^"]*\)".*/\1/p' | head -1)
+    case "$DEFAULTS" in
+        on*) info "This driver turns the tested set's Wi-Fi flags on by itself; only -btleadv is still needed."
+             case "$MISSING" in *-btleadv*) MISSING=" -btleadv";; *) MISSING="";; esac;;
+    esac
     if [ -z "$MISSING" ]; then
         pass "All AirDrop boot flags of the tested set are set."
     else

@@ -110,6 +110,9 @@
 #include "../../ForbiddenItlwm/WCL/WCL.hpp"
 #endif
 #include "ItlIwx.hpp"
+// The tested set, on by default from 0.7.0-alpha.2 (AWDLBuildGuard.cpp).
+extern bool itlAWDLFlag(const char *name);
+extern bool itlAWDLDefaults();
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <FwData.h>
@@ -17139,7 +17142,8 @@ static void awdlSchedSpPublish()
                      "handle %llu (last %u); first session at %llu ms, first good start at %llu ms uptime; failed starts %u",
                      (unsigned long long)(awdlSchedStartDelayUS / 1000000ULL),
                      ms(awdlSchedSpFirstTickUS),
-                     (unsigned long long)(awdlSchedFollowStartedUS && awdlSchedSpFirstTickUS ?
+                     (unsigned long long)(awdlSchedFollowStartedUS && awdlSchedSpFirstTickUS &&
+                                          awdlSchedFollowStartedUS >= awdlSchedSpFirstTickUS ?
                                           (awdlSchedFollowStartedUS - awdlSchedSpFirstTickUS) / 1000ULL : 0),
                      awdlSchedSafe ? "on" : "off", ms(awdlSchedSettledAtUS),
                      awdlSchedSettleWaits, awdlSchedRestarts, awdlSchedResumes, ms(awdlStartBlockUS[1]),
@@ -17456,7 +17460,9 @@ awdlSchedSpTick(struct iwx_softc *sc)
     const uint64_t now = awdlUptimeUS();
     if (!awdlSchedSpNextUS) {
         awdlSchedSpNextUS = now + awdlSchedStartDelayUS;
-        awdlSchedSpFirstTickUS = now;
+        // the boot's first tick, kept across firmware restarts (they reset only the start delay, #101).
+        if (!awdlSchedSpFirstTickUS)
+            awdlSchedSpFirstTickUS = now;
     }
     awdlSchedSpGen = gen;
     awdlSchedSpStation = stationChannel;
@@ -23403,24 +23409,22 @@ iwx_attach(struct iwx_softc *sc, struct pci_attach_args *pa)
                 live->release();
             }
         }
-        awdlCoexProbe = itlAWDLBuildAllowed() && PE_parse_boot_argn("-itlawdlcoexprobe", &dummy, sizeof(dummy)) &&
+        awdlCoexProbe = itlAWDLBuildAllowed() && itlAWDLFlag("-itlawdlcoexprobe") &&
             !PE_parse_boot_argn("-itlawdlrx", &dummy, sizeof(dummy));
         // A new attach in the same loaded image starts with its timers allowed again.
         awdlStopping = false;
         awdlRawSamples = PE_parse_boot_argn("-itlawdlsamples", &dummy, sizeof(dummy));
-        awdlCoexRx = awdlCoexProbe && PE_parse_boot_argn("-itlawdlcoexrx", &dummy, sizeof(dummy));
-        awdlCoexTx = awdlCoexRx && PE_parse_boot_argn("-itlawdlcoextx", &dummy, sizeof(dummy));
-        awdlCoexMulti = awdlCoexTx && PE_parse_boot_argn("-itlawdlcoexmulti", &dummy, sizeof(dummy));
-        awdlCoexData = awdlCoexTx && PE_parse_boot_argn("-itlawdlcoexdata", &dummy, sizeof(dummy));
-        awdlCoexBaTxEnabled = awdlCoexData && PE_parse_boot_argn("-itlawdlcoexbatx", &dummy, sizeof(dummy));
+        awdlCoexRx = awdlCoexProbe && itlAWDLFlag("-itlawdlcoexrx");
+        awdlCoexTx = awdlCoexRx && itlAWDLFlag("-itlawdlcoextx");
+        awdlCoexMulti = awdlCoexTx && itlAWDLFlag("-itlawdlcoexmulti");
+        awdlCoexData = awdlCoexTx && itlAWDLFlag("-itlawdlcoexdata");
+        awdlCoexBaTxEnabled = awdlCoexData && itlAWDLFlag("-itlawdlcoexbatx");
         // On by default since 0.6.0 (PR #47; A/B on 149/149 and 44/44 by three testers). The old opt-in
         // flag -itlawdlcoexsamechprobe is still accepted and changes nothing; -itlawdlnosamechprobe turns it off.
         awdlCoexSameChannelProbe.enabled = awdlCoexBaTxEnabled &&
             !PE_parse_boot_argn("-itlawdlnosamechprobe", &dummy, sizeof(dummy));
-        awdlCoexBaPeerPauseEnabled = awdlCoexBaTxEnabled &&
-            PE_parse_boot_argn("-itlawdlcoexpeerpause", &dummy, sizeof(dummy));
-        awdlCoexBaTraceEnabled = awdlCoexBaTxEnabled &&
-            PE_parse_boot_argn("-itlawdlcoexbatrace", &dummy, sizeof(dummy));
+        awdlCoexBaPeerPauseEnabled = awdlCoexBaTxEnabled && itlAWDLFlag("-itlawdlcoexpeerpause");
+        awdlCoexBaTraceEnabled = awdlCoexBaTxEnabled && itlAWDLFlag("-itlawdlcoexbatrace");
         awdlCoexBaRefillEnabled = awdlCoexBaTxEnabled &&
             PE_parse_boot_argn("-itlawdlcoexbarefill", &dummy, sizeof(dummy));
         awdlCoexBaFilterHysteresis = awdlCoexData &&
@@ -23442,11 +23446,12 @@ iwx_attach(struct iwx_softc *sc, struct pci_attach_args *pa)
             // What made dedicated mode fast and quick to connect, for the listener beside Wi-Fi too:
             // the service-record merge (iface81), AW-timed idle sync frames (iface106), and shorter
             // interrupt coalescing (iface92). These were parsed only inside the -itlawdlrx block.
-            awdlServiceMerge = PE_parse_boot_argn("-itlawdlsvcmerge", &dummy, sizeof(dummy));
-            awdlAwSync = PE_parse_boot_argn("-itlawdlawsync", &dummy, sizeof(dummy));
-            int coexCoalescing = -1;
-            if (PE_parse_boot_argn("itlawdlintcoal", &coexCoalescing, sizeof(coexCoalescing)) &&
-                coexCoalescing >= IWX_HOST_INT_TIMEOUT_MIN && coexCoalescing <= IWX_HOST_INT_TIMEOUT_MAX)
+            awdlServiceMerge = itlAWDLFlag("-itlawdlsvcmerge");
+            awdlAwSync = itlAWDLFlag("-itlawdlawsync");
+            // The tested set's itlawdlintcoal=4 is the default; a value that is set still wins.
+            int coexCoalescing = itlAWDLDefaults() ? 4 : -1;
+            PE_parse_boot_argn("itlawdlintcoal", &coexCoalescing, sizeof(coexCoalescing));
+            if (coexCoalescing >= IWX_HOST_INT_TIMEOUT_MIN && coexCoalescing <= IWX_HOST_INT_TIMEOUT_MAX)
                 awdlIntCoalescing = uint8_t(coexCoalescing);
         }
         // Bluetooth coexistence mode, for both AWDL modes (#19): it used to be read only inside the

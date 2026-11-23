@@ -102,7 +102,7 @@ All of this goes on the **USB stick's** EFI.
 
    Set `IntelBTPatcher.kext` to `Enabled` = false if you have it. This is required. Make sure no `AirportItlwm.kext` or `itlwm.kext` entry is still enabled.
 
-3. **Boot arguments:** add the tested set from [BOOT-FLAGS.md](BOOT-FLAGS.md) to `boot-args` under `NVRAM` → `Add` → `7C436110-AB2A-4BBB-A880-FE41995C9F82`. Keep your existing arguments. Because OpenCore only writes NVRAM keys listed under `Delete`, check that `boot-args` is listed there for the same GUID. The experimental flags in BOOT-FLAGS are optional, for testers, and work only from 0.7.0-alpha.1. macOS ignores `boot-args` longer than 1023 characters, so keep the line shorter than that.
+3. **Boot arguments:** from 0.7.0-alpha.2 add `-btleadv`; the driver turns AirDrop's other flags on by itself, and flags left over from an older release do no harm. Up to 0.7.0-alpha.1, add the whole tested set from [BOOT-FLAGS.md](BOOT-FLAGS.md#up-to-070-alpha1-the-tested-set). Add them to `boot-args` under `NVRAM` → `Add` → `7C436110-AB2A-4BBB-A880-FE41995C9F82`. Keep your existing arguments. Because OpenCore only writes NVRAM keys listed under `Delete`, check that `boot-args` is listed there for the same GUID. The experimental flags in BOOT-FLAGS are optional, for testers, and work only from 0.7.0-alpha.1. macOS ignores `boot-args` longer than 1023 characters, so keep the line shorter than that.
 
 4. **Validate:** `plutil -lint config.plist`, and `ocvalidate` if you have it.
 
