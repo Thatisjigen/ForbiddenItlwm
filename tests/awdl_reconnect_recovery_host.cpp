@@ -64,6 +64,9 @@ static int awdlCoexSetupAttempts, awdlCoexSetupAborts, awdlCoexQueueAssigned, aw
 static uint32_t awdlCoexQueueWritePointer, awdlCoexStaResult, awdlCoexQueueResult, awdlCoexSetupToken;
 static int awdlCoexTxSettingUpGen = -1;
 static uint32_t awdlCoexTxSettingUpOwner, awdlCoexTxSettingUpNext;
+static void *awdlMcastHold[16];   // held multicast frames (none in these tests)
+static void mbuf_freem(void *) {}
+static unsigned awdlMcastHeld;
 static int awdlCoexStationTransitionGen = -1, awdlCoexStationReadyGen = 7;
 static uint32_t awdlCoexStationTransitionOwner, awdlCoexStationTransitionNext;
 static bool awdlCoexProbe = true, awdlCoexWant = true;
@@ -114,6 +117,10 @@ static void pauseFirmware() {
 }
 static int systq, restarts;
 static void task_add(int, int *) { ++restarts; events.push_back("restart"); }
+static void itlFwNoteRestart(unsigned) {}   // crash counter, off in the driver unless -itlfwcrashrec
+// handle, off in the driver unless -itlschedhandle: never added here, so never removed.
+static bool awdlSchedHandleAdded = false, awdlSchedHandleOff = false; static int awdlSchedHandleGen = -1;
+static uint32_t awdlSchedHandleRemoves, awdlSchedHandleErr;
 static int splnet() { return 0; }
 static void splx(int) {}
 static bool isset(int *a, int n) { return a[n]; }
@@ -156,6 +163,8 @@ public:
     int awdlCoexPickOwn(iwx_softc *, uint8_t *) { return 0; }
     int iwx_phy_ctxt_cmd(iwx_softc *, iwx_phy_ctxt *, int, int, int, int) { return 0; }
     uint8_t iwx_lookup_cmd_ver(iwx_softc *, int, int) { return 1; }
+    int awdlSchedHandleMac(iwx_softc *, uint32_t) { return 0; }   // unreachable here
+    void awdlSchedCh6Remove(iwx_softc *) {}   // channel 6's handle, never added here
     int awdlCoexMacSend(iwx_softc *, int action) {
         events.push_back(action == IWX_FW_CTXT_ACTION_ADD ? "mac-add" : "mac-remove");
         if (action == IWX_FW_CTXT_ACTION_ADD &&

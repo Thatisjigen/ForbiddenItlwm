@@ -182,6 +182,7 @@ public:
     bool createMediumTables(const IONetworkMedium **primary);
     void releaseAll();
     void watchdogAction(IOTimerEventSource *timer);
+    void reportInfraTraffic();   // (-itlinfrastats), non-virtual
     
     virtual SInt32 enableFeature(IO80211FeatureCode, void*) override;
     virtual bool isCommandProhibited(int command) override {

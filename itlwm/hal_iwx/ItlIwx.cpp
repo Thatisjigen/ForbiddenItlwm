@@ -119,6 +119,8 @@
 #include <AWDLObservation.hpp>
 #include <AWDLPeerProbe.hpp>
 #include <AWDLPeerSchedule.hpp>
+#include <AWDLSessionFollow.hpp>
+#include <AWDLElection.hpp>
 #include <AWDLDataFrame.hpp>
 #include <AWDLRegulatory.hpp>
 #include <AWDLBlockAck.hpp>
@@ -193,6 +195,450 @@ static bool awdlCoexNoSearch6, awdlCoexSearch6Active;
 static uint64_t awdlCoexAddedAtUS;
 static int awdlCoexSearch6Gen = -1;
 static uint32_t awdlCoexSearch6Dwells;
+// The follower (-itlschedsp, in the scheduler set): before each run of macOS's AWDL plan on the listener's channel it
+// sends SESSION_PROTECTION_CMD (v1, P2P_GO_NEGOTIATION, no start time) for the P2P Device handle in the listener's
+// binding, which brings the binding, and so the listener, on air for the run (include/AWDLSessionFollow.hpp).
+// Frames on the listener's and the station's channel are counted while a session runs and while none does. A send
+// error stops it for the boot; a firmware restart starts it again (-itlschedsafe).
+static bool awdlSchedSp, awdlSchedSpOff, awdlSchedSpActive;
+static uint32_t awdlSchedSpMacId = 1;   // the MAC the last session went to
+static uint32_t awdlSchedSpConf = 2, awdlSchedSpSent, awdlSchedSpStarts, awdlSchedSpEnds, awdlSchedSpFails,
+    awdlSchedSpLisIn, awdlSchedSpStaIn, awdlSchedSpLisOut, awdlSchedSpStaOut, awdlSchedSpStation;
+static uint64_t awdlSchedSpNextUS, awdlSchedSpFirstUS, awdlSchedSpStartUS, awdlSchedSpInUS;
+static int awdlSchedSpGen = -1, awdlSchedSpLastErr;
+static const char *awdlSchedSpState = "off";
+// Session timing: start delay (send to start notification) and real length, host time.
+static uint32_t awdlSchedSpDurationTU = 64;
+static bool awdlSchedSpAwaitStart;
+static uint64_t awdlSchedSpSentUS, awdlSchedSpDelaySumUS, awdlSchedSpDelayMinUS = ~0ULL, awdlSchedSpDelayMaxUS,
+    awdlSchedSpLenMinUS = ~0ULL, awdlSchedSpLenMaxUS;
+static uint32_t awdlSchedSpDelays, awdlSchedSpAwdlIn, awdlSchedSpAwdlBase, awdlSchedSpAwdlMark;
+// The follower's timer: a one-shot for runs starting within 250 ms; never more than one session at a time.
+static CTimeout *awdlSchedFollowTimer;
+static struct task awdlSchedFollowTaskEntry;
+static bool awdlSchedFollowArmed;
+static int awdlSchedFollowArmedGen = -1;
+static uint64_t awdlSchedFollowSendAtUS, awdlSchedFollowEndUS, awdlSchedFollowLastDutyUS, awdlSchedFollowLateSumUS,
+    awdlSchedFollowLateMaxUS;
+static uint32_t awdlSchedFollowAligned, awdlSchedFollowDuty, awdlSchedFollowArms, awdlSchedFollowFired,
+    awdlSchedFollowStale, awdlSchedFollowEntries, awdlSchedFollowLateN;
+// the current session's requested length, and listener sync frames submitted inside sessions.
+static uint32_t awdlSchedSpCurDurTU, awdlSchedFollowTxInSession;
+// macOS's own plan (AirportItlwmV2.cpp hands it over), followed on the elected AWDL clock.
+extern uint8_t itlAWDLPlanChannels[16];
+extern volatile uint32_t itlAWDLPlanVersion;
+static uint32_t awdlSchedPlanVersionSeen, awdlSchedPlanTorn, awdlSchedPlanListener,
+    awdlSchedPlanStation, awdlSchedPlanOther;
+static uint8_t awdlSchedPlanLast[16];
+// -itlschedadvertise: advertise the schedule the radio really follows.
+static bool awdlSchedAdvertise;
+static uint32_t awdlSchedAdvertiseServed, awdlSchedAdvertiseRefused;
+// -itlschedawdloff: while macOS has AWDL turned off (setAWDL_SYNC_ENABLED 0,
+// kept in AirportItlwmV2.cpp's itlAWDLSyncOn), the follower sends no session and the executed plan isn't
+// advertised, so the station gets the air back. macOS turns AWDL off on its own when nothing uses it.
+extern volatile uint32_t itlAWDLSyncOn;
+static bool awdlSchedHonorOff;
+static uint32_t awdlSchedOffSkips, awdlSchedOffStale;
+static inline bool awdlSchedAwdlOff() { return awdlSchedHonorOff && !itlAWDLSyncOn; }
+// -itlawstart: APPLE80211_M_AWDL_AVAILABILITY_WINDOW_START (41) for macOS, once
+// per extended AW on the follower's clock, as the chip posts it. macOS re-checks the station's traffic only from
+// this event while AWDL is on. itlAWDLAwStart (posted by AirportItlwmV2.cpp's timer) builds the 36-byte payload.
+static bool awdlSchedAwStart;
+static uint32_t awdlSchedAwStartServed, awdlSchedAwStartRefused, awdlSchedAwStartRepeat;
+static uint32_t awdlSchedAwStartLastEaw;
+static bool awdlSchedAwStartHaveLast;
+// -itlawend, with -itlawstart: APPLE80211_M_AWDL_AVAILABILITY_WINDOW_END (43) closing each extended AW
+// opened by an AW start. Without it macOS logs "AWDL SANITY FAILURE: Back to Back start events" at every start
+// (sanityCheckAWStart's open-AW flag at peer manager +0x4280 is cleared only by the end event). Built by itlAWDLAwEnd.
+static bool awdlSchedAwEnd;
+static bool awdlSchedAwOpen;                 // a start was posted and not yet closed
+static uint32_t awdlSchedAwOpenEaw;
+static ItlAWDL::Clock awdlSchedAwOpenClock = ItlAWDL::ownClock();
+static uint32_t awdlSchedAwEndServed, awdlSchedAwEndLate, awdlSchedAwEndClockMoved;
+static uint64_t awdlSchedAwEndBcnSince;      // station-up time for the beacon estimate (0 = station down)
+static ItlAWDL::Clock awdlSchedPlanClockNow = ItlAWDL::ownClock();   // the clock the follower last used
+// -itlschedextend: AW extension. In macOS's plan a 0 entry is free time; a real
+// Mac's chip extends the AWDL window into it while AWDL data flows. While AWDL data was received or sent within
+// kAwdlSchedExtHoldUS, the follower treats each 0 entry that follows one of the listener's entries (up to the next
+// non-zero entry, runs still capped at kFollowMaxEntries) as the listener's. Otherwise the station keeps it.
+// Channel 6's runs, the advertised plan and the AW-start events keep macOS's entries.
+static bool awdlSchedExtend;
+static uint32_t awdlSchedExtLastRx, awdlSchedExtLastTx, awdlSchedExtActiveTicks, awdlSchedExtIdleTicks,
+    awdlSchedExtSlots;
+static uint64_t awdlSchedExtActiveUS;
+constexpr uint64_t kAwdlSchedExtHoldUS = 200000;
+// the extended listener plan, advertised (itlAWDLExecPlan) while the extension is active, so peers
+// see us on the listener's channel in the extended slots. awdlSchedExtPlanUS is when it was last set.
+static uint8_t awdlSchedExtPlan[16];
+static uint64_t awdlSchedExtPlanUS;
+static uint32_t awdlSchedExtAdvertised;
+// -itlfwcrashrec, off by default, read only: a record of why the firmware restarted that survives
+// the restart, since the driver's 512-line log ring is overwritten by then. The last 4 firmware error tables
+// (filled in iwx_nic_error), a count per init_task site, macOS's interface disables, and command waits that
+// ran out (with the command id). Stored only; published from the coex task (ITLFwCrashRecords, ITLFwRestarts).
+// The AWDL scheduler set is on by default. itlawdlsched=<bits> overrides it: 0 = off (the 0.6.0 behaviour), 1 = the
+// scheduler set (the default), 3 = the set plus its diagnostics (-itlschedskew, -itlawdlpmdebug, -itlfwcrashrec,
+// -itlrxloss). Each flag on its own still turns its part on.
+constexpr uint32_t kItlResWork = 0x1, kItlResDiag = 0x2;
+uint32_t itlAwdlSchedMask()
+{
+    static uint32_t mask = 0xffffffffU;
+    if (mask == 0xffffffffU) {
+        uint32_t v = kItlResWork;
+        mask = PE_parse_boot_argn("itlawdlsched", &v, sizeof(v)) ? v : kItlResWork;
+    }
+    return mask;
+}
+bool itlResFlag(const char *name, uint32_t bit)
+{
+    int dummy = 0;
+    return PE_parse_boot_argn(name, &dummy, sizeof(dummy)) || (itlAwdlSchedMask() & bit);
+}
+static uint64_t awdlUptimeUS();
+static bool itlFwCrashRec;
+struct ItlFwCrashRecord {
+    uint64_t upUS;
+    int gen;
+    uint32_t valid, id, trm0, trm1, blink2, ilink1, ilink2, d1, d2, d3, lastCmd, hcmd, gp2;
+    // The UMAC table (the command processor's own assert), filled by iwx_nic_umac_error right after.
+    uint32_t uvalid, uid, ublink1, ublink2, uilink1, uilink2, ud1, ud2, ud3, ucmd;
+    // the last kItlFwCmdHist host commands before the assert (wide id, ms before it), oldest first.
+    uint32_t histCode[16];
+    uint32_t histMsBefore[16];
+    uint16_t histLen[16];
+    uint8_t histCount;
+};
+static ItlFwCrashRecord itlFwCrashRecords[4];
+// the last 16 host commands sent (with -itlfwcrashrec), copied into each crash record.
+static constexpr unsigned kItlFwCmdHist = 16;
+static uint32_t itlFwCmdHistCode[kItlFwCmdHist];
+static uint64_t itlFwCmdHistUS[kItlFwCmdHist];
+static uint16_t itlFwCmdHistLen[kItlFwCmdHist];
+static uint32_t itlFwCmdHistNext;
+static uint32_t itlFwCrashCount, itlFwRestartSites[16], itlFwLastRestartSite, itlFwDisables, itlFwCmdTimeouts,
+    itlFwLastTimeoutCmd, itlFwPublishedStamp;
+static uint64_t itlFwLastRestartUS, itlFwLastDisableUS, itlFwLastTimeoutUS, itlFwNextPublishUS;
+static inline void itlFwNoteRestart(unsigned site)
+{
+    if (!itlFwCrashRec)
+        return;
+    if (site < 16)
+        ++itlFwRestartSites[site];
+    itlFwLastRestartSite = site;
+    itlFwLastRestartUS = awdlUptimeUS();
+}
+// -itlschedhandle, followers 6 and 7: the listener stays a LISTENER (its data path works) and a
+// second context, MAC 2, a P2P Device with its own address that never transmits, joins the listener's binding
+// as the handle the follower's sessions are sent to. If a session on one MAC brings the binding on air, the
+// listener gets the session's airtime too. Any failure turns the handle off for the boot.
+constexpr uint32_t kAwdlSchedHandleMacId = 2;
+static bool awdlSchedHandle, awdlSchedHandleOff, awdlSchedHandleAdded;
+static int awdlSchedHandleGen = -1;
+static uint32_t awdlSchedHandleAdds, awdlSchedHandleRemoves, awdlSchedHandleErr;
+// -itlschedclock, followers 6 and 7: the AWDL election and the master's clock (AWDLElection.hpp).
+// Peers' election v2 and sync TLVs are noted as they arrive; the election runs at each follower tick; macOS's
+// plan is then laid on the master's clock when we follow one, and our frames advertise the result.
+// Our own metric and counter come from macOS's template (AirportItlwmV2.cpp, itlAWDLSelf*).
+static bool awdlSchedClock;
+static ItlAWDL::Election awdlSchedElection;
+// -itlschedelecrssi, or itlschedelecrssi=N for -N dBm: the election skips peers below this smoothed
+// RSSI, as IO80211's own election does (default -78 dBm). 0 = off.
+static int32_t awdlSchedElectionMinRssi;
+static ItlAWDL::ElectionResult awdlSchedElectionNow;
+static uint64_t awdlSchedElectionRunUS;
+static uint32_t awdlSchedElectionFrames, awdlSchedElectionSyncs, awdlSchedElectionChanges, awdlSchedElectionClocked;
+static uint32_t awdlSchedElectionWeakSkips;   // election runs that left a weak peer out
+extern volatile uint32_t itlAWDLSelfMetric, itlAWDLSelfCounter, itlAWDLSelfKnown;
+extern volatile uint32_t itlAWDLSelfElectionId, itlAWDLSelfElectionIdKnown;
+extern volatile int32_t itlAWDLElectionRssiFromMacOS;
+// -itlsvctiming, AirportItlwmV2.cpp: peers' service responses not seen in the last 10 s, in the log.
+extern bool itlSvcTimingOn();
+extern volatile uint32_t itlSvcUpdates;
+extern volatile uint64_t itlSvcLastUpdateUS;
+static void awdlSvcNoteResponses(const uint8_t *frame, size_t length, uint64_t nowUS)
+{
+    struct Seen { uint32_t hash; uint64_t us; };
+    static Seen seen[32];
+    static uint32_t next, loggedThisSecond, totalThisSecond, newThisSecond;
+    static uint64_t secondStartUS;
+    if (!frame || length < 40)
+        return;
+    if (nowUS - secondStartUS >= 1000000) {
+        if (totalThisSecond)   // repeats are the iPhone answering again with records we already have
+            XYLog("ITLSVC %llu rx second: %u service responses, %u new\n", (unsigned long long)(nowUS / 1000),
+                  totalThisSecond, newThisSecond);
+        secondStartUS = nowUS;
+        loggedThisSecond = totalThisSecond = newThisSecond = 0;
+    }
+    for (size_t i = 40; i + 3 <= length;) {
+        const size_t n = size_t(frame[i + 1]) | size_t(frame[i + 2]) << 8;
+        if (i + 3 + n > length)
+            return;
+        if (frame[i] == 2 && n) {   // service response
+            ++totalThisSecond;
+            uint32_t h = 2166136261u;
+            for (size_t k = 0; k < n; ++k)
+                h = (h ^ frame[i + 3 + k]) * 16777619u;
+            bool known = false;
+            for (auto &s : seen)
+                if (s.hash == h && nowUS - s.us < 10000000) { s.us = nowUS; known = true; break; }
+            if (!known) {
+                ++newThisSecond;
+                seen[next++ % 32] = {h, nowUS};
+                if (loggedThisSecond++ < 30) {
+                    const uint64_t since = itlSvcLastUpdateUS ? (nowUS - itlSvcLastUpdateUS) / 1000 : 0;
+                    XYLog("ITLSVC %llu rx new service response from ..:%02x:%02x len %u, +%llu ms after update #%u\n",
+                          (unsigned long long)(nowUS / 1000), frame[14], frame[15], unsigned(n),
+                          (unsigned long long)since, itlSvcUpdates);
+                }
+            }
+        }
+        i += 3 + n;
+    }
+}
+// -itlschedelecapple: IO80211's own election rules (AWDLElection.hpp runApple) in place of OWL's.
+static bool awdlSchedElectionApple;
+static ItlAWDL::ElectionResult awdlSchedElectionLastApple;   // per-rule skip counts of the last run
+// -itlschedch6, with -itlschedhandle: macOS's slots on channel 6 too. PHY 2
+// (unused by the station, which stays on PHY 0) is tuned to 6, and MAC 3, a second P2P Device handle with its
+// own address, promiscuous so it hears AWDL's broadcast frames, never transmitting, is bound to it alone. The
+// follower sends each run's session to the handle of that run's channel. Listen only: our own frames go out
+// on the listener's channel. Any failure turns channel 6 off for the boot.
+constexpr uint32_t kAwdlSchedCh6MacId = 3;
+constexpr int kAwdlSchedCh6PhyId = 2;
+constexpr uint8_t kAwdlSchedCh6Channel = 6;
+static bool awdlSchedCh6, awdlSchedCh6Off, awdlSchedCh6Added;
+// -itlschedch6quiet, with -itlschedch6: keep listening on channel 6 but don't advertise it. The
+// channel-6 handle is a listen-only P2P Device context and can't ACK; the iPhone's own statistics (two sysdiagnoses,
+// 2026-11-19) show its unicast to us failing 95% in slot 8, the plan's channel-6 slot (17 OK, 320 no-ACK, against
+// ~0.1% in every other slot). Advertising the station channel there keeps it from sending us unicast where we can't
+// answer, which in thin plans (AWDL slots 2, 8, 10) was a third of its chances and made TCP setup take 13-30 s.
+static bool awdlSchedCh6Quiet;
+static uint32_t awdlSchedCh6QuietSlots;
+// -itlschedmacchan: the listener's 5 GHz channel is the one macOS chose, as on a
+// real Mac, where the chip follows the host's channel sequence. macOS's userland sets the AWDL secondary master channel
+// (setAWDL_SECONDARY_MASTER_CHANNEL; IO80211 keeps it at +0x4294 and sends it on; 149 here) and its
+// 16-slot plan names it in its AWDL slots. The driver's own picker (the min rule: what nearby phones name) is then
+// only the fallback: when macOS named nothing, or the firmware's channel map doesn't allow macOS's channel here (the
+// firmware's regulatory answer stays final).
+extern volatile uint32_t itlAWDLReqSecondaryMaster;
+static bool awdlSchedMacChan;
+static unsigned awdlSchedMacChanWant, awdlSchedMacChanPicked;
+static uint32_t awdlSchedMacChanFollowed, awdlSchedMacChanUnusable, awdlSchedMacChanNone, awdlSchedMacChanFromPlan;
+// -itlawdlumi: macOS's one-shot unicast MI (AirportItlwmV2.cpp) goes out as the next sync frame, at the
+// start of the peer's AW on our channel (the multicast AW timing), or at once without timing, or anyway after 1.1 s.
+// itlAWDLUmiGo tells the sync builder this frame may carry it.
+extern volatile uint32_t itlAWDLUmiPending, itlAWDLUmiGo;
+extern volatile uint64_t itlAWDLUmiAtUS;
+static bool awdlUmi;
+static uint32_t awdlUmiInAw, awdlUmiUntimed, awdlUmiLate;
+// itlschedlead=N us: how long before each run of macOS's plan the session is
+// requested (default kFollowLeadUS, 7 ms). In testing, the firmware starts a session 0.26-10.1 ms after the request (mean
+// 3.4) and the timer fires up to 2.9 ms late, so with 7 ms some sessions began up to ~6 ms into the AW; an iPhone in
+// AWDL Low Power sends only at its AW start, and its slot-10 unicast to us failed 8 of 10 there. The end stays the
+// run's end. Each session's real start against its run's start is counted (ITLAWDLSchedStartVsRun).
+static uint64_t awdlSchedLeadUS = ItlAWDL::kFollowLeadUS;
+static uint64_t awdlSchedSpRunStartUS;   // the run the session awaited serves (0 = not a plan run)
+static uint64_t awdlSchedFollowArmedRunStartUS;
+static uint32_t awdlSchedStartEarly, awdlSchedStartLate1, awdlSchedStartLate2, awdlSchedStartLate4,
+    awdlSchedStartLate8, awdlSchedStartLateMore, awdlSchedStartMidRun;
+static uint64_t awdlSchedStartEarlySumUS, awdlSchedStartLateMaxUS;
+// -itlschedhandover: one session runs at a time, and the follower picks the next
+// one only after the current one ended, so a run that starts where the last one ends (channel 6 in slot 8, then 149
+// in slot 9; a run split at kFollowMaxEntries) was asked for after it had begun (135 of 1114, 12%). With the
+// flag a session whose next run (either channel) starts within the lead of its end ends that much earlier (never
+// below one AW), and the coex task wakes at the session's planned end instead of on its 2/20 ms period, so the next
+// request goes out on time. ITLAWDLSchedHandover counts the trimmed sessions and wakes.
+static bool awdlSchedHandover;
+static uint64_t awdlSchedSpPlannedEndUS;
+static uint32_t awdlSchedHandoverTrims, awdlSchedHandoverSkipped, awdlSchedHandoverWakes;
+static uint64_t awdlSchedHandoverTrimSumUS;
+// -itlschedskew, measurement only: (1) how long our sync frames take from build (when their sync TLV
+// is stamped with the time) to TX completion; (2) while we are our own master, where the schedule peer puts the end
+// of each extended AW in its own sync TLV (its copy of our clock) against where our clock puts it: skew = its end -
+// ours, in us (host RX time, so biased late by RX latency). In testing, the iPhone's Low Power slot-10 unicast to us
+// failed with our sessions 8 ms early and 149 in our slot 10, and it logged "slot 0 start too soon (55ms)".
+static bool awdlSchedSkew;
+static uint64_t awdlSyncBuildUS;   // build time of the sync frame in flight
+static uint32_t awdlSyncTxLatN, awdlSyncTxLat1, awdlSyncTxLat2, awdlSyncTxLat4, awdlSyncTxLat8, awdlSyncTxLatMore;
+static uint64_t awdlSyncTxLatSumUS, awdlSyncTxLatMaxUS;
+// with -itlschedskew, itlawdlsched=3; measurement only: while we follow a master, how well our clock tracks it.
+// Each frame's on-air time comes from its GP2 stamp: host time minus GP2 is tracked, and its minimum over the last two
+// seconds is the fastest receive path, so a frame's excess over it is its receive delay (no register read). For the
+// master's sync frames: that delay, and our plan clock's error against the master's own sync TLV at the on-air time.
+static uint64_t awdlGp2Wraps;
+static uint32_t awdlGp2Last;
+static int64_t awdlGp2OffMinCur, awdlGp2OffMinPrev;
+static uint64_t awdlGp2OffSecondUS;
+static bool awdlGp2OffValid;
+static uint32_t awdlFollowN, awdlFollowNoMatch, awdlFollowLate, awdlFollowEarly, awdlFollowBucket[7], awdlFollowLatBucket[7];
+static int64_t awdlFollowSumUS, awdlFollowMinUS, awdlFollowMaxUS, awdlFollowLastUS;
+static uint64_t awdlFollowLatSumUS, awdlFollowLatMaxUS;
+// The host-time excess of a frame received at host time hostUS with GP2 stamp gp2, over the fastest recent path.
+static int64_t awdlRxDelayUS(uint64_t hostUS, uint32_t gp2)
+{
+    if (awdlGp2OffValid && gp2 < awdlGp2Last && awdlGp2Last - gp2 > 0x80000000U)
+        ++awdlGp2Wraps;
+    awdlGp2Last = gp2;
+    const int64_t off = int64_t(hostUS) - int64_t((awdlGp2Wraps << 32) + gp2);
+    if (!awdlGp2OffValid || hostUS - awdlGp2OffSecondUS >= 1000000ULL) {
+        awdlGp2OffMinPrev = awdlGp2OffValid ? awdlGp2OffMinCur : off;
+        awdlGp2OffMinCur = off;
+        awdlGp2OffSecondUS = hostUS;
+        awdlGp2OffValid = true;
+    }
+    if (off < awdlGp2OffMinCur)
+        awdlGp2OffMinCur = off;
+    const int64_t base = awdlGp2OffMinCur < awdlGp2OffMinPrev ? awdlGp2OffMinCur : awdlGp2OffMinPrev;
+    return off - base;
+}
+// -itlschedonair: every peer's election view and sync TLV is taken at the frame's on-air time
+// (host time minus the receive delay), so following a master no longer shifts our clock late by the receive delay
+// (1.7 ms late on average, 8-17 ms in 5% of samples). A sync TLV from a frame delayed by more than
+// kAwdlOnAirMaxDelayUS isn't used for the clock (its view still counts).
+static bool awdlSchedOnAir;
+static constexpr int64_t kAwdlOnAirMaxDelayUS = 8000;
+static uint32_t awdlOnAirUsed, awdlOnAirRejected;
+static unsigned awdlUsBucket(uint64_t mag)
+{
+    return mag < 250 ? 0 : mag < 500 ? 1 : mag < 1000 ? 2 : mag < 2000 ? 3 : mag < 4000 ? 4 : mag < 8000 ? 5 : 6;
+}
+static uint32_t awdlSkewN, awdlSkewNoMatch, awdlSkewBucket[7];   // |skew| <0.5, <1, <2, <4, <8, <16, >=16 ms
+static int64_t awdlSkewSumUS, awdlSkewMinUS = INT64_MAX, awdlSkewMaxUS = INT64_MIN, awdlSkewLastUS;
+static uint32_t awdlSkewLate, awdlSkewEarly;   // its end after ours / before ours by >= 1 ms
+// -itlschedsyncfirst, with -itlschedsynctx: sync frames ahead of queued data. In testing, 15% of sync
+// frames still waited >= 8 ms (max 329 ms) inside sessions; they share the listener's ring with non-aggregated data
+// (bulk data has its own aggregation queue at the same priority). When a sync frame is due in its window but the
+// ring holds frames, new data is held (the data pump skips) for at most kAwdlSyncFirstMaxHoldUS until the ring is
+// empty, then the sync frame goes. Measured either way (with -itlschedskew): the frames queued ahead in the ring and
+// in the aggregation queue at each submit, and the build->TX delay split by an empty or busy ring.
+static bool awdlSyncFirst;
+static constexpr uint64_t kAwdlSyncFirstMaxHoldUS = 6000;
+static uint64_t awdlSyncFirstHoldSinceUS;
+static uint32_t awdlSyncFirstHolds, awdlSyncFirstHeldTicks, awdlSyncFirstTimeouts, awdlSyncFirstPumpSkips;
+static uint64_t awdlSyncFirstHoldMaxUS;
+// itlschedstartdelay=N s, 0-60: how long the follower waits after its first
+// tick before it binds the handle and starts sessions (and with them the AW-start events). It was a fixed 60 s from E1.
+// In testing, in that minute macOS warns "Did not get AW start event", marks the iPhone absent, and a Companion
+// Link connection opened then dies half-open; the iPhone later reuses it and its first send fails. Without the
+// argument: 60 s, as before.
+static uint64_t awdlSchedStartDelayUS = 60000000ULL;
+static uint64_t awdlSchedSpFirstTickUS, awdlSchedFollowStartedUS;
+// -itlschedsafe: (1) after a firmware restart the follower starts again in the
+// new generation instead of stopping for the rest of the boot (an E1 rule; sync-2, 2026-11-22: after one assert at
+// 40.9 s the follower stayed off and the iPhone no longer saw the Mac); it stops for good after kAwdlSchedMaxRestarts
+// restarts in one boot. (2) In each generation the follower starts only once macOS has had AWDL on for
+// kAwdlSchedSettleUS, its plan has arrived and the listener has not moved channel for kAwdlSchedSettleUS (sync-2: the
+// firmware asserted in SESSION_PROTECTION_CMD 2.2 s after AWDL enable, while the plan and listener were changing).
+static bool awdlSchedSafe;
+static constexpr uint32_t kAwdlSchedMaxRestarts = 3;
+static constexpr uint64_t kAwdlSchedSettleUS = 3000000ULL;
+static uint32_t awdlSchedRestarts, awdlSchedResumes, awdlSchedSettleWaits;
+static uint64_t awdlSchedSyncOnSinceUS, awdlSchedSettledAtUS;   // with the existing awdlCoexLastMoveUS
+// -itlrxloss or itlawdlsched=3: where received AWDL data goes, per second, for the last 30 s with traffic:
+// frames the listener heard, handed to awdl0, refused before the hand-off (off-channel, unknown peer, malformed, or not
+// copied: chained or over the copy buffer), and awdl0's own outcome (delivered to macOS, not addressed to our current
+// awdl0 address, pool/prepare/copy/queue failures). Sync-1 05:00: a slow iPhone -> Mac transfer with 36 QUIC PTOs and
+// no radio losses on the iPhone's side.
+extern volatile uint32_t itlAWDLRxParseBad, itlAWDLRxNotOurs, itlAWDLRxSelf, itlAWDLRxAllocFail, itlAWDLRxPrepFail,
+    itlAWDLRxCopyFail, itlAWDLRxQueueFail, itlAWDLRxDelivered, itlAWDLRxDisabled;
+static bool awdlRxLoss;
+static uint32_t awdlCoexDataRxNotCopied;
+struct AwdlRxSecond { uint32_t upS, heard, handed, refused, ok, notOurs, fails; };
+static AwdlRxSecond awdlRxSeconds[30];
+static uint32_t awdlRxSecondsNext;
+static uint64_t awdlRxLastSampleUS;
+static uint32_t awdlRxLast[11];
+// -itlschedch6peer, with -itlschedch6: the channel-6 handle also listens in the slots
+// where the schedule peer's own sequence (heard in the last kAwdlSchedCh6PeerFreshUS) is on channel 6 and macOS's plan
+// isn't on our listener channel. In testing, in AWDL Low Power the iPhone is on 6 in slots 0 and 8 (149 only in 2 and 10);
+// we listened on 6 only in slot 8, and none of its mDNS queries for the Mac's address reached macOS for 43 s.
+// Listen-only, so only group frames (no ACK needed) are taken. Also counts group data heard per slot on 6 and on the
+// listener channel (ITLAWDLSchedCh6Peer), to see where the peer's multicast goes.
+static bool awdlSchedCh6Peer;
+static constexpr uint64_t kAwdlSchedCh6PeerFreshUS = 3000000ULL;
+static uint32_t awdlSchedCh6PeerDecisions, awdlSchedCh6PeerSlotsAdded, awdlSchedCh6PeerRuns;
+static uint32_t awdlGroupRxSlotCh6[16], awdlGroupRxSlotListener[16];
+// -itlschedch6tx, with -itlschedch6: our AWDL sync frame also goes out on channel 6,
+// once at the start of each channel-6 session (slot 8 in every macOS schedule and every iPhone mode seen), like a
+// real Mac. In testing, our action frames reached the iPhone only in shared 149 windows, so macOS's service adverts took
+// 0.4-1 s to arrive and the iPhone's AirDrop connection raced its own new datapath. The channel-6 handle (MAC3) gets
+// its own station and queue; a frame is submitted only while its session has >= kAwdlCh6TxMinLeftUS left, so no
+// stale sync timing goes out. Slot 8 stays unadvertised (MAC3 can't ACK for awdl0's address).
+static bool awdlSchedCh6Tx, awdlCh6TxStaAdded, awdlCh6TxOff, awdlCh6TxSending;
+constexpr uint8_t kAwdlCh6TxStaId = 4;
+static constexpr uint64_t kAwdlCh6TxMinLeftUS = 8000ULL;
+static int awdlCh6TxQueue = -1, awdlCh6TxGen = -1;
+static uint32_t awdlCh6TxErr, awdlCh6TxSetups, awdlCh6TxSessions, awdlCh6TxNoTime, awdlCh6TxBusy, awdlCh6TxBuilt,
+    awdlCh6TxBuildFail, awdlCh6TxSubmitted, awdlCh6TxSubmitErr, awdlCh6TxOK, awdlCh6TxFailed;
+static uint64_t awdlCh6TxServedSessionUS, awdlCh6TxTplUS;
+static uint32_t awdlCh6TxRefused, awdlCh6TxRefusedN;
+// how long a change to macOS's frame template (its service adverts) takes to go out. The template's change time
+// is noted when the frame carrying it is built, and the delay counted at the first successful completion per channel.
+extern volatile uint64_t itlAWDLTemplateChangeUS;
+extern volatile uint32_t itlAWDLTemplateChanges;
+static uint64_t awdlAdv149PendingTplUS, awdlAdvDone149US, awdlAdvDone6US, awdlAdvDoneAnyUS;
+static uint32_t awdlAdvHist149[7], awdlAdvHist6[7], awdlAdvHistAny[7], awdlAdvFirstOn[2], awdlAdvSlotFirst[16];
+static uint64_t awdlAdvAnySumUS, awdlAdvAnyMaxUS;
+// -itlschedmifirst: the first frame of each AWDL session we run (the 149 handle's and channel 6's)
+// is the MI, in the slots macOS's MI bitmap allows. A real Mac's firmware sends the MI in every allowed slot (IO80211
+// updatePrimaryPayloadMI, 26.7.2); ours alternated MI and PSF on every frame, about 2 MI a second.
+extern volatile uint32_t itlAWDLMiBitmap, itlAWDLMiOffsetUS;
+extern volatile int itlAWDLForceMI, itlAWDLLastBuildMI;
+static bool awdlSchedMiFirst;
+static uint64_t awdlMiFirst149SessionUS;
+static uint32_t awdlMiFirst149, awdlMiFirst6, awdlMiBlocked149, awdlMiBlocked6, awdlMiOut149, awdlMiOut6;
+// -itlschedminow: after macOS changes the MI's content, the next frame we send is the MI, at once
+// in a session, and multicast data waits behind it (up to kAwdlMiDueMaxUS). In testing, the iPhone heard our mDNS announcement
+// (data) 36-280 ms before the MI carrying the same service, resolved through AWDL discovery, found nothing and went ad-hoc;
+// without that Companion Link datapath AirDrop's route check then fails.
+// always on with the follower; from the native-control study, 08-startup: a SESSION_PROTECTION_NOTIF with
+// status 0 is a failed session (if_iwxreg.h: "1 means success"); its start marker no longer opens a window. The session
+// stays "awaiting" until its paired end, so no second request goes out on the same MAC. Also a startup timeline: until the
+// follower starts, the time each prerequisite blocked it, then the first session and the first successful start.
+static uint32_t awdlSchedSpFailedStarts;
+static uint64_t awdlStartBlockUS[9], awdlStartLastTickUS, awdlStartFirstSessionUS, awdlStartFirstOkUS;
+static uint8_t awdlStartLastBlock;
+static void awdlStartNote(unsigned why, uint64_t nowUS, bool followerStarted)
+{
+    if (followerStarted)
+        return;
+    if (awdlStartLastTickUS && why < 9 && nowUS > awdlStartLastTickUS)
+        awdlStartBlockUS[why] += nowUS - awdlStartLastTickUS;
+    awdlStartLastTickUS = nowUS;
+    awdlStartLastBlock = uint8_t(why);
+}
+static bool awdlSchedMiNow;
+static constexpr uint64_t kAwdlMiDueMaxUS = 300000ULL;
+static uint64_t awdlMiDueServedUS;
+static uint32_t awdlMiNowSent149, awdlMiNowSent6, awdlMiNowMcastHeld, awdlMiNowExpired;
+struct AwdlMiChange { uint32_t changeMs, outMs; uint8_t channel; };
+static AwdlMiChange awdlMiChanges[16];
+static uint32_t awdlMiChangeCount;
+// A content change no MI has gone out with yet, still young enough to wait for.
+static bool awdlMiDue(uint64_t nowUS)
+{
+    const uint64_t change = itlAWDLTemplateChangeUS;
+    if (!awdlSchedMiNow || !change || change <= awdlMiDueServedUS)
+        return false;
+    if (nowUS > change && nowUS - change > kAwdlMiDueMaxUS) {
+        awdlMiDueServedUS = change;   // gave up waiting: the alternation carries it
+        ++awdlMiNowExpired;
+        return false;
+    }
+    return true;
+}
+static int awdlSyncSubmitRing = -1, awdlSyncSubmitAgg = -1;   // frames queued ahead at the last submit
+static uint32_t awdlSyncLatEmptyN, awdlSyncLatBusyN, awdlSyncLatAggBusyN;
+static uint64_t awdlSyncLatEmptySumUS, awdlSyncLatBusySumUS, awdlSyncLatAggBusySumUS, awdlSyncLatEmptyMaxUS,
+    awdlSyncLatBusyMaxUS;
+static uint32_t awdlSyncRingAheadSum, awdlSyncRingAheadMax;
+static void awdlSchedSpPublish();
+static int awdlSchedCh6Gen = -1;
+static uint32_t awdlSchedCh6Adds, awdlSchedCh6Err, awdlSchedCh6Sessions, awdlSchedCh6Frames, awdlSchedCh6Dropped;
+static uint32_t awdlSchedSpTargetMac = 1;   // the MAC the next session goes to (kAwdlCoexMacId or a handle)
+static uint32_t awdlSchedFollowArmedMac = 1;
+static void itlFwDiagPublish();
 static uint8_t awdlCoexSettleWidth;
 static uint64_t awdlCoexSettleSinceUS;
 static uint32_t awdlCoexMovesSettleDropped;
@@ -293,11 +739,11 @@ detach(IOPCIDevice *device)
     // The AWDL timers and their tasks are global and take the softc: stop them before anything goes. The
     // flag and all three frees run as one gated action, so no gated task sees the flag clear and then a
     // freed timer (audit P-H02; each timer call was already gated and a freed timer can't be re-armed).
-    //
+
     // Then quiesce, in every build, before any ring or DMA memory is freed: no interrupt, task or transmit
     // may touch them afterwards. This used to be VT-d only, so the Sonoma kext (built without AIRPORT_VTD)
     // freed the rings with the interrupt source and both task queues still live (audit HL01).
-    //
+
     // The gate is looked up once. Without one (a start that failed before the HAL was given its
     // controller) both steps run directly: nothing else can be running on the device then (audit F02).
     auto stopTimers = [](OSObject *, void *, void *, void *, void *) -> IOReturn {
@@ -420,6 +866,10 @@ IOReturn ItlIwx::enable(IONetworkInterface *netif)
 IOReturn ItlIwx::disable(IONetworkInterface *netif)
 {
     XYLog("%s\n", __FUNCTION__);
+    if (itlFwCrashRec) {
+        ++itlFwDisables;
+        itlFwLastDisableUS = awdlUptimeUS();
+    }
     struct _ifnet *ifp = &com.sc_ic.ic_ac.ac_if;
     if (!(ifp->if_flags & IFF_UP)) {
         XYLog("%s already in diactivating state\n", __FUNCTION__);
@@ -2912,6 +3362,7 @@ iwx_reset_tx_ring(struct iwx_softc *sc, struct iwx_tx_ring *ring)
         // The listener's frames hold a node reference, released on completion; a reset has to release it too.
         if (data->m != NULL && data->in &&
             ((awdlCoexQueue >= 0 && ring->qid == awdlCoexQueue) || (awdlCoexOrphanQueue >= 0 && ring->qid == awdlCoexOrphanQueue) ||
+             (awdlCh6TxQueue >= 0 && ring->qid == awdlCh6TxQueue) ||
              (awdlCoexBaTxQueue >= 0 && ring->qid == awdlCoexBaTxQueue) ||
              (awdlCoexBaTxResetting >= 0 && ring->qid == awdlCoexBaTxResetting))) {
             ieee80211_release_node(&sc->sc_ic, &data->in->in_ni);
@@ -3724,7 +4175,8 @@ iwx_tvqm_enable_txq(struct iwx_softc *sc, int tid, int ssn, uint32_t size, int s
         return -EINVAL;
     uint64_t epoch = dmaEpoch;
 #endif
-    if (stationId != IWX_STATION_ID && stationId != IWX_MONITOR_STA_ID && stationId != kAwdlBaStationId)
+    if (stationId != IWX_STATION_ID && stationId != IWX_MONITOR_STA_ID && stationId != kAwdlBaStationId &&
+        stationId != kAwdlCh6TxStaId)
         return -EINVAL;
     const auto ownerCurrent = [&]() {
         return !owner || (owner->generation == sc->sc_generation &&
@@ -3905,7 +4357,7 @@ iwx_tvqm_enable_txq(struct iwx_softc *sc, int tid, int ssn, uint32_t size, int s
             goto fail;
         }
         bool used = fwqid <= 0 || fwqid == IWX_DQA_CMD_QUEUE || fwqid == sc->first_data_qid ||
-            fwqid == awdlCoexOrphanQueue;
+            fwqid == awdlCoexOrphanQueue || (awdlCh6TxQueue >= 0 && fwqid == awdlCh6TxQueue);
         for (int t = 0; t < int(nitems(sc->sc_tid_data)); ++t)
             used |= sc->sc_tid_data[t].qid == fwqid;
         if (used) {
@@ -3922,11 +4374,25 @@ iwx_tvqm_enable_txq(struct iwx_softc *sc, int tid, int ssn, uint32_t size, int s
     if (awdlCoexData && stationId == kAwdlBaStationId && sc->sc_ic.ic_opmode == IEEE80211_M_STA) {
         // The listener peer's queue: a number no host queue uses, like the listener's own.
         bool used = fwqid <= 0 || fwqid == IWX_DQA_CMD_QUEUE || fwqid == sc->first_data_qid ||
-            fwqid == awdlCoexOrphanQueue || fwqid == awdlCoexQueue;
+            fwqid == awdlCoexOrphanQueue || fwqid == awdlCoexQueue || (awdlCh6TxQueue >= 0 && fwqid == awdlCh6TxQueue);
         for (int t = 0; t < int(nitems(sc->sc_tid_data)); ++t)
             used |= sc->sc_tid_data[t].qid == fwqid;
         spareBaSlot = !used;
         if (used) {
+            err = -EIO;
+            goto fail;
+        }
+    }
+    if (stationId == kAwdlCh6TxStaId) {
+        // channel 6's queue, a number no host queue uses, like the listener's.
+        bool used = sc->sc_ic.ic_opmode != IEEE80211_M_STA || fwqid <= 0 || fwqid == IWX_DQA_CMD_QUEUE ||
+            fwqid == sc->first_data_qid || fwqid == awdlCoexOrphanQueue || fwqid == awdlCoexQueue ||
+            fwqid == awdlCoexBaTxQueue || fwqid == awdlMonitorQueue;   // station mode only, so no monitor-mode BA queue
+        for (int t = 0; t < int(nitems(sc->sc_tid_data)); ++t)
+            used |= sc->sc_tid_data[t].qid == fwqid;
+        spareBaSlot = !used;
+        if (used) {
+            failureStage = "ch6-queue-owned";
             err = -EIO;
             goto fail;
         }
@@ -5442,7 +5908,7 @@ iwx_rx_addbuf(struct iwx_softc *sc, int size, int idx)
     //    m = m_gethdr(M_DONTWAIT, MT_DATA);
     //    if (m == NULL)
     //        return ENOBUFS;
-    //
+
     //    if (size <= MCLBYTES) {
     //        MCLGET(m, M_DONTWAIT);
     //    } else {
@@ -5452,12 +5918,12 @@ iwx_rx_addbuf(struct iwx_softc *sc, int size, int idx)
     //        m_freem(m);
     //        return ENOBUFS;
     //    }
-    //
+
     //    if (data->m != NULL) {
     //        bus_dmamap_unload(sc->sc_dmat, data->map);
     //        fatal = 1;
     //    }
-    //
+
     //    m->m_len = m->m_pkthdr.len = m->m_ext.ext_size;
     //    err = bus_dmamap_load_mbuf(sc->sc_dmat, data->map, m,
     //        BUS_DMA_READ|BUS_DMA_NOWAIT);
@@ -6130,6 +6596,13 @@ static uint32_t awdlCoexAwdlAction, awdlCoexAwdlData, awdlCoexOther, awdlCoexCha
 struct AwdlCoexPeer { uint8_t addr[6]; uint64_t heardUS; unsigned channel; uint32_t token; };
 static AwdlCoexPeer awdlCoexPeers[8];
 static uint32_t awdlCoexDataRxUnknownPeer, awdlCoexDataRxOffChannel;
+// -itlawdlch6group, with -itlschedch6: group-addressed AWDL data heard on channel 6 (the social
+// channel, through the listen-only channel-6 handle) is handed to macOS like data on our channel. Multicast needs no
+// ACK, so the listen-only handle can serve it. In testing the iPhone sent 62 mDNS responses over awdl0 and the
+// Mac received none; all 307 group data frames the listener heard were dropped as off-channel, while unicast was
+// handed off in full (919 021 of 919 021). Those responses carry the SRV record a stuck lookup waits for.
+static bool awdlCoexCh6Group;
+static uint32_t awdlCoexDataRxCh6Group;
 // Why a data source was refused, by count only: 0 never heard, 1 heard over 60 s ago, 2 heard on another
 // channel, 3 heard by an earlier listener (token).
 static uint32_t awdlCoexRejectReasons[4];
@@ -6383,6 +6856,38 @@ static uint32_t awdlCoexBaTxLastRate;
 static uint8_t awdlCoexSchedPeer[6];
 static uint32_t awdlCoexSchedToken;
 
+// -itlawdlmcastaw: multicast on awdl0 (mDNS queries and answers) sent at the start of an AW in which
+// the schedule peer is on our channel. In AWDL every peer listens in its AWs, so that's when group frames are heard;
+// the send gate holds only frames for the schedule peer, so multicast used to leave at any moment (in a
+// stuck lookup the iPhone reacted to none of the Mac's 7 mDNS queries, only to the Bluetooth advert). Up to 8 frames
+// are held (16, each at most 1.1 s, one full sequence), then sent anyway. -itlawdlmcastrepeat sends each once more in
+// a later such AW (multicast has no retries). With -itlsvctiming each multicast frame sent is logged with its place
+// in the peer's AW. Without timing for the peer (no calibrated schedule) frames go at once, as before.
+static bool awdlMcastAw, awdlMcastRepeat;
+static mbuf_t awdlMcastHold[16];   // 16 (a 1.1 s hold can meet a burst of queries and copies)
+static uint64_t awdlMcastHoldUS[16];
+static uint8_t awdlMcastHoldRepeat[16];
+static unsigned awdlMcastHeld;
+static uint32_t awdlMcastInAw, awdlMcastLate, awdlMcastUntimed, awdlMcastRepeats, awdlMcastHoldFull, awdlMcastAsBefore;
+// up to one full 16-slot sequence (22 of ~139 frames hit a 130 ms ceiling while the peer was away).
+static constexpr uint64_t kAwdlMcastWindowUS = 8000, kAwdlMcastMaxHoldUS = 1100000;
+extern bool itlSvcTimingOn();
+static bool awdlCoexScheduleCurrent();
+// Where `t` falls in the schedule peer's AW grid: false when its timing isn't known.
+static bool awdlMcastAwPosition(uint64_t t, uint32_t *intoUS, bool *present)
+{
+    *intoUS = 0;
+    *present = false;
+    if (!awdlCoexScheduleCurrent() || !awdlCoexPeerSchedule.timingUsable(t, awdlCoexAwSyncAssume) ||
+        !awdlCoexPeerSchedule.awUS())
+        return false;
+    uint64_t into = 0;
+    const uint32_t eaw = awdlCoexPeerSchedule.eawAt(t, &into);
+    *present = awdlCoexPeerSchedule.presentForTiming(eaw);
+    *intoUS = uint32_t(into % awdlCoexPeerSchedule.awUS());
+    return true;
+}
+
 static bool awdlCoexScheduleCurrent()
 {
     return awdlCoexAdded && awdlCoexSchedToken == awdlCoexToken &&
@@ -6536,6 +7041,7 @@ static void awdlCoexPublish()
             root->setProperty("ITLAWDLCoexDataRxMalformed", awdlCoexDataRxMalformed, 32);
             root->setProperty("ITLAWDLCoexDataRxUnknownPeer", awdlCoexDataRxUnknownPeer, 32);
             root->setProperty("ITLAWDLCoexDataRxOffChannel", awdlCoexDataRxOffChannel, 32);
+            root->setProperty("ITLAWDLCoexDataRxCh6Group", awdlCoexDataRxCh6Group, 32);
             root->setProperty("ITLAWDLCoexDataRxRetry", awdlCoexDataRxRetry, 32);
             root->setProperty("ITLAWDLCoexRxWide80", awdlCoexRxWide80, 32);
             if (auto *mods = OSData::withBytes(awdlCoexRxModulation, sizeof(awdlCoexRxModulation))) {
@@ -6715,6 +7221,14 @@ static void awdlCoexPublish()
             root->setProperty("ITLAWDLCoexUcastOK", awdlCoexUcastOK, 32);
             root->setProperty("ITLAWDLCoexUcastFailed", awdlCoexUcastFailed, 32);
             root->setProperty("ITLAWDLCoexGroupOK", awdlCoexGroupOK, 32);
+            {
+                char mc[160];
+                snprintf(mc, sizeof(mc), "%s; in AW %u, late %u, untimed %u, repeats %u, hold full %u, as before %u; "
+                         "held now %u", !awdlMcastAw ? "off" : awdlMcastRepeat ? "on, repeat" : "on", awdlMcastInAw,
+                         awdlMcastLate, awdlMcastUntimed, awdlMcastRepeats, awdlMcastHoldFull, awdlMcastAsBefore,
+                         awdlMcastHeld);
+                root->setProperty("ITLAWDLMcastAw", mc);
+            }
             root->setProperty("ITLAWDLCoexGroupFailed", awdlCoexGroupFailed, 32);
             root->setProperty("ITLAWDLCoexPromiscLive", awdlCoexPromiscLive);
             root->setProperty("ITLAWDLCoexPromiscDropped", awdlCoexPromiscDropped, 32);
@@ -7413,6 +7927,246 @@ static bool awdlCoexChannelEligible(struct ieee80211com *ic, struct ieee80211_ch
     return !reason;
 }
 
+// -itlschedsynctx: the same window for the handle design. In testing,
+// sync frames submitted at any time waited for the listener's airtime and reached the air 22 ms (mean, max 257 ms)
+// after their sync TLV was stamped; the iPhone's copy of our clock was late by 2-64 ms. Only inside a session of the
+// 149 handle (not channel 6's), with at least 5 ms left, as a real Mac sends inside its AWs on its channel.
+static bool awdlSchedSyncTx;
+static uint32_t awdlSchedSyncTxHeld, awdlSchedSyncTxInSession;
+static bool awdlSchedSyncTxGated()
+{
+    return awdlSchedSyncTx && awdlSchedHandle && !awdlSchedHandleOff && awdlSchedHandleAdded &&
+        awdlSchedSp && !awdlSchedSpOff;
+}
+
+// whether macOS's MI bitmap allows the slot we are in (one bit per slot, either of the two 16-slot sequences).
+static bool awdlMiSlotAllowed(uint64_t nowUS)
+{
+    const uint32_t bitmap = itlAWDLMiBitmap;
+    const uint32_t slot = ItlAWDL::clockEawAt(awdlSchedPlanClockNow, nowUS, nullptr) % 16;
+    return ((bitmap >> slot) | (bitmap >> (slot + 16))) & 1;
+}
+
+// a frame carrying the template from tplUS went out on 149 (which 0) or 6 (which 1).
+static void awdlAdvNote(unsigned which, uint64_t tplUS, uint64_t nowUS)
+{
+    if (!tplUS || nowUS < tplUS)
+        return;
+    const uint64_t ms = (nowUS - tplUS) / 1000;
+    const unsigned b = ms < 50 ? 0 : ms < 100 ? 1 : ms < 200 ? 2 : ms < 400 ? 3 : ms < 800 ? 4 : ms < 1600 ? 5 : 6;
+    uint64_t &done = which ? awdlAdvDone6US : awdlAdvDone149US;
+    if (tplUS > done) {
+        done = tplUS;
+        ++(which ? awdlAdvHist6 : awdlAdvHist149)[b];
+    }
+    if (tplUS > awdlAdvDoneAnyUS) {
+        awdlAdvDoneAnyUS = tplUS;
+        ++awdlAdvHistAny[b];
+        ++awdlAdvFirstOn[which ? 1 : 0];
+        awdlAdvAnySumUS += nowUS - tplUS;
+        if (nowUS - tplUS > awdlAdvAnyMaxUS)
+            awdlAdvAnyMaxUS = nowUS - tplUS;
+        ++awdlAdvSlotFirst[ItlAWDL::clockEawAt(awdlSchedPlanClockNow, nowUS, nullptr) % 16];
+        awdlMiChanges[awdlMiChangeCount++ % 16] = {uint32_t(tplUS / 1000), uint32_t(nowUS / 1000),
+                                                   uint8_t(which ? 6 : 149)};
+    }
+}
+
+static bool awdlSchedFollowTxWindow(uint64_t nowUS)
+{
+    if (awdlSchedSyncTxGated()) {
+        const bool open = awdlSchedSpActive && awdlSchedSpStartUS && awdlSchedSpMacId == kAwdlSchedHandleMacId &&
+            awdlSchedSpStartUS + uint64_t(awdlSchedSpCurDurTU) * 1024 > nowUS + 5000;
+        if (!open)
+            ++awdlSchedSyncTxHeld;
+        return open;
+    }
+    return true;
+}
+
+// the schedule the radio follows, for our frames' TLV 18 and sync TLV (AirportItlwmV2.cpp). Only
+// while the follower runs with -itlschedadvertise, the
+// listener on its own channel and the station on another: each of macOS's entries on the listener's channel,
+// and the station's channel everywhere else (the station's slots, and slots on a channel the radio doesn't
+// visit yet, such as 6, which the quota gives to the station). False otherwise: frames then advertise the
+// fixed channel as before.
+bool itlAWDLExecPlan(uint8_t *out)
+{
+    const bool scheduled =
+        (awdlSchedHandle && !awdlSchedHandleOff && awdlSchedHandleAdded && awdlSchedHandleGen == awdlCoexGeneration &&
+         awdlSchedSp && !awdlSchedSpOff);
+    if (!out || !awdlSchedAdvertise || !scheduled || awdlSchedAwdlOff() ||
+        !awdlCoexMultiActive || !awdlSchedSpStation || awdlSchedSpStation == awdlCoexChannel ||
+        awdlCoexChannel > 0xff || awdlSchedSpStation > 0xff) {
+        ++awdlSchedAdvertiseRefused;
+        return false;
+    }
+    uint8_t plan[16];
+    const uint32_t before = itlAWDLPlanVersion;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    memcpy(plan, itlAWDLPlanChannels, sizeof(plan));
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    if (!before || (before & 1) || before != itlAWDLPlanVersion) {
+        ++awdlSchedAdvertiseRefused;
+        return false;
+    }
+    const bool ch6 = awdlSchedCh6 && !awdlSchedCh6Off && awdlSchedCh6Added && awdlSchedCh6Gen == awdlCoexGeneration;
+    // while the AW extension is active, the extended plan (macOS's entries plus the 0 entries the
+    // listener takes); the extension only turns 0 entries into ours, so channel 6 and the station's stay as they are.
+    if (awdlSchedExtend && awdlSchedExtPlanUS && awdlUptimeUS() - awdlSchedExtPlanUS < kAwdlSchedExtHoldUS) {
+        for (unsigned i = 0; i < 16; ++i)
+            if (!plan[i] && awdlSchedExtPlan[i] == awdlCoexChannel)
+                plan[i] = uint8_t(awdlCoexChannel);
+        ++awdlSchedExtAdvertised;
+    }
+    for (unsigned i = 0; i < 16; ++i) {
+        const bool advertise6 = ch6 && plan[i] == kAwdlSchedCh6Channel;
+        if (advertise6 && awdlSchedCh6Quiet)
+            ++awdlSchedCh6QuietSlots;   // listened on, not advertised
+        out[i] = plan[i] == awdlCoexChannel ? uint8_t(awdlCoexChannel) :
+                 advertise6 && !awdlSchedCh6Quiet ? kAwdlSchedCh6Channel : uint8_t(awdlSchedSpStation);
+    }
+    ++awdlSchedAdvertiseServed;
+    return true;
+}
+
+// the AW-start event for the current extended AW, and the time to the next one. Layout as read by
+// IO80211AWDLPeerManager (26.7.2: reportDataPathEvents case 0x29, monitorTimeline, logAWStart, sanityCheckAWStart;
+// field names from monitorTimeline's log text): +0x00 u16 AwNumber (16 TU AWs), +0x08 Master (the node we sync to),
+// +0x0e TopMaster (the election root), +0x14 u32 big-endian FwAwStartTime in us (+16 384 per AW), +0x18
+// apple80211_channel of the slot as macOS's own sequence has it (sanityCheckAWStart compares channel and the band
+// bits 0x2018 with its sequence entry). +0x02..+0x07 zero (not read on this path).
+// false = nothing to post now (not running, macOS has AWDL off, or this extended AW was posted already).
+bool itlAWDLAwStart(uint8_t *out, uint64_t *nextInUS)
+{
+    if (nextInUS)
+        *nextInUS = 100000;
+    const bool scheduled = awdlSchedHandle && !awdlSchedHandleOff && awdlSchedHandleAdded &&
+        awdlSchedHandleGen == awdlCoexGeneration && awdlSchedSp && !awdlSchedSpOff;
+    if (!out || !nextInUS || !awdlSchedAwStart || !scheduled ||
+        !itlAWDLSyncOn || !awdlCoexMultiActive || !awdlCoexAddrKnown || !awdlSchedSpStation ||
+        awdlCoexChannel > 0xff || awdlSchedSpStation > 0xff) {
+        ++awdlSchedAwStartRefused;
+        return false;
+    }
+    const ItlAWDL::Clock c = awdlSchedPlanClockNow;
+    const uint64_t now = awdlUptimeUS();
+    const uint32_t eaw = ItlAWDL::clockEawAt(c, now, nullptr);
+    const uint64_t start = ItlAWDL::clockEawStart(c, eaw);
+    const uint64_t next = ItlAWDL::clockEawStart(c, eaw + 1);
+    *nextInUS = next > now ? next - now : 1000;
+    if (awdlSchedAwStartHaveLast && eaw == awdlSchedAwStartLastEaw) {
+        ++awdlSchedAwStartRepeat;   // an early timer: wait for the next boundary
+        return false;
+    }
+    awdlSchedAwStartHaveLast = true;
+    awdlSchedAwStartLastEaw = eaw;
+    memset(out, 0, 36);
+    const uint16_t seq = uint16_t(eaw * 4);
+    out[0] = uint8_t(seq);
+    out[1] = uint8_t(seq >> 8);
+    const bool following = awdlSchedClock && awdlSchedElectionNow.following;
+    memcpy(out + 0x08, following ? awdlSchedElectionNow.sync : awdlCoexAddr, 6);     // Master
+    memcpy(out + 0x0e, following ? awdlSchedElectionNow.master : awdlCoexAddr, 6);   // TopMaster
+    const uint32_t ts = uint32_t(start);
+    out[0x14] = uint8_t(ts >> 24);
+    out[0x15] = uint8_t(ts >> 16);
+    out[0x16] = uint8_t(ts >> 8);
+    out[0x17] = uint8_t(ts);
+    // macOS's own entry for this slot (0 stays 0), with its band bit, as sanityCheckAWStart expects; not the
+    // channel the radio is on (the station's in 0 and Wi-Fi slots).
+    const uint32_t ch = awdlSchedPlanLast[eaw % 16];
+    const uint32_t flags = !ch ? 0 : 0x2 /* 20 MHz */ | (ch <= 14 ? 0x8u /* 2.4 GHz */ : 0x10u /* 5 GHz */);
+    const uint32_t version = 1;
+    memcpy(out + 0x18, &version, 4);
+    memcpy(out + 0x1c, &ch, 4);
+    memcpy(out + 0x20, &flags, 4);
+    ++awdlSchedAwStartServed;
+    if (awdlSchedAwEnd) {
+        awdlSchedAwOpen = true;
+        awdlSchedAwOpenEaw = eaw;
+        awdlSchedAwOpenClock = c;
+    }
+    return true;
+}
+
+// the AW-end event for the extended AW the last AW start opened, once that AW is over. Layout as read
+// by IO80211AWDLPeerManager (26.7.2; struct apple80211_availability_window_extensions_end, shared with the extension
+// event 42): +0x04 u32 big-endian end time in us, same clock as the start's +0x14 (logAWEnd stores it; sanityCheckAWEnd
+// wants end - start within 11 TU of presence mode x AW period); +0x0c u32 infra beacon count (reportDataPathEvents
+// stores it for monitorInfraBeacon, which warns after 1 s without a change while it is armed). Intel firmware keeps
+// beacon tracking to itself, so the count is an estimate: one per 102.4 ms while the station has a channel, held
+// otherwise. +0x10 u16 stays 0, so IO80211 skips the per-AW MI statistics block (+0x18..+0x24). Everything else 0.
+// false = nothing to close yet (no open AW, or it hasn't ended). Called just before itlAWDLAwStart at each boundary.
+bool itlAWDLAwEnd(uint8_t *out, size_t length)
+{
+    if (!out || length < 40 || !awdlSchedAwEnd || !awdlSchedAwOpen)
+        return false;
+    const uint64_t now = awdlUptimeUS();
+    const ItlAWDL::Clock c = awdlSchedAwOpenClock;
+    const uint64_t end = ItlAWDL::clockEawStart(c, awdlSchedAwOpenEaw + 1);
+    if (now < end)
+        return false;
+    if (now - end > 20000)
+        ++awdlSchedAwEndLate;               // the timer fired more than 20 ms after the AW ended
+    const ItlAWDL::Clock cur = awdlSchedPlanClockNow;
+    if (c.anchorEndUS != cur.anchorEndUS || c.anchorEaw != cur.anchorEaw || c.eawUS != cur.eawUS)
+        ++awdlSchedAwEndClockMoved;         // the follower changed clocks while this AW was open
+    if (awdlSchedSpStation) {
+        if (!awdlSchedAwEndBcnSince)
+            awdlSchedAwEndBcnSince = now;
+    } else {
+        awdlSchedAwEndBcnSince = 0;
+    }
+    static uint32_t beacons;
+    if (awdlSchedAwEndBcnSince) {
+        const uint32_t estimate = uint32_t((now - awdlSchedAwEndBcnSince) / 102400);
+        if (estimate > beacons)
+            beacons = estimate;
+    }
+    memset(out, 0, length);
+    const uint32_t ts = uint32_t(end);
+    out[0x04] = uint8_t(ts >> 24);
+    out[0x05] = uint8_t(ts >> 16);
+    out[0x06] = uint8_t(ts >> 8);
+    out[0x07] = uint8_t(ts);
+    memcpy(out + 0x0c, &beacons, 4);
+    awdlSchedAwOpen = false;
+    ++awdlSchedAwEndServed;
+    return true;
+}
+
+// AirportItlwmV2.cpp, -itlawdlstats: the AWDL data frames the listener received and sent so far
+// (cumulative), for IO80211's AWDL data-mode monitor (IO80211PeerManager::updateLocalCounters: stats +0x18 RX
+// packets, +0x08 TX packets). false when the listener isn't up.
+bool itlAWDLDataCounts(uint32_t *rxPkts, uint32_t *txPkts)
+{
+    if (!rxPkts || !txPkts || !awdlCoexMultiActive)
+        return false;
+    *rxPkts = awdlCoexAwdlData;
+    *txPkts = awdlCoexDataTx;
+    return true;
+}
+
+// the election result and clock for our frames (AirportItlwmV2.cpp), while the follower runs with
+// -itlschedclock and the election ran in the last second. Following a peer: its master, our sync node, the
+// distance, the master's metric and counter, and the master's clock when its sync TLV is recent (else our
+// own). Our own master: ourselves and our own clock. False otherwise (frames as before).
+bool itlAWDLClockState(ItlAWDL::ElectionAdvert *advert, ItlAWDL::Clock *clock)
+{
+    if (!advert || !clock || !awdlSchedClock || !awdlSchedElectionRunUS || !awdlSchedSp || awdlSchedSpOff ||
+        awdlUptimeUS() - awdlSchedElectionRunUS > 1000000ULL)
+        return false;
+    const ItlAWDL::ElectionResult &r = awdlSchedElectionNow;
+    memcpy(advert->master, r.master, 6);
+    memcpy(advert->sync, r.sync, 6);
+    advert->height = r.height;
+    advert->masterMetric = r.masterMetric;
+    advert->masterCounter = r.masterCounter;
+    *clock = r.clockValid ? r.clock : ItlAWDL::ownClock();
+    return true;
+}
+
 static void awdlStopTimers()
 {
     // Set first; every arm site checks it inside the command gate, and the frees below run in the gate,
@@ -7421,6 +8175,8 @@ static void awdlStopTimers()
     timeout_free(&awdlCoexTxTimer);
     timeout_free(&awdlCoexTimer);
     timeout_free(&awdlRxTimer);
+    timeout_free(&awdlSchedFollowTimer);
+    task_del(systq, &awdlSchedFollowTaskEntry);
     task_del(systq, &awdlCoexTxTaskEntry);
     task_del(systq, &awdlCoexTaskEntry);
     task_del(systq, &awdlRxTaskEntry);
@@ -7498,6 +8254,11 @@ awdlCoexTxTask(void *arg)
         that->awdlCoexCountryAnswer(sc);
     if (running && !awdlStopping && awdlCoexAdded && awdlCoexGeneration == sc->sc_generation)
         that->awdlCoexRetarget(sc);
+    if (awdlSchedSp && !awdlSchedSpOff && running && !awdlStopping && awdlCoexAdded &&
+        awdlCoexGeneration == sc->sc_generation)
+        that->awdlSchedSpTick(sc);
+    if (itlFwCrashRec)
+        itlFwDiagPublish();
     if (running && awdlCoexAdded && awdlCoexGeneration == sc->sc_generation) {
         if (!awdlCoexTxStaAdded && awdlCoexTxSetupTried < kAwdlCoexTxSetupTries &&
             awdlCoexBrokenGeneration != sc->sc_generation) {
@@ -7505,7 +8266,9 @@ awdlCoexTxTask(void *arg)
             (void)that->awdlCoexTxSetup(sc);
         }
         const uint64_t watchNowUS = awdlUptimeUS();
-        if (awdlCoexTxStaAdded && awdlCoexInFlight && watchNowUS - awdlCoexInFlightUS > kAwdlCoexTxStuckUS &&
+        if (awdlCoexTxStaAdded && awdlCoexInFlight &&
+            watchNowUS - awdlCoexInFlightUS > (awdlSchedSyncTxGated() ? 3000000ULL :
+                                                kAwdlCoexTxStuckUS) &&
             (!awdlCoexLastCompletionUS || watchNowUS - awdlCoexLastCompletionUS > 1000000ULL ||
              watchNowUS - awdlCoexInFlightUS > 5000000ULL)) {
             // A late completion for this frame no longer matches the pending one.
@@ -7561,17 +8324,65 @@ awdlCoexTxTask(void *arg)
         const bool awTimed = awdlCoexData && awdlAwSync && !coexDataActive && sinceSync >= kAwdlAwSyncMinGapUS &&
             awTimingUsable &&
             awdlCoexPeerSchedule.inPresentAwStart(taskNowUS, kAwdlAwSyncWindowUS, awdlCoexAwSyncAssume);
-        const bool syncDue = !awdlCoexData || awTimed ||
+        // a waiting unicast MI makes a sync frame due in the peer's AW (see awdlUmi).
+        int umiKind = 0;   // 1 in the peer's AW, 2 untimed, 3 held too long
+        if (awdlUmi && itlAWDLUmiPending && sinceSync >= kAwdlAwSyncMinGapUS) {
+            uint32_t into = 0;
+            bool present = false;
+            const bool timed = awdlMcastAwPosition(taskNowUS, &into, &present);
+            const uint64_t at = itlAWDLUmiAtUS;
+            if (!timed)
+                umiKind = 2;
+            else if (present && into < kAwdlMcastWindowUS)
+                umiKind = 1;
+            else if (at && taskNowUS > at && taskNowUS - at > kAwdlMcastMaxHoldUS)
+                umiKind = 3;
+        }
+        const bool miDueNow = awdlMiDue(taskNowUS) && sinceSync >= 2000;   // the MI at once
+        const bool syncDue = !awdlCoexData || awTimed || umiKind || miDueNow ||
             sinceSync >= (coexDataActive ? 100000ULL : ItlAWDL::kSyncIdleIntervalUS);
-        if (awdlCoexTxStaAdded && !awdlCoexInFlight && !awdlCoexTxHalted && !awdlStopping && awdlCoexAdded &&
-            taskNowUS >= awdlCoexTxPauseUntilUS && syncDue) {
+        bool syncHold = false;
+        if (awdlSyncFirst && awdlCoexTxStaAdded && !awdlCoexInFlight && !awdlCoexTxHalted && !awdlStopping &&
+            awdlCoexAdded && taskNowUS >= awdlCoexTxPauseUntilUS && syncDue && awdlCoexQueue >= 0 &&
+            awdlCoexQueue < int(nitems(sc->txq)) && sc->txq[awdlCoexQueue].queued > 0 &&
+            awdlSchedFollowTxWindow(taskNowUS)) {
+            if (!awdlSyncFirstHoldSinceUS) {
+                awdlSyncFirstHoldSinceUS = taskNowUS;
+                ++awdlSyncFirstHolds;
+            }
+            if (taskNowUS - awdlSyncFirstHoldSinceUS < kAwdlSyncFirstMaxHoldUS) {
+                syncHold = true;
+                ++awdlSyncFirstHeldTicks;
+            } else {
+                ++awdlSyncFirstTimeouts;
+            }
+        }
+        if (!syncHold && awdlSyncFirstHoldSinceUS) {
+            const uint64_t held = taskNowUS - awdlSyncFirstHoldSinceUS;
+            if (held > awdlSyncFirstHoldMaxUS)
+                awdlSyncFirstHoldMaxUS = held;
+            awdlSyncFirstHoldSinceUS = 0;
+        }
+        if (!syncHold && awdlCoexTxStaAdded && !awdlCoexInFlight && !awdlCoexTxHalted && !awdlStopping && awdlCoexAdded &&
+            taskNowUS >= awdlCoexTxPauseUntilUS && syncDue && awdlSchedFollowTxWindow(taskNowUS)) {
             awdlCoexLastSyncUS = taskNowUS;
+            if (awdlSchedSyncTxGated())
+                ++awdlSchedSyncTxInSession;
             if (awTimed)
                 ++awdlCoexAwSyncFrames;
             else if (awdlCoexData && !coexDataActive)
                 ++awdlCoexIdleSyncFrames;
+            if (umiKind) {
+                ++(umiKind == 1 ? awdlUmiInAw : umiKind == 2 ? awdlUmiUntimed : awdlUmiLate);
+                itlAWDLUmiGo = 1;
+            }
             that->awdlCoexTxSend(sc);
+            itlAWDLUmiGo = 0;
+            if (umiKind)
+                awdlSchedSpPublish();
         }
+        if (awdlSchedCh6Tx)
+            that->awdlCh6TxSend(sc, awdlUptimeUS());
         if (awdlCoexData && !awdlStopping && awdlCoexAdded) {
             that->awdlCoexBaHandle(sc);
             that->awdlCoexBaPauseStep(sc);
@@ -7637,6 +8448,49 @@ awdlCoexTxTask(void *arg)
             if (untilAW)
                 nextMS = MIN(nextMS, MAX(1U, unsigned(untilAW / 1000)));
         }
+        // one RX-outcome sample per second while running.
+        if (awdlRxLoss && (!awdlRxLastSampleUS || timerNowUS - awdlRxLastSampleUS >= 1000000ULL)) {
+            const uint32_t now[11] = {awdlCoexAwdlData, awdlCoexDataRxDelivered,
+                awdlCoexDataRxOffChannel + awdlCoexDataRxUnknownPeer + awdlCoexDataRxMalformed + awdlCoexDataRxNotCopied,
+                itlAWDLRxDelivered, itlAWDLRxNotOurs,
+                itlAWDLRxAllocFail + itlAWDLRxPrepFail + itlAWDLRxCopyFail + itlAWDLRxQueueFail,
+                itlAWDLRxParseBad, itlAWDLRxSelf, itlAWDLRxDisabled, awdlCoexDataRxNotCopied, 0};
+            if (awdlRxLastSampleUS) {
+                const AwdlRxSecond sec{uint32_t(timerNowUS / 1000000ULL), now[0] - awdlRxLast[0], now[1] - awdlRxLast[1],
+                                       now[2] - awdlRxLast[2], now[3] - awdlRxLast[3], now[4] - awdlRxLast[4],
+                                       now[5] - awdlRxLast[5]};
+                if (sec.heard || sec.ok || sec.notOurs || sec.fails) {
+                    awdlRxSeconds[awdlRxSecondsNext++ % 30] = sec;
+                    char t[1200];
+                    size_t u = size_t(snprintf(t, sizeof(t), "totals: handed %u refused %u (not copied %u); awdl0 ok %u "
+                        "not ours %u fails %u (alloc %u prep %u copy %u queue %u) parse %u self %u off %u; last s "
+                        "[up s: heard/handed/refused -> ok/notours/fails]:", now[1], now[2], now[9], now[3], now[4], now[5],
+                        itlAWDLRxAllocFail, itlAWDLRxPrepFail, itlAWDLRxCopyFail, itlAWDLRxQueueFail, now[6], now[7], now[8]));
+                    const uint32_t count = awdlRxSecondsNext < 30 ? awdlRxSecondsNext : 30;
+                    for (uint32_t k = 0; k < count && u < sizeof(t); ++k) {
+                        const AwdlRxSecond &e = awdlRxSeconds[(awdlRxSecondsNext - count + k) % 30];
+                        u += size_t(snprintf(t + u, sizeof(t) - u, " %u: %u/%u/%u -> %u/%u/%u", e.upS, e.heard, e.handed,
+                                             e.refused, e.ok, e.notOurs, e.fails));
+                    }
+                    IORegistryEntry::getRegistryRoot()->setProperty("ITLAWDLRxLoss", t);
+                }
+            }
+            memcpy(awdlRxLast, now, sizeof(awdlRxLast));
+            awdlRxLastSampleUS = timerNowUS;
+        }
+        // wake at the follower's session end, then every 1 ms for up to 10 ms until the next one is asked for.
+        if (awdlSchedHandover && awdlSchedSpPlannedEndUS && running && awdlCoexGeneration == sc->sc_generation) {
+            const uint64_t end = awdlSchedSpPlannedEndUS;
+            if (timerNowUS < end) {
+                const unsigned untilEnd = MAX(1U, unsigned((end - timerNowUS) / 1000));
+                if (untilEnd < nextMS) {
+                    nextMS = untilEnd;
+                    ++awdlSchedHandoverWakes;
+                }
+            } else if (timerNowUS - end < 10000) {
+                nextMS = 1;
+            }
+        }
         timeout_add_msec(&awdlCoexTxTimer, nextMS);
     }
 }
@@ -7655,6 +8509,10 @@ awdlCoexDataPump(struct iwx_softc *sc, unsigned budget)
         return;
     if (awdlUptimeUS() < awdlCoexTxPauseUntilUS) {
         (void)itlAWDLServiceTransmit(getController());
+        return;
+    }
+    if (awdlSyncFirst && awdlSyncFirstHoldSinceUS) {   // a sync frame waits for the ring to drain
+        ++awdlSyncFirstPumpSkips;
         return;
     }
     ++awdlCoexDataPumps;
@@ -7732,6 +8590,66 @@ awdlCoexDataPump(struct iwx_softc *sc, unsigned budget)
         } else {
             awdlCoexHoldSinceUS = 0;
         }
+    }
+    // held multicast frames go at the peer's next AW start (or after 130 ms); a held copy only in a
+    // later AW than its original.
+    if (awdlMcastHeld) {
+        uint32_t into = 0;
+        bool present = false;
+        const uint64_t mcNow = awdlUptimeUS();
+        const bool timed = awdlMcastAwPosition(mcNow, &into, &present);
+        const bool inWindow = timed && present && into < kAwdlMcastWindowUS;
+        unsigned kept = 0;
+        for (unsigned i = 0; i < awdlMcastHeld; ++i) {
+            mbuf_t m = awdlMcastHold[i];
+            const uint64_t age = mcNow - awdlMcastHoldUS[i];
+            const bool isCopy = awdlMcastHoldRepeat[i] == 2;
+            const bool due = isCopy ? (inWindow && age >= awdlCoexPeerSchedule.awUS()) || age > kAwdlMcastMaxHoldUS
+                                    : inWindow || !timed || age > kAwdlMcastMaxHoldUS;
+            if (!due || ring.queued >= 64 || awdlMiDue(mcNow)) {   // not ahead of a due MI
+                awdlMcastHold[kept] = m;
+                awdlMcastHoldUS[kept] = awdlMcastHoldUS[i];
+                awdlMcastHoldRepeat[kept] = awdlMcastHoldRepeat[i];
+                ++kept;
+                continue;
+            }
+            if (isCopy && !inWindow) {   // a copy that never found a later AW isn't worth sending late
+                mbuf_freem(m);
+                continue;
+            }
+            // A copy for a later present AW: after an in-AW send with -itlawdlmcastrepeat, and always after a
+            // send forced out while the peer was away, so at least one copy can be heard.
+            const bool forcedAway = !isCopy && timed && !inWindow;
+            if (!isCopy && (inWindow ? awdlMcastHoldRepeat[i] == 1 : forcedAway) &&
+                kept + (awdlMcastHeld - i) <= nitems(awdlMcastHold)) {
+                mbuf_t copy = nullptr;
+                if (!mbuf_dup(m, MBUF_DONTWAIT, &copy) && copy) {
+                    awdlMcastHold[kept] = copy;
+                    awdlMcastHoldUS[kept] = mcNow;
+                    awdlMcastHoldRepeat[kept] = 2;
+                    ++kept;
+                }
+            }
+            ++(isCopy ? awdlMcastRepeats : inWindow ? awdlMcastInAw : timed ? awdlMcastLate : awdlMcastUntimed);
+            if (itlSvcTimingOn())
+                XYLog("ITLSVC %llu mcast tx len %u %s after %llu ms: %u us into the AW, peer present %d\n",
+                      (unsigned long long)(mcNow / 1000), unsigned(mbuf_len(m)), isCopy ? "repeat" : "held",
+                      (unsigned long long)(age / 1000), unsigned(into), present ? 1 : 0);
+            auto *node = ieee80211_ref_node(ic->ic_bss);
+            awdlCoexSending = true;
+            awdlCoexSendingData = true;
+            const int err = iwx_tx(sc, m, node, EDCA_AC_BE, awdlCoexQueue);
+            awdlCoexSendingData = false;
+            awdlCoexSending = false;
+            if (err) {
+                ieee80211_release_node(ic, node);
+                ++awdlCoexDataTxErrors;
+                continue;
+            }
+            ++awdlCoexDataTx;
+            awdlCoexLastDataUS = awdlUptimeUS();
+        }
+        awdlMcastHeld = kept;
     }
     while (budget && ring.queued < 64 && awdlCoexAdded && awdlCoexGeneration == sc->sc_generation && !awdlStopping) {
         // Leave output queued while the paused aggregate ring is full. Sending it on
@@ -7820,6 +8738,52 @@ awdlCoexDataPump(struct iwx_softc *sc, unsigned budget)
         if (unicast && aggregateEligible && sc->txq[awdlCoexBaTxQueue].queued > 0 &&
             ItlAWDL::sameAddress(nextBytes + 4, awdlCoexBaPeer))
             ++awdlCoexOrderSingleBehindAgg;
+        if (!unicast && awdlMiDue(awdlUptimeUS()) && awdlMcastHeld < nitems(awdlMcastHold)) {
+            // multicast (mDNS announcements) waits behind the MI with the same change.
+            awdlMcastHold[awdlMcastHeld] = next;
+            awdlMcastHoldUS[awdlMcastHeld] = awdlUptimeUS();
+            awdlMcastHoldRepeat[awdlMcastHeld] = 0;
+            ++awdlMcastHeld;
+            ++awdlMiNowMcastHeld;
+            continue;
+        }
+        if (!unicast && (awdlMcastAw || itlSvcTimingOn())) {
+            uint32_t into = 0;
+            bool present = false;
+            const uint64_t mcNow = awdlUptimeUS();
+            const bool timed = awdlMcastAwPosition(mcNow, &into, &present);
+            const bool inWindow = timed && present && into < kAwdlMcastWindowUS;
+            if (awdlMcastAw && timed && !inWindow) {
+                if (awdlMcastHeld < nitems(awdlMcastHold)) {
+                    awdlMcastHold[awdlMcastHeld] = next;
+                    awdlMcastHoldUS[awdlMcastHeld] = mcNow;
+                    awdlMcastHoldRepeat[awdlMcastHeld] = awdlMcastRepeat ? 1 : 0;
+                    ++awdlMcastHeld;
+                    continue;   // sent by awdlMcastFlush at the peer's next AW
+                }
+                ++awdlMcastHoldFull;
+            }
+            if (awdlMcastAw && inWindow && awdlMcastRepeat && awdlMcastHeld < nitems(awdlMcastHold)) {
+                mbuf_t copy = nullptr;
+                if (!mbuf_dup(next, MBUF_DONTWAIT, &copy) && copy) {
+                    awdlMcastHold[awdlMcastHeld] = copy;
+                    awdlMcastHoldUS[awdlMcastHeld] = mcNow;
+                    awdlMcastHoldRepeat[awdlMcastHeld] = 2;   // 2 = a copy waiting for a later AW
+                    ++awdlMcastHeld;
+                }
+            }
+            if (!awdlMcastAw)
+                ++awdlMcastAsBefore;
+            else
+                ++(inWindow ? awdlMcastInAw : timed ? awdlMcastLate : awdlMcastUntimed);   // late = hold was full
+            static uint32_t mcLogged;
+            static uint64_t mcSecond;
+            if (mcNow - mcSecond >= 1000000) { mcSecond = mcNow; mcLogged = 0; }
+            if (itlSvcTimingOn() && mcLogged++ < 40)
+                XYLog("ITLSVC %llu mcast tx len %u %s: %u us into the AW, peer present %d\n",
+                      (unsigned long long)(mcNow / 1000), unsigned(mbuf_len(next)),
+                      !timed ? "untimed" : inWindow ? "in AW start" : "outside AW start", unsigned(into), present ? 1 : 0);
+        }
         auto *node = ieee80211_ref_node(ic->ic_bss);
         awdlCoexSending = true;
         awdlCoexSendingData = true;
@@ -8343,7 +9307,7 @@ awdlCoexBaHandle(struct iwx_softc *sc)
         // Only with the listener on its own context (-itlawdlcoexmulti): shared with the station's (MultiState
         // off), the station-lifetime rule stopped Mac → iPhone sends, and the session rule fixed it (#63).
         const bool sessionRule = awdlCoexBaFilterBySession || !awdlCoexMultiActive;
-        const bool wantOff = (sessionRule ? receiveSession : awdlCoexBaPeerAdded) &&
+        bool wantOff = (sessionRule ? receiveSession : awdlCoexBaPeerAdded) &&
             answerNow >= awdlCoexBaProbeUntilUS;
         if (wantOff != awdlCoexBaFilterOff) {
             awdlCoexBaFilter.off = wantOff;
@@ -8959,7 +9923,7 @@ awdlRxTask(void *arg)
                 root->setProperty("ITLAWDLTxWindow", awdlWindow, 32);
             }
             awdlTxBusySinceUS = 0;
-            task_add(systq, &sc->init_task);
+            { itlFwNoteRestart(1); task_add(systq, &sc->init_task); }
             return;
         }
     }
@@ -9033,7 +9997,7 @@ awdlRxTask(void *arg)
             }
             awdlChannelMove.wantUp = awdlChannelMove.wantDown = false;
             awdlChannelMove.moveStartUS = moveNow;
-            task_add(systq, &sc->init_task);
+            { itlFwNoteRestart(2); task_add(systq, &sc->init_task); }
             return;
         }
         if (!awdlBackgroundScanActive && !awdlChannelMove.wantUp && !awdlChannelMove.wantDown &&
@@ -9105,6 +10069,16 @@ iwx_rx_frame(struct iwx_softc *sc, mbuf_t m, int chanidx,
     const bool chanValid = chanidx > 0 && chanidx < int(nitems(ic->ic_channels));
     if (chanidx < 0 || chanidx >= nitems(ic->ic_channels))
         chanidx = ieee80211_chan2ieee(ic, ic->ic_ibss_chan);
+    if (awdlSchedSp && chanValid && awdlSchedSpStation && awdlSchedSpSent) {
+        const bool lis = unsigned(chanidx) == awdlCoexChannel, sta = unsigned(chanidx) == awdlSchedSpStation;
+        if (awdlSchedSpActive) {
+            awdlSchedSpLisIn += lis;
+            awdlSchedSpStaIn += sta;
+        } else {
+            awdlSchedSpLisOut += lis;
+            awdlSchedSpStaOut += sta;
+        }
+    }
     if (awdlCoexProbe && awdlCoexAdded && awdlRxMacMaskValid)
         ++awdlCoexMacMaskSeen[awdlRxMacMask < 3 ? awdlRxMacMask : 3];
     
@@ -9128,6 +10102,8 @@ iwx_rx_frame(struct iwx_softc *sc, mbuf_t m, int chanidx,
         if ((awdlFrame || baToUs) && cf[0] == 0xd0) {
             ++awdlCoexAwdlAction;
             ++(unsigned(chanidx) == awdlCoexChannel ? awdlCoexActionOnChannel : awdlCoexActionOffChannel);
+            if (awdlSchedCh6 && chanValid && unsigned(chanidx) == kAwdlSchedCh6Channel)
+                ++awdlSchedCh6Frames;
 #if defined(ITL_AWDL_NATIVE)
             // The listener's frames come without the FCS; the hand-off expects four bytes after the
             // frame, as from monitor mode, so a copy gets them. Some setups also pad the frame with zeros
@@ -9146,6 +10122,107 @@ iwx_rx_frame(struct iwx_softc *sc, mbuf_t m, int chanidx,
                 const uint64_t heardUS = awdlUptimeUS();
                 const bool ourChannel = chanValid && unsigned(chanidx) == awdlCoexChannel;
                 const bool fromOwnAddr = awdlCoexAddrKnown && ItlAWDL::sameAddress(cf + 10, awdlCoexAddr);
+                if (!fromOwnAddr && itlSvcTimingOn())
+                    awdlSvcNoteResponses(cf, coexLen, heardUS);
+                if (awdlSchedClock && !fromOwnAddr) {   // every peer's election view and clock
+                    ItlAWDL::ElectionView electionView{};
+                    if (ItlAWDL::electionFromAction(cf, coexLen, &electionView)) {
+                        ItlAWDL::PeerSyncInfo electionSync{};
+                        const bool hasSync = ItlAWDL::peerSyncFromAction(cf, coexLen, &electionSync);
+                        // rxi_rssi is dBm + 100 here (iwx_rx_mpdu_mq normalises against IWX_MIN_DBM).
+                        const int32_t rssiDbm = rxi ? int32_t(rxi->rxi_rssi) - 100 : ItlAWDL::kElectionNoRssi;
+                        uint8_t peerVersion = 0;
+                        const int version = ItlAWDL::electionVersionFromAction(cf, coexLen, &peerVersion) ?
+                            int(peerVersion) : -1;
+                        const bool on5GHz = !chanValid || chanidx > 14;   // chanidx is the channel number here
+                        // the frame's receive delay from its GP2 on-air stamp.
+                        int64_t rxDelay = 0;
+                        const bool delayKnown = (awdlSchedOnAir || awdlSchedSkew) && device_timestamp;
+                        if (delayKnown)
+                            rxDelay = awdlRxDelayUS(heardUS, device_timestamp);
+                        uint64_t clockUS = heardUS;
+                        bool syncUsable = hasSync;
+                        if (awdlSchedOnAir && delayKnown) {
+                            if (rxDelay > 0 && uint64_t(rxDelay) < heardUS)
+                                clockUS = heardUS - uint64_t(rxDelay);
+                            if (hasSync && rxDelay > kAwdlOnAirMaxDelayUS) {
+                                syncUsable = false;
+                                ++awdlOnAirRejected;
+                            } else if (hasSync) {
+                                ++awdlOnAirUsed;
+                            }
+                        }
+                        awdlSchedElection.note(cf + 10, &electionView, syncUsable ? &electionSync : nullptr, clockUS,
+                                               rssiDbm, on5GHz, version);
+                        // while we follow, our clock against the master's sync TLV at its on-air time.
+                        if (awdlSchedSkew && hasSync && electionSync.awPeriodTU && device_timestamp && !(cf[10] & 1) &&
+                            awdlSchedElectionNow.following && ItlAWDL::sameAddress(cf + 10, awdlSchedElectionNow.sync)) {
+                            const int64_t delay = rxDelay;
+                            const uint64_t airUS = delay > 0 && uint64_t(delay) < heardUS ? heardUS - uint64_t(delay) : heardUS;
+                            const uint64_t lat = delay > 0 ? uint64_t(delay) : 0;
+                            awdlFollowLatSumUS += lat;
+                            if (lat > awdlFollowLatMaxUS) awdlFollowLatMaxUS = lat;
+                            ++awdlFollowLatBucket[awdlUsBucket(lat)];
+                            const ItlAWDL::Clock theirs = ItlAWDL::clockFromSync(electionSync, airUS);
+                            const ItlAWDL::Clock ours = awdlSchedPlanClockNow;
+                            bool matched = false;
+                            if (ours.eawUS && theirs.eawUS == ours.eawUS) {
+                                const uint32_t eNow = ItlAWDL::clockEawAt(ours, airUS, nullptr);
+                                for (int dlt = -2; dlt <= 2 && !matched; ++dlt) {
+                                    const uint32_t e = uint32_t(int64_t(eNow) + dlt);
+                                    if ((e & 0x3fff) != (theirs.anchorEaw & 0x3fff))
+                                        continue;
+                                    matched = true;
+                                    // > 0: the master's AW ends later than our clock says (we run early).
+                                    const int64_t err = int64_t(theirs.anchorEndUS) - int64_t(ItlAWDL::clockEawStart(ours, e + 1));
+                                    ++awdlFollowN;
+                                    awdlFollowSumUS += err;
+                                    awdlFollowLastUS = err;
+                                    if (awdlFollowN == 1 || err < awdlFollowMinUS) awdlFollowMinUS = err;
+                                    if (awdlFollowN == 1 || err > awdlFollowMaxUS) awdlFollowMaxUS = err;
+                                    ++awdlFollowBucket[awdlUsBucket(uint64_t(err < 0 ? -err : err))];
+                                    if (err >= 1000) ++awdlFollowLate;
+                                    else if (err <= -1000) ++awdlFollowEarly;
+                                }
+                            }
+                            if (!matched)
+                                ++awdlFollowNoMatch;
+                        }
+                        // the schedule peer's copy of our clock, while we are our own master.
+                        if (awdlSchedSkew && hasSync && electionSync.awPeriodTU && !(cf[10] & 1) &&
+                            !awdlSchedElectionNow.following &&
+                            (!awdlCoexBaPeerAdded || ItlAWDL::sameAddress(cf + 10, awdlCoexBaPeer))) {
+                            const ItlAWDL::Clock theirs = ItlAWDL::clockFromSync(electionSync, heardUS);
+                            const ItlAWDL::Clock ours = awdlSchedPlanClockNow;
+                            if (ours.eawUS && theirs.eawUS == ours.eawUS) {
+                                const uint32_t eNow = ItlAWDL::clockEawAt(ours, heardUS, nullptr);
+                                bool matched = false;
+                                for (int dlt = -2; dlt <= 2 && !matched; ++dlt) {
+                                    const uint32_t e = uint32_t(int64_t(eNow) + dlt);
+                                    if ((e & 0x3fff) != (theirs.anchorEaw & 0x3fff))
+                                        continue;
+                                    matched = true;
+                                    const int64_t skew = int64_t(theirs.anchorEndUS) -
+                                        int64_t(ItlAWDL::clockEawStart(ours, e + 1));
+                                    const uint64_t mag = uint64_t(skew < 0 ? -skew : skew);
+                                    ++awdlSkewN;
+                                    awdlSkewSumUS += skew;
+                                    awdlSkewLastUS = skew;
+                                    if (skew < awdlSkewMinUS) awdlSkewMinUS = skew;
+                                    if (skew > awdlSkewMaxUS) awdlSkewMaxUS = skew;
+                                    ++awdlSkewBucket[mag < 500 ? 0 : mag < 1000 ? 1 : mag < 2000 ? 2 : mag < 4000 ? 3 :
+                                                     mag < 8000 ? 4 : mag < 16000 ? 5 : 6];
+                                    if (skew >= 1000) ++awdlSkewLate;
+                                    else if (skew <= -1000) ++awdlSkewEarly;
+                                }
+                                if (!matched)
+                                    ++awdlSkewNoMatch;
+                            }
+                        }
+                        ++awdlSchedElectionFrames;
+                        awdlSchedElectionSyncs += hasSync;
+                    }
+                }
                 // Which 5 GHz channel Apple uses here, from the peer's own channel sequence, heard on any
                 // channel: 44 if its AWDL slots name it, else 149 (the min rule). The channel picker follows it.
                 if (!(cf[10] & 1) && !fromOwnAddr &&
@@ -9349,10 +10426,14 @@ iwx_rx_frame(struct iwx_softc *sc, mbuf_t m, int chanidx,
                 if (awdlVht80TwoStream(rate_n_flags))
                     ++awdlCoexRxVht80TwoStream;
             }
+            if (awdlCoexData && (mbuf_next(m) || dataLen + 4 > sizeof(awdlCoexDataBuf)))
+                ++awdlCoexDataRxNotCopied;   // was silent
             if (awdlCoexData && !mbuf_next(m) && dataLen + 4 <= sizeof(awdlCoexDataBuf)) {
                 ++awdlCoexDataRx;
                 ItlAWDL::DataFrameView view;
-                if (!chanValid || unsigned(chanidx) != awdlCoexChannel) {
+                const bool ch6Group = awdlCoexCh6Group && chanValid && (cf[4] & 1) && awdlSchedCh6 &&
+                    unsigned(chanidx) == kAwdlSchedCh6Channel;
+                if (!chanValid || (unsigned(chanidx) != awdlCoexChannel && !ch6Group)) {
                     ++awdlCoexDataRxOffChannel;
                 } else if (!awdlCoexPeerKnown(cf + 10, awdlUptimeUS())) {
                     ++awdlCoexDataRxUnknownPeer;
@@ -9370,7 +10451,13 @@ iwx_rx_frame(struct iwx_softc *sc, mbuf_t m, int chanidx,
                             awdlCoexBaRxTidLastUS[cf[24] & 7] = awdlCoexBaPeerLastUS;
                     }
                     itlAWDLObserveData(getController(), awdlCoexDataBuf, dataLen + 4);
-                    if (awdlCoexScheduleCurrent() && ItlAWDL::sameAddress(cf + 10, awdlCoexSchedPeer)) {
+                    if (ch6Group)
+                        ++awdlCoexDataRxCh6Group;
+                    if (awdlSchedCh6Peer && (cf[4] & 1)) {   // group data per slot, on 6 and on our channel
+                        const uint32_t slot = ItlAWDL::clockEawAt(awdlSchedPlanClockNow, awdlUptimeUS(), nullptr) % 16;
+                        ++(ch6Group ? awdlGroupRxSlotCh6 : awdlGroupRxSlotListener)[slot];
+                    }
+                    if (!ch6Group && awdlCoexScheduleCurrent() && ItlAWDL::sameAddress(cf + 10, awdlCoexSchedPeer)) {
                         awdlCoexSchedPeerRxUS = awdlUptimeUS();
                         awdlCoexPeerSchedule.notePeerFrame(awdlCoexSchedPeerRxUS);
                     }
@@ -9388,6 +10475,18 @@ iwx_rx_frame(struct iwx_softc *sc, mbuf_t m, int chanidx,
             awdlCoexPublish();
         // Frames with AWDL's BSSID are never the station's, whatever the filter: they stop at the hand-off.
         if ((awdlFrame || baToUs) && awdlCoexRx) {
+            mbuf_freem(m);
+            return;
+        }
+    }
+    // channel 6's handle is always promiscuous. What it hears on 6 goes no further than the AWDL
+    // hand-off above, unless the station itself is on 6.
+    if (awdlSchedCh6 && awdlSchedCh6Added && chanValid && unsigned(chanidx) == kAwdlSchedCh6Channel) {
+        struct iwx_node *stationNode6 = (struct iwx_node *)ic->ic_bss;
+        const bool stationOn6 = stationNode6 && stationNode6->in_phyctxt && stationNode6->in_phyctxt->channel &&
+            ieee80211_chan2ieee(ic, stationNode6->in_phyctxt->channel) == kAwdlSchedCh6Channel;
+        if (!stationOn6) {
+            ++awdlSchedCh6Dropped;
             mbuf_freem(m);
             return;
         }
@@ -10093,7 +11192,8 @@ iwx_rx_tx_cmd_single(struct iwx_softc *sc, struct iwx_rx_packet *pkt,
     KASSERT(tx_resp->frame_count == 1, "tx_resp->frame_count == 1");
     
     const bool coexFrame = (awdlCoexQueue >= 0 && tx_resp->tx_queue == awdlCoexQueue) ||
-        (awdlCoexOrphanQueue >= 0 && tx_resp->tx_queue == awdlCoexOrphanQueue);
+        (awdlCoexOrphanQueue >= 0 && tx_resp->tx_queue == awdlCoexOrphanQueue) ||
+        (awdlCh6TxQueue >= 0 && tx_resp->tx_queue == awdlCh6TxQueue);
     bool burstFrame = false;
     if (awdlWindow > 1 && !awdlMonitorPending && awdlBurst.count && awdlMonitorGeneration == sc->sc_generation &&
         tx_resp->tx_queue == awdlMonitorQueue) {
@@ -10374,7 +11474,8 @@ iwx_rx_tx_ba_notif(struct iwx_softc *sc, struct iwx_rx_packet *pkt, struct iwx_r
         const bool awdlBaQueue = int(qid) == awdlBaTxQueue;
         const bool coexQueue = (awdlCoexQueue >= 0 && int(qid) == awdlCoexQueue) ||
             (awdlCoexOrphanQueue >= 0 && int(qid) == awdlCoexOrphanQueue) ||
-            (awdlCoexBaTxQueue >= 0 && int(qid) == awdlCoexBaTxQueue);
+            (awdlCoexBaTxQueue >= 0 && int(qid) == awdlCoexBaTxQueue) ||
+            (awdlCh6TxQueue >= 0 && int(qid) == awdlCh6TxQueue);
         const bool coexBaQueue = awdlCoexBaTxQueue >= 0 && int(qid) == awdlCoexBaTxQueue;
         if (coexBaQueue) {
             coexNotified = true;
@@ -10538,7 +11639,8 @@ iwx_rx_tx_cmd(struct iwx_softc *sc, struct iwx_rx_packet *pkt,
     
     // The listener's completions say nothing about the station's transmit path.
     const bool coexQueue = (awdlCoexQueue >= 0 && qid == awdlCoexQueue) ||
-        (awdlCoexOrphanQueue >= 0 && qid == awdlCoexOrphanQueue);
+        (awdlCoexOrphanQueue >= 0 && qid == awdlCoexOrphanQueue) ||
+        (awdlCh6TxQueue >= 0 && qid == awdlCh6TxQueue);
     if (!coexQueue && !(awdlCoexBaTxQueue >= 0 && qid == awdlCoexBaTxQueue))
         sc->sc_tx_timer = 0;
     if (awdlCoexBaTxQueue >= 0 && qid == awdlCoexBaTxQueue) {
@@ -10614,6 +11716,12 @@ iwx_rx_tx_cmd(struct iwx_softc *sc, struct iwx_rx_packet *pkt,
             // takes this status. A missing index identifies a candidate only when one descriptor was reclaimed.
             const int status = le16toh(tx_resp->status.status) & IWX_TX_STATUS_MSK;
             const bool ok = status == IWX_TX_STATUS_SUCCESS;
+            if (awdlCh6TxQueue >= 0 && int(qid) == awdlCh6TxQueue) {   // one frame in flight at a time
+                ++(ok ? awdlCh6TxOK : awdlCh6TxFailed);
+                if (ok)
+                    awdlAdvNote(1, awdlCh6TxTplUS, awdlUptimeUS());
+                awdlCh6TxTplUS = 0;
+            }
             int statusSlot = ItlAWDL::reclaimStatusSlot(ring->tail, freed, n, pkt->hdr.idx);
             const bool indexed = statusSlot >= 0;
             if (indexed) {
@@ -10635,8 +11743,34 @@ iwx_rx_tx_cmd(struct iwx_softc *sc, struct iwx_rx_packet *pkt,
                     awdlCoexPendingGeneration == sc->sc_generation) {
                     awdlCoexInFlight = false;
                     awdlCoexPendingSlot = -1;
+                    if (awdlSchedSkew && ok && own && awdlSyncBuildUS) {   // build -> TX done
+                        const uint64_t doneUS = awdlUptimeUS();
+                        const uint64_t lat = doneUS > awdlSyncBuildUS ? doneUS - awdlSyncBuildUS : 0;
+                        ++awdlSyncTxLatN;
+                        awdlSyncTxLatSumUS += lat;
+                        if (lat > awdlSyncTxLatMaxUS) awdlSyncTxLatMaxUS = lat;
+                        ++(lat < 1000 ? awdlSyncTxLat1 : lat < 2000 ? awdlSyncTxLat2 : lat < 4000 ? awdlSyncTxLat4 :
+                           lat < 8000 ? awdlSyncTxLat8 : awdlSyncTxLatMore);
+                        awdlSyncBuildUS = 0;
+                        if (awdlSyncSubmitRing == 0) {
+                            ++awdlSyncLatEmptyN;
+                            awdlSyncLatEmptySumUS += lat;
+                            if (lat > awdlSyncLatEmptyMaxUS) awdlSyncLatEmptyMaxUS = lat;
+                        } else if (awdlSyncSubmitRing > 0) {
+                            ++awdlSyncLatBusyN;
+                            awdlSyncLatBusySumUS += lat;
+                            if (lat > awdlSyncLatBusyMaxUS) awdlSyncLatBusyMaxUS = lat;
+                        }
+                        if (awdlSyncSubmitAgg > 0) {
+                            ++awdlSyncLatAggBusyN;
+                            awdlSyncLatAggBusySumUS += lat;
+                        }
+                    }
                     if (own) {
                         ++(ok ? awdlCoexTxOK : awdlCoexTxFailed);
+                        if (ok)
+                            awdlAdvNote(0, awdlAdv149PendingTplUS, awdlUptimeUS());
+                        awdlAdv149PendingTplUS = 0;
                         attributed = true;
                     } else {
                         ++awdlCoexSyncReclaimedUnknown; // Reclaimed; its own status isn't in this response.
@@ -10819,6 +11953,10 @@ static uint8_t
 iwx_get_channel_width(struct ieee80211com *ic, struct ieee80211_channel *c)
 {
     uint8_t ret = IWX_PHY_VHT_CHANNEL_MODE20;
+    // channel 6's PHY is always 20 MHz. Without this it took the station's width (80 MHz on 36)
+    // and the UMAC asserted on the PHY command in testing. The control position follows (20 MHz: 1 below).
+    if (awdlSchedCh6 && awdlPhyBuildingId == kAwdlSchedCh6PhyId)
+        return ret;
     if (awdlCoexPhyWidth >= 0 && awdlCoexMulti && awdlPhyBuildingId == kAwdlCoexPhyId)
         return uint8_t(awdlCoexPhyWidth);
     if (awdlWide80Applies(ic, c))
@@ -11114,6 +12252,12 @@ iwx_send_cmd(struct iwx_softc *sc, struct iwx_host_cmd *hcmd)
         return ENXIO;
 
     code = hcmd->id;
+    if (itlFwCrashRec) {   // command history for crash records
+        const unsigned slot = itlFwCmdHistNext++ % kItlFwCmdHist;
+        itlFwCmdHistCode[slot] = uint32_t(code);
+        itlFwCmdHistUS[slot] = awdlUptimeUS();
+        itlFwCmdHistLen[slot] = hcmd->len[0];
+    }
     async = hcmd->flags & IWX_CMD_ASYNC;
     idx = (ring->cur & (ring->ring_count - 1));
     desc = &ring->desc[idx];
@@ -11266,8 +12410,14 @@ iwx_send_cmd(struct iwx_softc *sc, struct iwx_host_cmd *hcmd)
             (txdata->flags & IWX_TXDATA_FLAG_CMD_PENDING)) {
             int result = getMainCommandGate()->commandSleep(desc, deadline, THREAD_UNINT);
             if (result != THREAD_AWAKENED) {
-                if (txdata->flags & IWX_TXDATA_FLAG_CMD_PENDING)
+                if (txdata->flags & IWX_TXDATA_FLAG_CMD_PENDING) {
                     err = (result == THREAD_TIMED_OUT) ? EWOULDBLOCK : EINTR;
+                    if (itlFwCrashRec && result == THREAD_TIMED_OUT) {
+                        ++itlFwCmdTimeouts;
+                        itlFwLastTimeoutCmd = uint32_t(code);
+                        itlFwLastTimeoutUS = awdlUptimeUS();
+                    }
+                }
                 break;
             }
         }
@@ -12103,6 +13253,16 @@ iwx_tx(struct iwx_softc *sc, mbuf_t m, struct ieee80211_node *ni, int ac, int mo
             mbuf_freem(m);
             return EACCES;
         }
+    } else if (awdlCh6TxQueue >= 0 && monitorQueue == awdlCh6TxQueue) {
+        // channel 6's frames: only a valid AWDL action frame, in the gate, while its station exists.
+        ItlAWDL::ActionFrame decoded;
+        if (!awdlCh6TxSending || !awdlCh6TxStaAdded || awdlCh6TxGen != sc->sc_generation || !getMainWorkLoop()->inGate() ||
+            sc->sc_ic.ic_opmode != IEEE80211_M_STA || sc->sc_ic.ic_state != IEEE80211_S_RUN || mbuf_next(m) ||
+            mbuf_len(m) != mbuf_pkthdr_len(m) || mbuf_len(m) > 2304 ||
+            ItlAWDL::parseAction(mtod(m, const uint8_t *), mbuf_len(m), &decoded) != ItlAWDL::ParseResult::Valid) {
+            mbuf_freem(m);
+            return EACCES;
+        }
     } else if (awdlRx || monitorQueue >= 0) {
         auto *ic = &sc->sc_ic;
         auto *channel = sc->sc_phyctxt[0].channel;
@@ -12394,7 +13554,8 @@ iwx_tx(struct iwx_softc *sc, mbuf_t m, struct ieee80211_node *ni, int ac, int mo
         ++awdlTx80Requested;
     }
     
-    if (monitorQueue >= 0 && monitorQueue != awdlCoexQueue && !awdlBurstSending) {
+    if (monitorQueue >= 0 && monitorQueue != awdlCoexQueue && !(awdlCh6TxQueue >= 0 && monitorQueue == awdlCh6TxQueue) &&
+        !awdlBurstSending) {   // channel 6's frames aren't the monitor's
         awdlMonitorPending = data;
         awdlTxLog("single-frame descriptor prepared queue %d index %d bytes %d\n", qid, idx, totlen);
     }
@@ -15620,7 +16781,44 @@ awdlCoexPickOwn(struct iwx_softc *sc, uint8_t *width)
             ++awdlCoexSearch6Dwells;
         awdlCoexPublish();
     }
-    if (search6) {
+    // macOS's choice first (see awdlSchedMacChan). The secondary master channel when it is a 5 GHz channel, else
+    // the 5 GHz channel macOS's plan names most in its AWDL slots (slots 6, 7, 14 and 15 are its Wi-Fi slots).
+    unsigned macCh = 0;
+    bool macFromPlan = false;
+    if (awdlSchedMacChan) {
+        const uint32_t sec = itlAWDLReqSecondaryMaster;
+        if (sec >= 36 && sec <= 177)
+            macCh = sec;
+        else {
+            uint8_t plan[16];
+            const uint32_t before = itlAWDLPlanVersion;
+            __atomic_thread_fence(__ATOMIC_SEQ_CST);
+            memcpy(plan, itlAWDLPlanChannels, sizeof(plan));
+            __atomic_thread_fence(__ATOMIC_SEQ_CST);
+            if (before && !(before & 1) && before == itlAWDLPlanVersion) {
+                unsigned best = 0, bestCount = 0;
+                for (unsigned n = 0; n < 16; ++n) {
+                    const unsigned c = plan[n];
+                    if ((n & 7) >= 6 || c < 36 || c > 177)
+                        continue;
+                    unsigned count = 0;
+                    for (unsigned m = 0; m < 16; ++m)
+                        count += (m & 7) < 6 && plan[m] == c;
+                    if (count > bestCount) {
+                        best = c;
+                        bestCount = count;
+                    }
+                }
+                macCh = best;
+                macFromPlan = best != 0;
+            }
+        }
+    }
+    bool macFollowed = false;
+    if (macCh && tryChannel(macCh, true, &w)) {
+        pick = int(macCh);
+        macFollowed = true;
+    } else if (search6) {
         w = IWX_PHY_VHT_CHANNEL_MODE20;
         pick = 6;
     } else if (names44 && tryChannel(44, true, &w))
@@ -15635,6 +16833,21 @@ awdlCoexPickOwn(struct iwx_softc *sc, uint8_t *width)
     if (overlap != awdlCoexOverlapState) {
         awdlCoexOverlapState = overlap;
         awdlCoexPublish();
+    }
+    if (awdlSchedMacChan) {
+        if (macFollowed)
+            ++awdlSchedMacChanFollowed;
+        else if (macCh)
+            ++awdlSchedMacChanUnusable;
+        else
+            ++awdlSchedMacChanNone;
+        if (macFollowed && macFromPlan)
+            ++awdlSchedMacChanFromPlan;
+        if (macCh != awdlSchedMacChanWant || unsigned(pick) != awdlSchedMacChanPicked) {
+            awdlSchedMacChanWant = macCh;
+            awdlSchedMacChanPicked = unsigned(pick);
+            awdlSchedSpPublish();
+        }
     }
     if (pick)
         *width = w;
@@ -15706,6 +16919,1085 @@ awdlCoexCountryAnswer(struct iwx_softc *sc)
 // Moves the listener's own context when the firmware's channel map changes: up to 149 at 80 MHz when it is
 // allowed (at most every 10 s), back down to 6 at once when it is withdrawn. The binding stays; only the PHY
 // context moves, then the listener's MAC context takes the new band's rates.
+// publish the crash record, restart causes and the P2P Device listener's state, at most once a
+// second and only when something changed. Called from the coex task, never from the interrupt path.
+static void itlFwDiagPublish()
+{
+    const uint64_t now = awdlUptimeUS();
+    if (now < itlFwNextPublishUS)
+        return;
+    itlFwNextPublishUS = now + 1000000ULL;
+    IORegistryEntry *root = IORegistryEntry::getRegistryRoot();
+    if (!itlFwCrashRec)
+        return;
+    const uint32_t stamp = itlFwCrashCount * 131 + itlFwDisables * 31 + itlFwCmdTimeouts * 7 + itlFwLastRestartSite +
+        uint32_t(itlFwLastRestartUS);
+    if (stamp == itlFwPublishedStamp && itlFwPublishedStamp)
+        return;
+    itlFwPublishedStamp = stamp ? stamp : 1;
+    char text[256];
+    size_t used = size_t(snprintf(text, sizeof(text), "last site %u at %llu ms; disables %u last %llu ms; timeouts %u "
+                                  "last cmd 0x%x at %llu ms; sites", itlFwLastRestartSite,
+                                  (unsigned long long)(itlFwLastRestartUS / 1000), itlFwDisables,
+                                  (unsigned long long)(itlFwLastDisableUS / 1000), itlFwCmdTimeouts,
+                                  itlFwLastTimeoutCmd, (unsigned long long)(itlFwLastTimeoutUS / 1000)));
+    for (unsigned i = 1; i < 13 && used < sizeof(text); ++i)
+        used += size_t(snprintf(text + used, sizeof(text) - used, " %u", itlFwRestartSites[i]));
+    root->setProperty("ITLFwRestarts", text);
+    char rec[1400];
+    used = 0;
+    const uint32_t n = itlFwCrashCount < 4 ? itlFwCrashCount : 4;
+    used += size_t(snprintf(rec, sizeof(rec), "count %u", itlFwCrashCount));
+    for (uint32_t i = 0; i < n && used < sizeof(rec); ++i) {
+        const ItlFwCrashRecord &r = itlFwCrashRecords[(itlFwCrashCount - 1 - i) % 4];
+        used += size_t(snprintf(rec + used, sizeof(rec) - used,
+            "; at %llu ms gen %d valid %u id 0x%08x trm 0x%08x/0x%08x blink2 0x%08x ilink 0x%08x/0x%08x "
+            "data 0x%08x/0x%08x/0x%08x lastcmd 0x%08x hcmd 0x%08x gp2 0x%08x; umac valid %u id 0x%08x blink "
+            "0x%08x/0x%08x ilink 0x%08x/0x%08x data 0x%08x/0x%08x/0x%08x cmd 0x%08x", (unsigned long long)(r.upUS / 1000),
+            r.gen, r.valid, r.id, r.trm0, r.trm1, r.blink2, r.ilink1, r.ilink2, r.d1, r.d2, r.d3, r.lastCmd, r.hcmd,
+            r.gp2, r.uvalid, r.uid, r.ublink1, r.ublink2, r.uilink1, r.uilink2, r.ud1, r.ud2, r.ud3, r.ucmd));
+    }
+    root->setProperty("ITLFwCrashRecords", rec);
+    if (itlFwCrashCount) {   // the newest crash's command history, oldest first: id/len@ms-before
+        const ItlFwCrashRecord &r = itlFwCrashRecords[(itlFwCrashCount - 1) % 4];
+        char hist[640];
+        size_t hu = size_t(snprintf(hist, sizeof(hist), "crash at %llu ms:", (unsigned long long)(r.upUS / 1000)));
+        for (uint32_t k = 0; k < r.histCount && hu < sizeof(hist); ++k)
+            hu += size_t(snprintf(hist + hu, sizeof(hist) - hu, " 0x%x/%u@-%u", r.histCode[k], r.histLen[k],
+                                  r.histMsBefore[k]));
+        root->setProperty("ITLFwCrashCmds", hist);
+    }
+}
+
+// -itlschedsp: its registry text, shared by the tick, the sender and the follower.
+static void awdlSchedSpPublish()
+{
+    const uint64_t total = awdlSchedSpFirstUS ? awdlUptimeUS() - awdlSchedSpFirstUS : 0;
+    const uint64_t out = total > awdlSchedSpInUS ? total - awdlSchedSpInUS : 0;
+    char text[300];
+    snprintf(text, sizeof(text), "%s; mac %u conf %u sent %u err %d starts %u ends %u fails %u; in %llu ms lis %u sta %u; "
+             "out %llu ms lis %u sta %u", awdlSchedSpState, awdlSchedSpMacId, awdlSchedSpConf, awdlSchedSpSent, awdlSchedSpLastErr,
+             awdlSchedSpStarts, awdlSchedSpEnds, awdlSchedSpFails, (unsigned long long)(awdlSchedSpInUS / 1000),
+             awdlSchedSpLisIn, awdlSchedSpStaIn, (unsigned long long)(out / 1000), awdlSchedSpLisOut,
+             awdlSchedSpStaOut);
+    IORegistryEntry::getRegistryRoot()->setProperty("ITLAWDLSchedSp", text);
+    {
+        // start delay (send to start notification) and real length, host time, in µs; AWDL frames
+        // (action + data) received while a session ran and while none did.
+        const uint32_t awdlTotal = awdlSchedSpFirstUS ? awdlCoexAwdlAction + awdlCoexAwdlData - awdlSchedSpAwdlBase : 0;
+        char n3[300];
+        snprintf(n3, sizeof(n3), "dur %u TU; delay n %u min %llu mean %llu max %llu us; len min %llu max %llu us; "
+                 "awdl in %u out %u", awdlSchedSpDurationTU, awdlSchedSpDelays,
+                 (unsigned long long)(awdlSchedSpDelays ? awdlSchedSpDelayMinUS : 0),
+                 (unsigned long long)(awdlSchedSpDelays ? awdlSchedSpDelaySumUS / awdlSchedSpDelays : 0),
+                 (unsigned long long)awdlSchedSpDelayMaxUS,
+                 (unsigned long long)(awdlSchedSpEnds ? awdlSchedSpLenMinUS : 0), (unsigned long long)awdlSchedSpLenMaxUS,
+                 awdlSchedSpAwdlIn, awdlTotal > awdlSchedSpAwdlIn ? awdlTotal - awdlSchedSpAwdlIn : 0);
+        IORegistryEntry::getRegistryRoot()->setProperty("ITLAWDLSchedSpTiming", n3);
+        char sv[220];
+        snprintf(sv, sizeof(sv), "lead %llu us; early %u (mean %llu us); late <1 ms %u, <2 %u, <4 %u, <8 %u, >=8 %u, max %llu us; "
+                 "asked mid-run %u", (unsigned long long)awdlSchedLeadUS, awdlSchedStartEarly,
+                 (unsigned long long)(awdlSchedStartEarly ? awdlSchedStartEarlySumUS / awdlSchedStartEarly : 0),
+                 awdlSchedStartLate1, awdlSchedStartLate2, awdlSchedStartLate4, awdlSchedStartLate8, awdlSchedStartLateMore,
+                 (unsigned long long)awdlSchedStartLateMaxUS, awdlSchedStartMidRun);
+        IORegistryEntry::getRegistryRoot()->setProperty("ITLAWDLSchedStartVsRun", sv);
+        if (awdlSchedSkew) {
+            char sk[300];
+            snprintf(sk, sizeof(sk), "sync build->tx n %u mean %llu max %llu us (<1 %u <2 %u <4 %u <8 %u >=8 ms %u); "
+                     "peer skew n %u mean %lld min %lld max %lld last %lld us, |skew| <0.5 %u <1 %u <2 %u <4 %u <8 %u <16 %u "
+                     ">=16 ms %u, late %u early %u, no match %u",
+                     awdlSyncTxLatN, (unsigned long long)(awdlSyncTxLatN ? awdlSyncTxLatSumUS / awdlSyncTxLatN : 0),
+                     (unsigned long long)awdlSyncTxLatMaxUS, awdlSyncTxLat1, awdlSyncTxLat2, awdlSyncTxLat4,
+                     awdlSyncTxLat8, awdlSyncTxLatMore, awdlSkewN,
+                     (long long)(awdlSkewN ? awdlSkewSumUS / int64_t(awdlSkewN) : 0),
+                     (long long)(awdlSkewN ? awdlSkewMinUS : 0), (long long)(awdlSkewN ? awdlSkewMaxUS : 0),
+                     (long long)awdlSkewLastUS, awdlSkewBucket[0], awdlSkewBucket[1], awdlSkewBucket[2],
+                     awdlSkewBucket[3], awdlSkewBucket[4], awdlSkewBucket[5], awdlSkewBucket[6], awdlSkewLate,
+                     awdlSkewEarly, awdlSkewNoMatch);
+            IORegistryEntry::getRegistryRoot()->setProperty("ITLAWDLSchedSkew", sk);
+            char fe[460];
+            snprintf(fe, sizeof(fe), "on-air clock %s (used %u, rejected %u); following %s; master frames n %u (no match %u): our error mean %lld min %lld max %lld last %lld us, "
+                     "|err| <0.25 %u <0.5 %u <1 %u <2 %u <4 %u <8 %u >=8 ms %u, master later %u earlier %u; rx delay mean %llu max %llu us, "
+                     "<0.25 %u <0.5 %u <1 %u <2 %u <4 %u <8 %u >=8 ms %u",
+                     awdlSchedOnAir ? "on" : "off", awdlOnAirUsed, awdlOnAirRejected,
+                     awdlSchedElectionNow.following ? "yes" : "no", awdlFollowN, awdlFollowNoMatch,
+                     (long long)(awdlFollowN ? awdlFollowSumUS / int64_t(awdlFollowN) : 0), (long long)awdlFollowMinUS,
+                     (long long)awdlFollowMaxUS, (long long)awdlFollowLastUS, awdlFollowBucket[0], awdlFollowBucket[1],
+                     awdlFollowBucket[2], awdlFollowBucket[3], awdlFollowBucket[4], awdlFollowBucket[5], awdlFollowBucket[6],
+                     awdlFollowLate, awdlFollowEarly,
+                     (unsigned long long)((awdlFollowN + awdlFollowNoMatch) ? awdlFollowLatSumUS / (awdlFollowN + awdlFollowNoMatch) : 0),
+                     (unsigned long long)awdlFollowLatMaxUS, awdlFollowLatBucket[0], awdlFollowLatBucket[1], awdlFollowLatBucket[2],
+                     awdlFollowLatBucket[3], awdlFollowLatBucket[4], awdlFollowLatBucket[5], awdlFollowLatBucket[6]);
+            IORegistryEntry::getRegistryRoot()->setProperty("ITLAWDLSchedFollowErr", fe);
+        }
+        {
+            char sd[520];
+            auto ms = [](uint64_t us) { return (unsigned long long)(us / 1000ULL); };
+            snprintf(sd, sizeof(sd), "delay %llu s; first tick %llu ms uptime; follower started %llu ms after it; safe %s: "
+                     "settled at %llu ms, settle waits %u, restarts %u, resumes %u; blocked ms before start: station %llu, "
+                     "no sync %llu, sync settling %llu, no plan %llu, move %llu, recent move %llu, start delay %llu, "
+                     "handle %llu (last %u); first session at %llu ms, first good start at %llu ms uptime; failed starts %u",
+                     (unsigned long long)(awdlSchedStartDelayUS / 1000000ULL),
+                     ms(awdlSchedSpFirstTickUS),
+                     (unsigned long long)(awdlSchedFollowStartedUS && awdlSchedSpFirstTickUS ?
+                                          (awdlSchedFollowStartedUS - awdlSchedSpFirstTickUS) / 1000ULL : 0),
+                     awdlSchedSafe ? "on" : "off", ms(awdlSchedSettledAtUS),
+                     awdlSchedSettleWaits, awdlSchedRestarts, awdlSchedResumes, ms(awdlStartBlockUS[1]),
+                     ms(awdlStartBlockUS[2]), ms(awdlStartBlockUS[3]), ms(awdlStartBlockUS[4]), ms(awdlStartBlockUS[5]),
+                     ms(awdlStartBlockUS[6]), ms(awdlStartBlockUS[7]), ms(awdlStartBlockUS[8]), unsigned(awdlStartLastBlock),
+                     ms(awdlStartFirstSessionUS), ms(awdlStartFirstOkUS), awdlSchedSpFailedStarts);
+            IORegistryEntry::getRegistryRoot()->setProperty("ITLAWDLSchedStart", sd);
+        }
+        if (awdlSchedSkew || awdlSyncFirst) {
+            char sf[300];
+            snprintf(sf, sizeof(sf), "%s; ring empty n %u mean %llu max %llu us; ring busy n %u mean %llu max %llu us "
+                     "(ahead mean %u max %u); agg queue busy n %u mean %llu us; holds %u ticks %u timeouts %u max %llu us, "
+                     "pump skips %u", awdlSyncFirst ? "sync first" : "measure only",
+                     awdlSyncLatEmptyN, (unsigned long long)(awdlSyncLatEmptyN ? awdlSyncLatEmptySumUS / awdlSyncLatEmptyN : 0),
+                     (unsigned long long)awdlSyncLatEmptyMaxUS, awdlSyncLatBusyN,
+                     (unsigned long long)(awdlSyncLatBusyN ? awdlSyncLatBusySumUS / awdlSyncLatBusyN : 0),
+                     (unsigned long long)awdlSyncLatBusyMaxUS,
+                     awdlSyncLatBusyN ? awdlSyncRingAheadSum / awdlSyncLatBusyN : 0, awdlSyncRingAheadMax,
+                     awdlSyncLatAggBusyN,
+                     (unsigned long long)(awdlSyncLatAggBusyN ? awdlSyncLatAggBusySumUS / awdlSyncLatAggBusyN : 0),
+                     awdlSyncFirstHolds, awdlSyncFirstHeldTicks, awdlSyncFirstTimeouts,
+                     (unsigned long long)awdlSyncFirstHoldMaxUS, awdlSyncFirstPumpSkips);
+            IORegistryEntry::getRegistryRoot()->setProperty("ITLAWDLSchedSyncFirst", sf);
+        }
+        if (awdlSchedSyncTx) {
+            char st[120];
+            snprintf(st, sizeof(st), "%s; sync frames in a 149 session %u, held (no session) %u",
+                     awdlSchedSyncTxGated() ? "on" : "waiting", awdlSchedSyncTxInSession, awdlSchedSyncTxHeld);
+            IORegistryEntry::getRegistryRoot()->setProperty("ITLAWDLSchedSyncTx", st);
+        }
+        if (awdlSchedHandover) {
+            char ho[160];
+            snprintf(ho, sizeof(ho), "on; trimmed %u (mean %llu us), not trimmable %u; end wakes %u", awdlSchedHandoverTrims,
+                     (unsigned long long)(awdlSchedHandoverTrims ? awdlSchedHandoverTrimSumUS / awdlSchedHandoverTrims : 0),
+                     awdlSchedHandoverSkipped, awdlSchedHandoverWakes);
+            IORegistryEntry::getRegistryRoot()->setProperty("ITLAWDLSchedHandover", ho);
+        }
+    }
+    {
+        // aligned sessions (before a run of the peer's entries on our channel) and duty sessions (no
+        // schedule); timer arms, fires, and fires that found the run gone; how late timed sends went out.
+        char n4[300];
+        snprintf(n4, sizeof(n4), "aligned %u entries %u duty %u; arms %u fired %u stale %u; late n %u mean %llu max %llu us; "
+                 "tx in session %u; advertised %u refused %u",
+                 awdlSchedFollowAligned, awdlSchedFollowEntries, awdlSchedFollowDuty, awdlSchedFollowArms,
+                 awdlSchedFollowFired, awdlSchedFollowStale, awdlSchedFollowLateN,
+                 (unsigned long long)(awdlSchedFollowLateN ? awdlSchedFollowLateSumUS / awdlSchedFollowLateN : 0),
+                 (unsigned long long)awdlSchedFollowLateMaxUS, awdlSchedFollowTxInSession,
+                 awdlSchedAdvertiseServed, awdlSchedAdvertiseRefused);
+        IORegistryEntry::getRegistryRoot()->setProperty("ITLAWDLSchedFollow", n4);
+        if (awdlSchedHonorOff) {
+            // whether macOS has AWDL on, and the follower ticks and timed sends skipped while it was off.
+            char off[96];
+            snprintf(off, sizeof(off), "macOS awdl %s; skipped ticks %u stale sends %u", itlAWDLSyncOn ? "on" : "off",
+                     awdlSchedOffSkips, awdlSchedOffStale);
+            IORegistryEntry::getRegistryRoot()->setProperty("ITLAWDLSchedAwdlOff", off);
+        }
+        if (awdlSchedAwStart) {
+            // AW-start payloads built for macOS, calls with nothing to post, and early timer fires.
+            char aw[96];
+            snprintf(aw, sizeof(aw), "built %u refused %u repeat %u", awdlSchedAwStartServed, awdlSchedAwStartRefused,
+                     awdlSchedAwStartRepeat);
+            IORegistryEntry::getRegistryRoot()->setProperty("ITLAWDLSchedAwStart", aw);
+        }
+        if (awdlSchedAwEnd) {
+            // AW-end payloads built, ones built more than 20 ms after the AW ended, and AWs that closed after the
+            // follower changed clocks.
+            char aw[96];
+            snprintf(aw, sizeof(aw), "built %u late %u clock moved %u; open %u", awdlSchedAwEndServed, awdlSchedAwEndLate,
+                     awdlSchedAwEndClockMoved, awdlSchedAwOpen ? 1u : 0u);
+            IORegistryEntry::getRegistryRoot()->setProperty("ITLAWDLSchedAwEnd", aw);
+        }
+        if (awdlSchedExtend) {
+            // follower decisions made while AWDL data was active (plan extended) or idle, and 0 entries taken.
+            char ex[96];
+            snprintf(ex, sizeof(ex), "active ticks %u idle ticks %u; extended entries %u; advertised %u",
+                     awdlSchedExtActiveTicks, awdlSchedExtIdleTicks, awdlSchedExtSlots, awdlSchedExtAdvertised);
+            IORegistryEntry::getRegistryRoot()->setProperty("ITLAWDLSchedExtend", ex);
+        }
+        // the diagnostic mode, and macOS's plan as the follower last read it.
+        char plan[200];
+        char handle[96];
+        snprintf(handle, sizeof(handle), "handle %s adds %u removes %u err 0x%x",
+                 !awdlSchedHandle ? "off" : awdlSchedHandleOff ? "stopped" : awdlSchedHandleAdded ? "bound" : "waiting",
+                 awdlSchedHandleAdds, awdlSchedHandleRemoves, awdlSchedHandleErr);
+        IORegistryEntry::getRegistryRoot()->setProperty("ITLAWDLSchedHandle", handle);
+        if (awdlSchedCh6) {
+            char ch6[160];
+            snprintf(ch6, sizeof(ch6), "ch6 %s adds %u err 0x%x; sessions %u; awdl frames on 6 %u; other frames on 6 dropped %u"
+                     "; %s, quiet slots %u",
+                     awdlSchedCh6Off ? "stopped" : awdlSchedCh6Added ? "bound" : "waiting", awdlSchedCh6Adds,
+                     awdlSchedCh6Err, awdlSchedCh6Sessions, awdlSchedCh6Frames, awdlSchedCh6Dropped,
+                     awdlSchedCh6Quiet ? "not advertised" : "advertised", awdlSchedCh6QuietSlots);
+            IORegistryEntry::getRegistryRoot()->setProperty("ITLAWDLSchedCh6", ch6);
+            if (awdlSchedCh6Peer) {
+                char cp[400];
+                size_t u = size_t(snprintf(cp, sizeof(cp), "decisions %u slots added %u runs taken %u; group rx by slot on 6:",
+                                           awdlSchedCh6PeerDecisions, awdlSchedCh6PeerSlotsAdded, awdlSchedCh6PeerRuns));
+                for (unsigned n = 0; n < 16 && u < sizeof(cp); ++n)
+                    u += size_t(snprintf(cp + u, sizeof(cp) - u, " %u", awdlGroupRxSlotCh6[n]));
+                u += size_t(snprintf(cp + u, sizeof(cp) - u, "; on our channel:"));
+                for (unsigned n = 0; n < 16 && u < sizeof(cp); ++n)
+                    u += size_t(snprintf(cp + u, sizeof(cp) - u, " %u", awdlGroupRxSlotListener[n]));
+                IORegistryEntry::getRegistryRoot()->setProperty("ITLAWDLSchedCh6Peer", cp);
+            }
+            if (awdlSchedCh6Tx) {
+                char ct[320];
+                snprintf(ct, sizeof(ct), "station %s queue %d err 0x%x setups %u; sessions %u (no time %u, busy %u); built %u "
+                         "(fail %u) submitted %u (err %u) ok %u failed %u; refused %u (last 0x%x)", awdlCh6TxOff ? "off" : awdlCh6TxStaAdded ? "on" : "none",
+                         awdlCh6TxQueue, awdlCh6TxErr, awdlCh6TxSetups, awdlCh6TxSessions, awdlCh6TxNoTime, awdlCh6TxBusy,
+                         awdlCh6TxBuilt, awdlCh6TxBuildFail, awdlCh6TxSubmitted, awdlCh6TxSubmitErr, awdlCh6TxOK, awdlCh6TxFailed,
+                         awdlCh6TxRefusedN, awdlCh6TxRefused);
+                IORegistryEntry::getRegistryRoot()->setProperty("ITLAWDLSchedCh6Tx", ct);
+            }
+            {   // template change -> first frame out carrying it (ms buckets <50 <100 <200 <400 <800 <1600 >=1600)
+                char ad[400];
+                size_t u = size_t(snprintf(ad, sizeof(ad), "MI content changes %u; first MI out mean %llu max %llu ms, on 149 %u on 6 %u; any:",
+                                           itlAWDLTemplateChanges,
+                                           (unsigned long long)((awdlAdvFirstOn[0] + awdlAdvFirstOn[1]) ?
+                                               awdlAdvAnySumUS / 1000 / (awdlAdvFirstOn[0] + awdlAdvFirstOn[1]) : 0),
+                                           (unsigned long long)(awdlAdvAnyMaxUS / 1000), awdlAdvFirstOn[0], awdlAdvFirstOn[1]));
+                for (unsigned n = 0; n < 7 && u < sizeof(ad); ++n)
+                    u += size_t(snprintf(ad + u, sizeof(ad) - u, " %u", awdlAdvHistAny[n]));
+                u += size_t(snprintf(ad + u, sizeof(ad) - u, "; 149:"));
+                for (unsigned n = 0; n < 7 && u < sizeof(ad); ++n)
+                    u += size_t(snprintf(ad + u, sizeof(ad) - u, " %u", awdlAdvHist149[n]));
+                u += size_t(snprintf(ad + u, sizeof(ad) - u, "; 6:"));
+                for (unsigned n = 0; n < 7 && u < sizeof(ad); ++n)
+                    u += size_t(snprintf(ad + u, sizeof(ad) - u, " %u", awdlAdvHist6[n]));
+                u += size_t(snprintf(ad + u, sizeof(ad) - u, "; first-out slot:"));
+                for (unsigned n = 0; n < 16 && u < sizeof(ad); ++n)
+                    u += size_t(snprintf(ad + u, sizeof(ad) - u, " %u", awdlAdvSlotFirst[n]));
+                IORegistryEntry::getRegistryRoot()->setProperty("ITLAWDLAdvDelay", ad);
+                if (awdlSchedMiFirst) {
+                    char mf[200];
+                    snprintf(mf, sizeof(mf), "bitmap 0x%08x offset %u us; first MI 149 %u (blocked %u) 6 %u (blocked %u); MI out 149 %u 6 %u",
+                             itlAWDLMiBitmap, itlAWDLMiOffsetUS, awdlMiFirst149, awdlMiBlocked149, awdlMiFirst6, awdlMiBlocked6,
+                             awdlMiOut149, awdlMiOut6);
+                    IORegistryEntry::getRegistryRoot()->setProperty("ITLAWDLMiFirst", mf);
+                }
+                if (awdlSchedMiNow) {   // uptime ms of the last 16 content changes and their first MI out
+                    char mn[640];
+                    size_t v = size_t(snprintf(mn, sizeof(mn), "sent at once 149 %u 6 %u; multicast held %u; expired %u; changes:",
+                                               awdlMiNowSent149, awdlMiNowSent6, awdlMiNowMcastHeld, awdlMiNowExpired));
+                    const uint32_t n = MIN(awdlMiChangeCount, 16U);
+                    for (uint32_t k = 0; k < n && v < sizeof(mn); ++k) {
+                        const auto &c = awdlMiChanges[(awdlMiChangeCount - n + k) % 16];
+                        v += size_t(snprintf(mn + v, sizeof(mn) - v, " %u+%u@%u", c.changeMs, c.outMs - c.changeMs, c.channel));
+                    }
+                    IORegistryEntry::getRegistryRoot()->setProperty("ITLAWDLMiNow", mn);
+                }
+            }
+        }
+        if (awdlUmi) {
+            char umi[96];
+            snprintf(umi, sizeof(umi), "on; sent in AW %u, untimed %u, after hold %u", awdlUmiInAw, awdlUmiUntimed,
+                     awdlUmiLate);
+            IORegistryEntry::getRegistryRoot()->setProperty("ITLAWDLUmi", umi);
+        }
+        if (awdlSchedMacChan) {
+            char mac[160];
+            snprintf(mac, sizeof(mac), "macOS %u (%s), listener %u; picks followed %u (from plan %u), unusable %u, none %u",
+                     awdlSchedMacChanWant, itlAWDLReqSecondaryMaster >= 36 ? "secondary master" : "plan",
+                     awdlSchedMacChanPicked, awdlSchedMacChanFollowed, awdlSchedMacChanFromPlan,
+                     awdlSchedMacChanUnusable, awdlSchedMacChanNone);
+            IORegistryEntry::getRegistryRoot()->setProperty("ITLAWDLSchedMacChan", mac);
+        }
+        if (awdlSchedClock) {
+            // addresses as their last two bytes only.
+            const ItlAWDL::ElectionResult &r = awdlSchedElectionNow;
+            char elect[300];
+            snprintf(elect, sizeof(elect), "self metric %u counter %u known %u; peers %u frames %u syncs %u; %s master "
+                     "..:%02x:%02x metric %u counter %u via ..:%02x:%02x height %u; clock %s; changes %u clocked ticks %u"
+                     "; min rssi %d, runs with weak peers skipped %u, sync rssi %d",
+                     itlAWDLSelfMetric, itlAWDLSelfCounter, itlAWDLSelfKnown,
+                     awdlSchedElection.count(awdlUptimeUS()), awdlSchedElectionFrames, awdlSchedElectionSyncs,
+                     r.following ? "following" : "own", r.master[4], r.master[5], r.masterMetric, r.masterCounter,
+                     r.sync[4], r.sync[5], r.height, r.clockValid ? "master's" : "own", awdlSchedElectionChanges,
+                     awdlSchedElectionClocked, int(awdlSchedElectionMinRssi), awdlSchedElectionWeakSkips,
+                     r.following && r.peer >= 0 && awdlSchedElection.peers[r.peer].haveRssi ?
+                         int(awdlSchedElection.peers[r.peer].rssiDbm) : 0);
+            IORegistryEntry::getRegistryRoot()->setProperty("ITLAWDLSchedElection", elect);
+            if (awdlSchedElectionApple) {
+                // the Apple rules' skips in the last run, and the inputs it used.
+                const ItlAWDL::ElectionResult &a = awdlSchedElectionLastApple;
+                char apple[200];
+                snprintf(apple, sizeof(apple), "last run skipped: weak %u legacy %u id %u badAW %u older %u loop %u; "
+                         "macOS rssi %d; election id %u known %u",
+                         a.weakSkipped, a.legacySkipped, a.idSkipped, a.badAwSkipped, a.olderSkipped, a.loopSkipped,
+                         int(itlAWDLElectionRssiFromMacOS), itlAWDLSelfElectionId, itlAWDLSelfElectionIdKnown);
+                IORegistryEntry::getRegistryRoot()->setProperty("ITLAWDLSchedElectionApple", apple);
+            }
+        }
+        snprintf(plan, sizeof(plan), "plan version %u torn %u; slots listener %u station %u other %u; "
+                 "%u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u", awdlSchedPlanVersionSeen,
+                 awdlSchedPlanTorn, awdlSchedPlanListener, awdlSchedPlanStation, awdlSchedPlanOther,
+                 awdlSchedPlanLast[0], awdlSchedPlanLast[1], awdlSchedPlanLast[2], awdlSchedPlanLast[3],
+                 awdlSchedPlanLast[4], awdlSchedPlanLast[5], awdlSchedPlanLast[6], awdlSchedPlanLast[7],
+                 awdlSchedPlanLast[8], awdlSchedPlanLast[9], awdlSchedPlanLast[10], awdlSchedPlanLast[11],
+                 awdlSchedPlanLast[12], awdlSchedPlanLast[13], awdlSchedPlanLast[14], awdlSchedPlanLast[15]);
+        IORegistryEntry::getRegistryRoot()->setProperty("ITLAWDLSchedPlan", plan);
+    }
+}
+
+// One SESSION_PROTECTION_CMD for the handle (149 or channel 6) with this length. A send error stops the probe for the boot.
+int ItlIwx::
+awdlSchedSpSend(struct iwx_softc *sc, uint32_t durationTU)
+{
+    struct ieee80211com *ic = &sc->sc_ic;
+    struct iwx_node *in = (struct iwx_node *)ic->ic_bss;
+    const int gen = sc->sc_generation;
+    const uint64_t now = awdlUptimeUS();
+    const uint32_t listenerMac = awdlSchedSpTargetMac == kAwdlSchedCh6MacId && awdlSchedCh6Added ? kAwdlSchedCh6MacId :
+        awdlSchedHandle && awdlSchedHandleAdded ? kAwdlSchedHandleMacId : kAwdlCoexMacId;
+    if (listenerMac == kAwdlSchedCh6MacId)
+        ++awdlSchedCh6Sessions;
+    awdlSchedSpMacId = listenerMac;
+    struct iwx_session_prot_cmd cmd = {
+        .id_and_color = htole32(IWX_FW_CMD_ID_AND_COLOR(listenerMac, 0)),
+        .action = htole32(IWX_FW_CTXT_ACTION_ADD),
+        .conf_id = htole32(awdlSchedSpConf),
+        .duration_tu = htole32(durationTU),
+    };
+    if (!awdlSchedSpFirstUS) {
+        awdlSchedSpFirstUS = now;
+        awdlSchedSpAwdlBase = awdlCoexAwdlAction + awdlCoexAwdlData;
+    }
+    ++awdlSchedSpSent;
+    awdlSchedSpSentUS = now;
+    if (!awdlStartFirstSessionUS)
+        awdlStartFirstSessionUS = now;
+    awdlSchedSpCurDurTU = durationTU;
+    awdlSchedSpAwaitStart = true;
+    awdlSchedSpState = "running";
+    const int err = iwx_send_cmd_pdu(sc, iwx_cmd_id(IWX_SESSION_PROTECTION_CMD, IWX_MAC_CONF_GROUP, 0), 0,
+                                     sizeof(cmd), &cmd);
+    if (gen != sc->sc_generation)
+        return ECANCELED;
+    if (err) {
+        awdlSchedSpLastErr = err;
+        awdlSchedSpOff = true;
+        awdlSchedSpAwaitStart = false;
+        awdlSchedSpState = "stopped: send error";
+    }
+    awdlSchedSpPublish();
+    return err;
+}
+
+// -itlschedsp: the follower's tick. Waits for the station, the listener and the settle rule, then plans sessions.
+void ItlIwx::
+awdlSchedSpTick(struct iwx_softc *sc)
+{
+    struct ieee80211com *ic = &sc->sc_ic;
+    const int gen = sc->sc_generation;
+    if (!(awdlSchedHandle && !awdlSchedHandleOff)) {
+        awdlSchedSpOff = true;
+        awdlSchedSpState = "off: the follower needs its handle (-itlschedhandle)";
+        awdlSchedSpPublish();
+        return;
+    }
+    if (sc->sc_device_family < IWX_DEVICE_FAMILY_AX210 ||
+        !isset(sc->sc_enabled_capa, IWX_UCODE_TLV_CAPA_SESSION_PROT_CMD)) {
+        awdlSchedSpOff = true;
+        awdlSchedSpState = "off: needs an AX210-family card with session protection";
+        awdlSchedSpPublish();
+        return;
+    }
+    if (awdlSchedSpGen >= 0 && awdlSchedSpGen != gen && awdlSchedSpSent) {
+        if (awdlSchedSafe && ++awdlSchedRestarts < kAwdlSchedMaxRestarts) {
+            // the new generation has none of the old sessions or contexts; the handle and channel-6 ensure paths
+            // add theirs again. Start over, with the start delay and the settle rule.
+            awdlSchedSpActive = false;
+            awdlSchedSpAwaitStart = false;
+            awdlSchedFollowArmed = false;
+            awdlSchedSpRunStartUS = 0;
+            awdlSchedSpPlannedEndUS = 0;
+            awdlSchedSpNextUS = 0;
+            awdlSchedSettledAtUS = 0;
+            awdlSchedSpGen = gen;
+            ++awdlSchedResumes;
+            awdlSchedSpState = "running (resumed after a firmware restart)";
+            awdlSchedSpPublish();
+        } else {
+            awdlSchedSpOff = true;
+            awdlSchedSpActive = false;
+            awdlSchedSpState = awdlSchedSafe ? "stopped: too many firmware restarts" : "stopped: firmware restarted";
+            awdlSchedSpPublish();
+            return;
+        }
+    }
+    struct iwx_node *in = (struct iwx_node *)ic->ic_bss;
+    const unsigned stationChannel = in && in->in_phyctxt && in->in_phyctxt->channel ?
+        unsigned(ieee80211_chan2ieee(ic, in->in_phyctxt->channel)) : 0;
+    if (!awdlCoexMultiActive || !stationChannel || stationChannel == awdlCoexChannel || awdlCoexMovePending ||
+        awdlCoexTxHalted || awdlCoexBrokenGeneration == gen) {
+        awdlStartNote(1, awdlUptimeUS(), awdlSchedFollowStartedUS != 0);   // station/listener not ready
+        return;
+    }
+    const uint64_t now = awdlUptimeUS();
+    if (!awdlSchedSpNextUS) {
+        awdlSchedSpNextUS = now + awdlSchedStartDelayUS;
+        awdlSchedSpFirstTickUS = now;
+    }
+    awdlSchedSpGen = gen;
+    awdlSchedSpStation = stationChannel;
+    // settle rule, checked until the follower starts in this generation.
+    if (awdlSchedSafe) {
+        if (!itlAWDLSyncOn)
+            awdlSchedSyncOnSinceUS = 0;
+        else if (!awdlSchedSyncOnSinceUS)
+            awdlSchedSyncOnSinceUS = now;
+    }
+    bool settled = true;
+    if (awdlSchedSafe && !awdlSchedSettledAtUS) {
+        settled = awdlSchedSyncOnSinceUS && now - awdlSchedSyncOnSinceUS >= kAwdlSchedSettleUS && itlAWDLPlanVersion &&
+            !awdlCoexMovePending && (!awdlCoexLastMoveUS || now - awdlCoexLastMoveUS >= kAwdlSchedSettleUS);
+        if (settled)
+            awdlSchedSettledAtUS = now;
+        else if (now >= awdlSchedSpNextUS)
+            ++awdlSchedSettleWaits;
+    }
+    // why the follower isn't running yet (2 no sync, 3 sync < settle, 4 no plan, 5 move, 6 recent move,
+    // 7 start delay, 8 handle not ready).
+    unsigned why = 0;
+    if (!settled)
+        why = !awdlSchedSyncOnSinceUS ? 2 : now - awdlSchedSyncOnSinceUS < kAwdlSchedSettleUS ? 3 :
+              !itlAWDLPlanVersion ? 4 : awdlCoexMovePending ? 5 : 6;
+    else if (now < awdlSchedSpNextUS)
+        why = 7;
+    const bool ready = !why && (!awdlSchedHandle || awdlSchedHandleEnsure(sc));
+    if (!why && !ready)
+        why = 8;
+    awdlStartNote(why, now, awdlSchedFollowStartedUS != 0);
+    if (ready) {
+        if (!awdlSchedFollowStartedUS) {   // when the follower really began, after its first tick
+            awdlSchedFollowStartedUS = now;
+            awdlSchedSpPublish();
+        }
+        if (awdlSchedCh6)
+            (void)awdlSchedCh6Ensure(sc);   // channel 6 is optional
+        awdlSchedFollowPlan(sc, now);
+    }
+}
+
+// the handle's MAC context command (ADD or REMOVE). A P2P Device with a locally administered address
+// derived from ours (never the listener's or the station's), no receive filter, and it never transmits.
+int ItlIwx::
+awdlSchedHandleMac(struct iwx_softc *sc, uint32_t action)
+{
+    struct ieee80211com *ic = &sc->sc_ic;
+    struct iwx_mac_ctx_cmd mac;
+    memset(&mac, 0, sizeof(mac));
+    mac.id_and_color = htole32(IWX_FW_CMD_ID_AND_COLOR(kAwdlSchedHandleMacId, 0));
+    mac.action = htole32(action);
+    if (action != IWX_FW_CTXT_ACTION_REMOVE) {
+        mac.mac_type = htole32(IWX_FW_MAC_TYPE_P2P_DEVICE);
+        mac.tsf_id = htole32(IWX_TSF_ID_B);
+        IEEE80211_ADDR_COPY(mac.node_addr, ic->ic_myaddr);
+        mac.node_addr[0] |= 0x02;
+        mac.node_addr[5] ^= 0xa5;
+        IEEE80211_ADDR_COPY(mac.bssid_addr, etheranyaddr);
+        mac.ofdm_rates = htole32(0x15);
+        mac.filter_flags = 0;
+    }
+    return iwx_send_cmd_pdu(sc, IWX_MAC_CONTEXT_CMD, 0, sizeof(mac), &mac);
+}
+
+// make sure the handle exists in this firmware generation and shares the listener's binding.
+// True when it does. Runs from the coex TX task, in the gate, with the listener added on its own channel.
+bool ItlIwx::
+awdlSchedHandleEnsure(struct iwx_softc *sc)
+{
+    const int gen = sc->sc_generation;
+    if (awdlSchedHandleOff)
+        return false;
+    if (awdlSchedHandleAdded && awdlSchedHandleGen == gen)
+        return true;
+    awdlSchedHandleAdded = false;   // a restart dropped it with everything else
+    if (!awdlCoexAdded || !awdlCoexMultiActive || awdlCoexMovePending || awdlCoexGeneration != gen)
+        return false;
+    struct iwx_phy_ctxt *phy = &sc->sc_phyctxt[kAwdlCoexPhyId];
+    if (!phy->channel)
+        return false;
+    int err = awdlSchedHandleMac(sc, IWX_FW_CTXT_ACTION_ADD);
+    if (gen != sc->sc_generation)
+        return false;
+    if (err) {
+        awdlSchedHandleErr = 0x80000000U | uint32_t(err);
+        awdlSchedHandleOff = true;
+        return false;
+    }
+    struct iwx_binding_cmd bind;
+    memset(&bind, 0, sizeof(bind));
+    bind.id_and_color = htole32(IWX_FW_CMD_ID_AND_COLOR(phy->id, phy->color));
+    bind.action = htole32(IWX_FW_CTXT_ACTION_MODIFY);
+    bind.phy = htole32(IWX_FW_CMD_ID_AND_COLOR(phy->id, phy->color));
+    bind.macs[0] = htole32(IWX_FW_CMD_ID_AND_COLOR(kAwdlCoexMacId, 0));
+    bind.macs[1] = htole32(IWX_FW_CMD_ID_AND_COLOR(kAwdlSchedHandleMacId, 0));
+    for (int i = 2; i < IWX_MAX_MACS_IN_BINDING; i++)
+        bind.macs[i] = htole32(IWX_FW_CTXT_INVALID);
+    bind.lmac_id = htole32(IEEE80211_IS_CHAN_2GHZ(phy->channel) ||
+                           !isset(sc->sc_enabled_capa, IWX_UCODE_TLV_CAPA_CDB_SUPPORT) ?
+                           IWX_LMAC_24G_INDEX : IWX_LMAC_5G_INDEX);
+    uint32_t status = 0;
+    err = iwx_send_cmd_pdu_status(sc, IWX_BINDING_CONTEXT_CMD, sizeof(bind), &bind, &status);
+    if (gen != sc->sc_generation)
+        return false;
+    if (err || status) {
+        awdlSchedHandleErr = err ? 0x80000000U | uint32_t(err) : 0x40000000U | status;
+        awdlSchedHandleOff = true;
+        (void)awdlSchedHandleMac(sc, IWX_FW_CTXT_ACTION_REMOVE);
+        return false;
+    }
+    awdlSchedHandleAdded = true;
+    awdlSchedHandleGen = gen;
+    ++awdlSchedHandleAdds;
+    return true;
+}
+
+// channel 6's handle: PHY 2 tuned to 6, MAC 3 (P2P Device, promiscuous, never transmits) bound to it.
+bool ItlIwx::
+awdlSchedCh6Ensure(struct iwx_softc *sc)
+{
+    struct ieee80211com *ic = &sc->sc_ic;
+    const int gen = sc->sc_generation;
+    if (awdlSchedCh6Off)
+        return false;
+    if (awdlSchedCh6Added && awdlSchedCh6Gen == gen) {
+        if (awdlSchedCh6Tx && !awdlCh6TxOff && !(awdlCh6TxStaAdded && awdlCh6TxGen == gen))
+            (void)awdlCh6TxSetup(sc);
+        return true;
+    }
+    awdlSchedCh6Added = false;
+    if (!awdlSchedHandleAdded || awdlSchedHandleGen != gen || !awdlCoexMultiActive || awdlCoexMovePending)
+        return false;
+    struct ieee80211_channel *six = &ic->ic_channels[kAwdlSchedCh6Channel];
+    if (!six->ic_flags) {
+        awdlSchedCh6Err = 0x10000000U;   // channel 6 not available here
+        awdlSchedCh6Off = true;
+        return false;
+    }
+    struct iwx_phy_ctxt *phy = &sc->sc_phyctxt[kAwdlSchedCh6PhyId];
+    phy->channel = six;
+    int err = iwx_phy_ctxt_cmd(sc, phy, 1, 1, IWX_FW_CTXT_ACTION_MODIFY, 0);
+    if (gen != sc->sc_generation)
+        return false;
+    if (err) {
+        awdlSchedCh6Err = 0x80000000U | uint32_t(err);
+        awdlSchedCh6Off = true;
+        return false;
+    }
+    struct iwx_mac_ctx_cmd mac;
+    memset(&mac, 0, sizeof(mac));
+    mac.id_and_color = htole32(IWX_FW_CMD_ID_AND_COLOR(kAwdlSchedCh6MacId, 0));
+    mac.action = htole32(IWX_FW_CTXT_ACTION_ADD);
+    mac.mac_type = htole32(IWX_FW_MAC_TYPE_P2P_DEVICE);
+    mac.tsf_id = htole32(IWX_TSF_ID_B);
+    IEEE80211_ADDR_COPY(mac.node_addr, ic->ic_myaddr);
+    mac.node_addr[0] |= 0x02;
+    mac.node_addr[5] ^= 0x3c;
+    IEEE80211_ADDR_COPY(mac.bssid_addr, etheranyaddr);
+    mac.cck_rates = htole32(0x0f);
+    mac.ofdm_rates = htole32(0x15);
+    mac.filter_flags = htole32(IWX_MAC_FILTER_IN_PROMISC | IWX_MAC_FILTER_IN_CONTROL_AND_MGMT | IWX_MAC_FILTER_ACCEPT_GRP);
+    err = iwx_send_cmd_pdu(sc, IWX_MAC_CONTEXT_CMD, 0, sizeof(mac), &mac);
+    if (gen != sc->sc_generation)
+        return false;
+    if (err) {
+        awdlSchedCh6Err = 0x40000000U | uint32_t(err);
+        awdlSchedCh6Off = true;
+        return false;
+    }
+    struct iwx_binding_cmd bind;
+    memset(&bind, 0, sizeof(bind));
+    bind.id_and_color = htole32(IWX_FW_CMD_ID_AND_COLOR(phy->id, phy->color));
+    bind.action = htole32(IWX_FW_CTXT_ACTION_ADD);
+    bind.phy = htole32(IWX_FW_CMD_ID_AND_COLOR(phy->id, phy->color));
+    bind.macs[0] = htole32(IWX_FW_CMD_ID_AND_COLOR(kAwdlSchedCh6MacId, 0));
+    for (int i = 1; i < IWX_MAX_MACS_IN_BINDING; i++)
+        bind.macs[i] = htole32(IWX_FW_CTXT_INVALID);
+    bind.lmac_id = htole32(IWX_LMAC_24G_INDEX);
+    uint32_t status = 0;
+    err = iwx_send_cmd_pdu_status(sc, IWX_BINDING_CONTEXT_CMD, sizeof(bind), &bind, &status);
+    if (gen != sc->sc_generation)
+        return false;
+    if (err || status) {
+        awdlSchedCh6Err = err ? 0x20000000U | uint32_t(err) : 0x08000000U | status;
+        awdlSchedCh6Off = true;
+        mac.action = htole32(IWX_FW_CTXT_ACTION_REMOVE);
+        (void)iwx_send_cmd_pdu(sc, IWX_MAC_CONTEXT_CMD, 0, sizeof(mac), &mac);
+        return false;
+    }
+    awdlSchedCh6Added = true;
+    awdlSchedCh6Gen = gen;
+    ++awdlSchedCh6Adds;
+    if (awdlSchedCh6Tx && !awdlCh6TxOff)
+        (void)awdlCh6TxSetup(sc);
+    return true;
+}
+
+// channel 6's binding and MAC go when the listener goes (binding first, then the MAC).
+void ItlIwx::
+awdlSchedCh6Remove(struct iwx_softc *sc)
+{
+    const int gen = sc->sc_generation;
+    awdlCh6TxTeardown(sc);   // the station (and its queue) before the MAC
+    if (gen != sc->sc_generation)
+        return;
+    if (!awdlSchedCh6Added || awdlSchedCh6Gen != gen)
+        return;
+    awdlSchedCh6Added = false;
+    struct iwx_phy_ctxt *phy = &sc->sc_phyctxt[kAwdlSchedCh6PhyId];
+    struct iwx_binding_cmd bind;
+    memset(&bind, 0, sizeof(bind));
+    bind.id_and_color = htole32(IWX_FW_CMD_ID_AND_COLOR(phy->id, phy->color));
+    bind.action = htole32(IWX_FW_CTXT_ACTION_REMOVE);
+    bind.phy = htole32(IWX_FW_CMD_ID_AND_COLOR(phy->id, phy->color));
+    for (int i = 0; i < IWX_MAX_MACS_IN_BINDING; i++)
+        bind.macs[i] = htole32(IWX_FW_CTXT_INVALID);
+    bind.lmac_id = htole32(IWX_LMAC_24G_INDEX);
+    uint32_t status = 0;
+    int err = iwx_send_cmd_pdu_status(sc, IWX_BINDING_CONTEXT_CMD, sizeof(bind), &bind, &status);
+    if (gen != sc->sc_generation)
+        return;
+    struct iwx_mac_ctx_cmd mac;
+    memset(&mac, 0, sizeof(mac));
+    mac.id_and_color = htole32(IWX_FW_CMD_ID_AND_COLOR(kAwdlSchedCh6MacId, 0));
+    mac.action = htole32(IWX_FW_CTXT_ACTION_REMOVE);
+    const int macErr = iwx_send_cmd_pdu(sc, IWX_MAC_CONTEXT_CMD, 0, sizeof(mac), &mac);
+    if (gen != sc->sc_generation)
+        return;
+    if (err || status || macErr) {
+        awdlSchedCh6Off = true;
+        awdlSchedCh6Err = 0x04000000U;
+    }
+}
+
+// channel 6's station and queue, on the channel-6 handle's MAC. Like the listener's, the station has
+// no peer address and sends to anyone. A failure turns channel-6 sending off until the driver reloads.
+int ItlIwx::
+awdlCh6TxSetup(struct iwx_softc *sc)
+{
+    const int gen = sc->sc_generation;
+    if (awdlCh6TxStaAdded && awdlCh6TxGen == gen)
+        return 0;
+    if (awdlCh6TxGen != gen) {   // a firmware restart took the old station and reset the rings
+        awdlCh6TxStaAdded = false;
+        awdlCh6TxQueue = -1;
+    }
+    if (!awdlSchedCh6Added || awdlSchedCh6Gen != gen || awdlStopping || sc->sc_ic.ic_state != IEEE80211_S_RUN)
+        return ECANCELED;
+    ++awdlCh6TxSetups;
+    struct iwx_add_sta_cmd cmd;
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.sta_id = kAwdlCh6TxStaId;
+    cmd.station_type = IWX_STA_GENERAL_PURPOSE;
+    cmd.mac_id_n_color = htole32(IWX_FW_CMD_ID_AND_COLOR(kAwdlSchedCh6MacId, 0));
+    IEEE80211_ADDR_COPY(&cmd.addr, etheranyaddr);
+    cmd.tid_disable_tx = htole16(0xffff);
+    cmd.station_flags = htole32(IWX_STA_FLG_FAT_EN_20MHZ | IWX_STA_FLG_MIMO_EN_SISO);
+    cmd.station_flags_msk = htole32(IWX_STA_FLG_FAT_EN_MSK | IWX_STA_FLG_MIMO_EN_MSK);
+    struct iwx_rm_sta_cmd rm;
+    memset(&rm, 0, sizeof(rm));
+    rm.sta_id = kAwdlCh6TxStaId;
+    uint32_t status = IWX_ADD_STA_SUCCESS;
+    const int transportErr = iwx_send_cmd_pdu_status(sc, IWX_ADD_STA, sizeof(cmd), &cmd, &status);
+    if (gen != sc->sc_generation)
+        return ECANCELED;
+    int err = transportErr;
+    if (!err && (status & IWX_ADD_STA_STATUS_MASK) != IWX_ADD_STA_SUCCESS)
+        err = EIO;
+    if (err) {
+        awdlCh6TxErr = 0x80000000U | uint32_t(err) | (status << 8);
+        awdlCh6TxOff = true;
+        return err;
+    }
+    if (!awdlSchedCh6Added || awdlSchedCh6Gen != gen || awdlStopping) {
+        (void)iwx_send_cmd_pdu(sc, IWX_REMOVE_STA, 0, sizeof(rm), &rm);
+        return ECANCELED;
+    }
+    const int queue = iwx_tvqm_enable_txq(sc, IWX_MGMT_TID, 0, IWX_DEFAULT_QUEUE_SIZE, kAwdlCh6TxStaId);
+    if (gen != sc->sc_generation)
+        return ECANCELED;
+    if (queue < 0) {
+        awdlCh6TxErr = 0x40000000U | uint32_t(-queue);
+        awdlCh6TxOff = true;
+        (void)iwx_send_cmd_pdu(sc, IWX_REMOVE_STA, 0, sizeof(rm), &rm);
+        return -queue;
+    }
+    awdlCh6TxQueue = queue;
+    awdlCh6TxGen = gen;
+    awdlCh6TxStaAdded = true;
+    awdlCh6TxServedSessionUS = 0;
+    awdlCh6TxTplUS = 0;
+    return 0;
+}
+
+void ItlIwx::
+awdlCh6TxTeardown(struct iwx_softc *sc)
+{
+    if (!awdlCh6TxStaAdded)
+        return;
+    const int gen = sc->sc_generation;
+    awdlCh6TxStaAdded = false;
+    if (awdlCh6TxGen != gen) {   // gone with the old firmware
+        awdlCh6TxQueue = -1;
+        return;
+    }
+    const int flushErr = iwx_flush_sta_tids(sc, kAwdlCh6TxStaId, 0xffff);
+    struct iwx_rm_sta_cmd rm;
+    memset(&rm, 0, sizeof(rm));
+    rm.sta_id = kAwdlCh6TxStaId;
+    const int rmErr = gen == sc->sc_generation ? iwx_send_cmd_pdu(sc, IWX_REMOVE_STA, 0, sizeof(rm), &rm) : 0;
+    if (gen != sc->sc_generation) {
+        awdlCh6TxQueue = -1;
+        return;
+    }
+    if (awdlCh6TxQueue >= 0 && awdlCh6TxQueue < int(nitems(sc->txq))) {
+        if (!flushErr && !rmErr) {
+            iwx_reset_tx_ring(sc, &sc->txq[awdlCh6TxQueue]);
+            awdlCh6TxQueue = -1;
+        } else {
+            // The firmware may still own the queue: keep its number reserved (and its completions handled) and
+            // stop sending on 6 until the firmware restarts.
+            awdlCh6TxOff = true;
+            awdlCh6TxErr = 0x20000000U | uint32_t(flushErr ? flushErr : rmErr);
+        }
+    }
+    awdlCh6TxTplUS = 0;
+}
+
+// one sync frame at the start of each channel-6 session, built fresh, while enough of it is left.
+void ItlIwx::
+awdlCh6TxSend(struct iwx_softc *sc, uint64_t nowUS)
+{
+#if defined(ITL_AWDL_NATIVE)
+    struct ieee80211com *ic = &sc->sc_ic;
+    const int gen = sc->sc_generation;
+    if (!awdlSchedCh6Tx || awdlCh6TxOff || !awdlCh6TxStaAdded || awdlCh6TxGen != gen || awdlCh6TxQueue < 0 ||
+        awdlCh6TxQueue >= int(nitems(sc->txq)) || !awdlSchedCh6Added || awdlSchedCh6Gen != gen || awdlStopping ||
+        !awdlCoexAdded || !awdlCoexTxStaAdded || awdlCoexTxHalted || !awdlCoexAddrApplied ||
+        ic->ic_state != IEEE80211_S_RUN || !ic->ic_bss)
+        return;
+    if (!awdlSchedSpActive || !awdlSchedSpStartUS || awdlSchedSpMacId != kAwdlSchedCh6MacId ||
+        awdlCh6TxServedSessionUS == awdlSchedSpStartUS)
+        return;
+    awdlCh6TxServedSessionUS = awdlSchedSpStartUS;
+    ++awdlCh6TxSessions;
+    if (awdlSchedSpStartUS + uint64_t(awdlSchedSpCurDurTU) * 1024 < nowUS + kAwdlCh6TxMinLeftUS) {
+        ++awdlCh6TxNoTime;
+        return;
+    }
+    if (sc->txq[awdlCh6TxQueue].queued) {
+        ++awdlCh6TxBusy;
+        return;
+    }
+    // The firmware's regulatory decision stands: nothing is started on 6 where it marks the channel passive (no IR),
+    // DFS, no-adhoc or inactive. Its own check; the listener's also requires the listener's own channel
+    // (refused every session with reason 0x20 and overwrote the listener's refusal record).
+    {
+        const unsigned ch = kAwdlSchedCh6Channel;
+        const auto &c = ic->ic_channels[ch];
+        const uint32_t reason = (!c.ic_freq ? 1U : 0U) | (awdlCoexNoIr(ic, ch) ? 2U : 0U) |
+            ((c.ic_flags & IEEE80211_CHAN_DFS) ? 4U : 0U) | ((c.ic_flags & IEEE80211_CHAN_NOADHOC) ? 8U : 0U) |
+            (!isset(ic->ic_chan_active, ch) ? 16U : 0U);
+        if (reason) {
+            awdlCh6TxRefused = reason;
+            ++awdlCh6TxRefusedN;
+            return;
+        }
+    }
+    mbuf_t packet = nullptr;
+    const uint64_t tplUS = itlAWDLTemplateChangeUS;
+    const uint64_t buildUS = awdlUptimeUS();
+    // the one frame of a channel-6 session is the MI, where macOS's bitmap allows the slot.
+    bool forceMI = false;
+    if (awdlSchedMiFirst) {
+        if (awdlMiSlotAllowed(buildUS)) {
+            forceMI = true;
+            ++awdlMiFirst6;
+        } else {
+            ++awdlMiBlocked6;
+        }
+    }
+    itlAWDLForceMI = forceMI;
+    const IOReturn built = itlAWDLBuildSyncProbe(getController(), &packet, buildUS);
+    itlAWDLForceMI = 0;
+    const bool builtMI = built == kIOReturnSuccess && itlAWDLLastBuildMI;
+    if (built != kIOReturnSuccess || !packet || mbuf_len(packet) < 24) {
+        ++awdlCh6TxBuildFail;
+        if (packet)
+            mbuf_freem(packet);
+        return;
+    }
+    ++awdlCh6TxBuilt;
+    // Only frames from the address the listener already uses (macOS's awdl0 address).
+    if (memcmp(static_cast<const uint8_t *>(mbuf_data(packet)) + 10, awdlCoexAddrInFirmware, 6)) {
+        ++awdlCh6TxBuildFail;
+        mbuf_freem(packet);
+        return;
+    }
+    auto *node = ieee80211_ref_node(ic->ic_bss);
+    awdlCh6TxSending = true;
+    const int err = iwx_tx(sc, packet, node, EDCA_AC_BE, awdlCh6TxQueue);
+    awdlCh6TxSending = false;
+    if (err) {
+        ieee80211_release_node(ic, node);
+        ++awdlCh6TxSubmitErr;
+        return;
+    }
+    ++awdlCh6TxSubmitted;
+    awdlCh6TxTplUS = builtMI ? tplUS : 0;   // only an MI carries the services
+    if (builtMI) {
+        ++awdlMiOut6;
+        if (tplUS > awdlMiDueServedUS) {
+            ++awdlMiNowSent6;
+            awdlMiDueServedUS = tplUS;
+        }
+    }
+#endif
+}
+
+// decide, from the coex TX task (every 113 ms), what the follower does next. Called only with no
+// session running or awaited, the listener on its own channel and the probe not stopped.
+void ItlIwx::
+awdlSchedFollowPlan(struct iwx_softc *sc, uint64_t nowUS)
+{
+    if (awdlSchedAwdlOff()) {
+        // macOS has AWDL off; an armed send finds this too and is dropped as stale.
+        ++awdlSchedOffSkips;
+        return;
+    }
+    if (awdlSchedFollowArmed && awdlSchedFollowArmedGen == sc->sc_generation)
+        return;   // a timed send is pending
+    awdlSchedFollowArmed = false;
+    awdlSchedSpTargetMac = kAwdlCoexMacId;   // the 149 handle unless channel 6's run comes first
+    ItlAWDL::FollowDecision d;
+    {
+        // the election, then macOS's plan on the elected clock.
+        ItlAWDL::Clock planClock = ItlAWDL::ownClock();
+        if (awdlSchedClock && itlAWDLSelfKnown && awdlCoexAddrKnown) {
+            ItlAWDL::ElectionResult r;
+            if (awdlSchedElectionApple) {
+                // IO80211's internal thresholds for what it sends the chip: -70 -> -65/-45, -78 -> -78/-58.
+                ItlAWDL::AppleElectionInputs in{};
+                in.selfMetric = itlAWDLSelfMetric;
+                in.selfCounter = itlAWDLSelfCounter;
+                const int32_t fromMacOS = itlAWDLElectionRssiFromMacOS;
+                const bool relaxed = fromMacOS && fromMacOS <= -78;
+                in.minRssi5Dbm = awdlSchedElectionMinRssi ? awdlSchedElectionMinRssi : relaxed ? -78 : -65;
+                in.hostEdgeDbm = relaxed ? -58 : -45;
+                in.haveElectionId = itlAWDLSelfElectionIdKnown;
+                in.electionId = itlAWDLSelfElectionId;
+                r = awdlSchedElection.runApple(awdlCoexAddr, in, nowUS);
+                awdlSchedElectionLastApple = r;
+            } else {
+                r = awdlSchedElection.run(awdlCoexAddr, itlAWDLSelfMetric, itlAWDLSelfCounter, nowUS,
+                                          awdlSchedElectionMinRssi);
+            }
+            awdlSchedElectionWeakSkips += r.weakSkipped ? 1 : 0;
+            if (memcmp(r.master, awdlSchedElectionNow.master, 6) || memcmp(r.sync, awdlSchedElectionNow.sync, 6))
+                ++awdlSchedElectionChanges;
+            awdlSchedElectionNow = r;
+            awdlSchedElectionRunUS = nowUS;
+            if (r.clockValid) {
+                planClock = r.clock;
+                ++awdlSchedElectionClocked;
+            }
+        }
+        awdlSchedPlanClockNow = planClock;
+        // macOS's plan, copied without tearing: the version is even and unchanged across the copy.
+        uint8_t plan[16];
+        const uint32_t before = itlAWDLPlanVersion;
+        __atomic_thread_fence(__ATOMIC_SEQ_CST);
+        memcpy(plan, itlAWDLPlanChannels, sizeof(plan));
+        __atomic_thread_fence(__ATOMIC_SEQ_CST);
+        const bool usable = before && !(before & 1) && before == itlAWDLPlanVersion;
+        if (before && !usable)
+            ++awdlSchedPlanTorn;
+        if (usable && before != awdlSchedPlanVersionSeen) {
+            awdlSchedPlanVersionSeen = before;
+            memcpy(awdlSchedPlanLast, plan, sizeof(plan));
+            ItlAWDL::planCounts(plan, uint8_t(awdlCoexChannel), uint8_t(awdlSchedSpStation), &awdlSchedPlanListener,
+                                &awdlSchedPlanStation, &awdlSchedPlanOther);
+            awdlSchedSpPublish();
+        }
+        // AW extension into 0 entries while AWDL data flows (see awdlSchedExtend).
+        uint8_t listenerPlan[16];
+        memcpy(listenerPlan, plan, sizeof(listenerPlan));
+        if (usable && awdlSchedExtend) {
+            const uint32_t rx = awdlCoexAwdlData, tx = awdlCoexDataTx;
+            if (rx != awdlSchedExtLastRx || tx != awdlSchedExtLastTx) {
+                awdlSchedExtLastRx = rx;
+                awdlSchedExtLastTx = tx;
+                awdlSchedExtActiveUS = nowUS;
+            }
+            const uint8_t ours = uint8_t(awdlCoexChannel);
+            if (ours && awdlSchedExtActiveUS && nowUS - awdlSchedExtActiveUS < kAwdlSchedExtHoldUS) {
+                ++awdlSchedExtActiveTicks;
+                for (unsigned pass = 0; pass < 2; ++pass)   // two passes cover a run that wraps past entry 15
+                    for (unsigned i = 0; i < 16; ++i)
+                        if (!listenerPlan[i] && listenerPlan[(i + 15) % 16] == ours) {
+                            listenerPlan[i] = ours;
+                            ++awdlSchedExtSlots;
+                        }
+                memcpy(awdlSchedExtPlan, listenerPlan, sizeof(awdlSchedExtPlan));
+                awdlSchedExtPlanUS = nowUS;
+            } else {
+                ++awdlSchedExtIdleTicks;
+            }
+        }
+        d = ItlAWDL::followDecidePlan(usable ? &listenerPlan : nullptr, uint8_t(awdlCoexChannel), nowUS,
+                                      awdlSchedFollowLastDutyUS, planClock, awdlSchedLeadUS);
+        awdlSchedSpTargetMac = kAwdlCoexMacId;
+        // channel 6's plan = macOS's channel-6 entries plus the peer's, where macOS's entry isn't our listener's.
+        uint8_t ch6Plan[16];
+        memcpy(ch6Plan, plan, sizeof(ch6Plan));
+        unsigned ch6PeerAdded = 0;
+        if (awdlSchedCh6Peer && usable && awdlCoexPeer5GUS && nowUS - awdlCoexPeer5GUS < kAwdlSchedCh6PeerFreshUS) {
+            for (unsigned n = 0; n < 16; ++n)
+                if (awdlCoexPeerSeq[n] == kAwdlSchedCh6Channel && ch6Plan[n] != kAwdlSchedCh6Channel &&
+                    ch6Plan[n] != uint8_t(awdlCoexChannel)) {
+                    ch6Plan[n] = kAwdlSchedCh6Channel;
+                    ++ch6PeerAdded;
+                }
+            ++awdlSchedCh6PeerDecisions;
+            awdlSchedCh6PeerSlotsAdded += ch6PeerAdded;
+        }
+        if (usable && awdlSchedCh6 && awdlSchedCh6Added && awdlSchedCh6Gen == sc->sc_generation) {
+            // channel 6's runs too; the run that starts first wins (one session at a time).
+            const ItlAWDL::FollowDecision d6 = ItlAWDL::followDecidePlan(&ch6Plan, kAwdlSchedCh6Channel, nowUS,
+                                                                        awdlSchedFollowLastDutyUS, planClock,
+                                                                        awdlSchedLeadUS);
+            const auto startOf = [&](const ItlAWDL::FollowDecision &x) {
+                return x.action == ItlAWDL::FollowAction::SendNow ? nowUS :
+                       x.action == ItlAWDL::FollowAction::Arm ? x.sendAtUS : ~0ULL;
+            };
+            if (startOf(d6) < startOf(d)) {
+                d = d6;
+                awdlSchedSpTargetMac = kAwdlSchedCh6MacId;
+                if (ch6PeerAdded && d6.runStartUS) {   // a run the peer's sequence added
+                    const uint32_t e = ItlAWDL::clockEawAt(planClock, d6.runStartUS + 1, nullptr);
+                    if (plan[e % 16] != kAwdlSchedCh6Channel)
+                        ++awdlSchedCh6PeerRuns;
+                }
+            }
+        }
+        // end early when the next run (either channel) starts within the lead of this one's end.
+        if (awdlSchedHandover && usable &&
+            (d.action == ItlAWDL::FollowAction::SendNow || d.action == ItlAWDL::FollowAction::Arm) && d.endUS) {
+            uint64_t nextStart = ~0ULL;
+            ItlAWDL::FollowRun nr{};
+            if (ItlAWDL::nextPlanRun(listenerPlan, uint8_t(awdlCoexChannel), d.endUS, planClock, &nr) &&
+                nr.startUS >= d.endUS)
+                nextStart = nr.startUS;
+            if (awdlSchedCh6 && awdlSchedCh6Added && awdlSchedCh6Gen == sc->sc_generation &&
+                ItlAWDL::nextPlanRun(ch6Plan, kAwdlSchedCh6Channel, d.endUS, planClock, &nr) && nr.startUS >= d.endUS &&
+                nr.startUS < nextStart)
+                nextStart = nr.startUS;
+            if (nextStart != ~0ULL && nextStart - d.endUS < awdlSchedLeadUS) {
+                const uint64_t want = nextStart > awdlSchedLeadUS ? nextStart - awdlSchedLeadUS : 0;
+                const uint64_t from = d.action == ItlAWDL::FollowAction::Arm ? d.sendAtUS : nowUS;
+                if (want > from && want - from >= ItlAWDL::kFollowMinRunUS && want < d.endUS) {
+                    awdlSchedHandoverTrimSumUS += d.endUS - want;
+                    d.endUS = want;
+                    ++awdlSchedHandoverTrims;
+                } else {
+                    ++awdlSchedHandoverSkipped;
+                }
+            }
+        }
+    }
+    switch (d.action) {
+    case ItlAWDL::FollowAction::SendNow: {
+        const uint32_t tu = ItlAWDL::followDurationTU(nowUS, d.endUS);
+        awdlSchedSpRunStartUS = d.runStartUS;
+        if (tu && awdlSchedSpSend(sc, tu) == 0) {
+            awdlSchedSpPlannedEndUS = d.endUS;
+            ++awdlSchedFollowAligned;
+            awdlSchedFollowEntries += d.entries;
+        }
+        break;
+    }
+    case ItlAWDL::FollowAction::Arm:
+        awdlSchedFollowArmedMac = awdlSchedSpTargetMac;
+        awdlSchedFollowArmed = true;
+        awdlSchedFollowArmedGen = sc->sc_generation;
+        awdlSchedFollowSendAtUS = d.sendAtUS;
+        awdlSchedFollowEndUS = d.endUS;
+        awdlSchedFollowArmedRunStartUS = d.runStartUS;
+        awdlSchedFollowEntries += d.entries;
+        ++awdlSchedFollowArms;
+        timeout_add_usec(&awdlSchedFollowTimer, int(d.sendAtUS - nowUS));
+        break;
+    case ItlAWDL::FollowAction::Duty:
+        awdlSchedSpRunStartUS = 0;   // not a plan run
+        if (awdlSchedSpSend(sc, ItlAWDL::kFollowDutyTU) == 0) {
+            ++awdlSchedFollowDuty;
+            awdlSchedFollowLastDutyUS = nowUS;
+        }
+        break;
+    case ItlAWDL::FollowAction::None:
+        break;
+    }
+}
+
+void ItlIwx::
+awdlSchedFollowTimeout(void *arg)
+{
+    if (!awdlStopping)
+        task_add(systq, &awdlSchedFollowTaskEntry);
+}
+
+// The armed send, in the command gate. It goes only if nothing changed since it was armed: same firmware
+// generation, the probe still running, no session running or awaited, and enough of the run left.
+void ItlIwx::
+awdlSchedFollowTask(void *arg)
+{
+    struct iwx_softc *sc = (struct iwx_softc *)arg;
+    ItlIwx *that = container_of(sc, ItlIwx, com);
+    if (awdlStopping || !that->getMainWorkLoop() || !that->getMainCommandGate())
+        return;
+    if (!that->getMainWorkLoop()->inGate()) {
+        that->getMainCommandGate()->runAction(
+            [](OSObject *, void *arg0, void *, void *, void *) -> IOReturn {
+                awdlSchedFollowTask(arg0);
+                return kIOReturnSuccess;
+            }, arg);
+        return;
+    }
+    if (awdlStopping || !awdlSchedFollowArmed)
+        return;
+    awdlSchedFollowArmed = false;
+    ++awdlSchedFollowFired;
+    const uint64_t now = awdlUptimeUS();
+    const uint32_t tu = ItlAWDL::followDurationTU(now, awdlSchedFollowEndUS);
+    if (awdlSchedFollowArmedGen != sc->sc_generation || awdlSchedSpOff || awdlSchedSpActive || awdlSchedSpAwaitStart ||
+        awdlCoexMovePending || !awdlCoexMultiActive || !tu || awdlSchedAwdlOff() ||
+        (sc->sc_flags & (IWX_FLAG_HW_ERR | IWX_FLAG_SHUTDOWN | IWX_FLAG_RFKILL))) {
+        if (awdlSchedAwdlOff())
+            ++awdlSchedOffStale;
+        ++awdlSchedFollowStale;
+        awdlSchedSpPublish();
+        return;
+    }
+    const uint64_t late = now > awdlSchedFollowSendAtUS ? now - awdlSchedFollowSendAtUS : 0;
+    ++awdlSchedFollowLateN;
+    awdlSchedFollowLateSumUS += late;
+    if (late > awdlSchedFollowLateMaxUS)
+        awdlSchedFollowLateMaxUS = late;
+    awdlSchedSpTargetMac = awdlSchedFollowArmedMac;   // the run's own handle
+    awdlSchedSpRunStartUS = awdlSchedFollowArmedRunStartUS;
+    if (that->awdlSchedSpSend(sc, tu) == 0) {
+        ++awdlSchedFollowAligned;
+        awdlSchedSpPlannedEndUS = awdlSchedFollowEndUS;
+    }
+}
+
 void ItlIwx::
 awdlCoexRetarget(struct iwx_softc *sc)
 {
@@ -16226,6 +18518,20 @@ awdlCoexListener(struct iwx_softc *sc, bool add)
         const int macErr = awdlCoexMacSend(sc, IWX_FW_CTXT_ACTION_REMOVE);
         if (gen != sc->sc_generation)
             return 0;
+        awdlSchedCh6Remove(sc);
+        if (gen != sc->sc_generation)
+            return 0;
+        // the handle left the binding with it (removed whole above); now its MAC goes too.
+        if (awdlSchedHandleAdded && awdlSchedHandleGen == gen) {
+            awdlSchedHandleAdded = false;
+            ++awdlSchedHandleRemoves;
+            if (awdlSchedHandleMac(sc, IWX_FW_CTXT_ACTION_REMOVE) && gen == sc->sc_generation) {
+                awdlSchedHandleOff = true;
+                awdlSchedHandleErr = 0x20000000U;
+            }
+            if (gen != sc->sc_generation)
+                return 0;
+        }
         // The host can't take the context back by itself, so it forgets it either way; but after any
         // failure nothing is added again until the firmware restarts.
         awdlCoexRemovingGen = -1;
@@ -16382,6 +18688,10 @@ awdlCoexTxSetup(struct iwx_softc *sc)
 int ItlIwx::
 awdlCoexTxTeardown(struct iwx_softc *sc)
 {
+    // multicast frames still held for an AW go with the queue.
+    for (unsigned k = 0; k < awdlMcastHeld; ++k)
+        mbuf_freem(awdlMcastHold[k]);
+    awdlMcastHeld = 0;
     if (!awdlCoexTxStaAdded)
         return 0;
     const int gen = sc->sc_generation;
@@ -16430,7 +18740,25 @@ awdlCoexTxSend(struct iwx_softc *sc)
             return;
     }
     mbuf_t packet = nullptr;
-    const IOReturn built = itlAWDLBuildSyncProbe(getController(), &packet, awdlUptimeUS());
+    const uint64_t syncBuildUS = awdlUptimeUS();
+    const uint64_t tplUS = itlAWDLTemplateChangeUS;
+    // the first frame of each 149 handle session is the MI, where macOS's bitmap allows the slot.
+    bool forceMI = false;
+    if (awdlSchedMiFirst && awdlSchedSyncTxGated() && awdlSchedSpActive && awdlSchedSpStartUS &&
+        awdlSchedSpMacId == kAwdlSchedHandleMacId && awdlMiFirst149SessionUS != awdlSchedSpStartUS) {
+        awdlMiFirst149SessionUS = awdlSchedSpStartUS;
+        if (awdlMiSlotAllowed(syncBuildUS)) {
+            forceMI = true;
+            ++awdlMiFirst149;
+        } else {
+            ++awdlMiBlocked149;
+        }
+    }
+    const bool miDueHere = awdlMiDue(syncBuildUS) && awdlMiSlotAllowed(syncBuildUS);
+    itlAWDLForceMI = forceMI || miDueHere;
+    const IOReturn built = itlAWDLBuildSyncProbe(getController(), &packet, syncBuildUS);
+    itlAWDLForceMI = 0;
+    const bool builtMI = built == kIOReturnSuccess && itlAWDLLastBuildMI;
     if (built != kIOReturnSuccess || !packet || mbuf_len(packet) < 24) {
         awdlCoexLastBuildResult = uint32_t(built);
         if (built == kIOReturnNotReady)
@@ -16486,6 +18814,16 @@ awdlCoexTxSend(struct iwx_softc *sc)
         return;
     }
     auto *node = ieee80211_ref_node(ic->ic_bss);
+    if (awdlSchedSkew) {   // frames queued ahead of this sync frame
+        awdlSyncSubmitRing = awdlCoexQueue >= 0 && awdlCoexQueue < int(nitems(sc->txq)) ? sc->txq[awdlCoexQueue].queued : -1;
+        awdlSyncSubmitAgg = awdlCoexBaTxQueue >= 0 && awdlCoexBaTxQueue < int(nitems(sc->txq)) ?
+            sc->txq[awdlCoexBaTxQueue].queued : -1;
+        if (awdlSyncSubmitRing > 0) {
+            awdlSyncRingAheadSum += uint32_t(awdlSyncSubmitRing);
+            if (uint32_t(awdlSyncSubmitRing) > awdlSyncRingAheadMax)
+                awdlSyncRingAheadMax = uint32_t(awdlSyncSubmitRing);
+        }
+    }
     awdlCoexSending = true;
     const int err = iwx_tx(sc, packet, node, EDCA_AC_BE, awdlCoexQueue);
     awdlCoexSending = false;
@@ -16497,6 +18835,15 @@ awdlCoexTxSend(struct iwx_softc *sc)
     ++awdlCoexTxSubmitted;
     awdlCoexInFlight = true;
     awdlCoexInFlightUS = awdlUptimeUS();
+    awdlSyncBuildUS = syncBuildUS;
+    awdlAdv149PendingTplUS = builtMI ? tplUS : 0;   // only an MI carries the services
+    if (builtMI) {
+        ++awdlMiOut149;
+        if (miDueHere)
+            ++awdlMiNowSent149;
+        if (tplUS > awdlMiDueServedUS)
+            awdlMiDueServedUS = tplUS;   // this change is on its way
+    }
 #endif
 }
 
@@ -16819,7 +19166,7 @@ iwx_newstate_task(void *psc)
 out:
     if (generation == sc->sc_generation && (sc->sc_flags & IWX_FLAG_SHUTDOWN) == 0) {
         if (err)
-            task_add(systq, &sc->init_task);
+            { itlFwNoteRestart(3); task_add(systq, &sc->init_task); }
         else {
             sc->sc_newstate(ic, nstate, arg);
             if (nstate == IEEE80211_S_RUN && ic->ic_state == IEEE80211_S_RUN &&
@@ -18088,7 +20435,7 @@ iwx_watchdog(struct _ifnet *ifp)
             that->iwx_nic_error(sc);
 #endif
             if ((sc->sc_flags & IWX_FLAG_SHUTDOWN) == 0)
-                task_add(systq, &sc->init_task);
+                { itlFwNoteRestart(4); task_add(systq, &sc->init_task); }
             ifp->netStat->outputErrors++;
             return;
         }
@@ -18254,6 +20601,19 @@ iwx_nic_umac_error(struct iwx_softc *sc)
         return;
     }
     
+    if (itlFwCrashRec && itlFwCrashCount) {   // the UMAC's own assert, beside the LMAC table
+        ItlFwCrashRecord &r = itlFwCrashRecords[(itlFwCrashCount - 1) % 4];
+        r.uvalid = table.valid;
+        r.uid = table.error_id;
+        r.ublink1 = table.blink1;
+        r.ublink2 = table.blink2;
+        r.uilink1 = table.ilink1;
+        r.uilink2 = table.ilink2;
+        r.ud1 = table.data1;
+        r.ud2 = table.data2;
+        r.ud3 = table.data3;
+        r.ucmd = table.cmd_header;
+    }
     if (ERROR_START_OFFSET <= table.valid * ERROR_ELEM_SIZE) {
         XYLog("%s: Start UMAC Error Log Dump:\n", DEVNAME(sc));
         XYLog("%s: Status: 0x%x, count: %d\n", DEVNAME(sc),
@@ -18350,6 +20710,24 @@ iwx_nic_error(struct iwx_softc *sc)
     if (!table.valid) {
         XYLog("%s: errlog not found, skipping\n", DEVNAME(sc));
         return;
+    }
+    if (itlFwCrashRec) {   // kept across the restart
+        ItlFwCrashRecord &r = itlFwCrashRecords[itlFwCrashCount % 4];
+        r = ItlFwCrashRecord{awdlUptimeUS(), sc->sc_generation, table.valid, table.error_id, table.trm_hw_status0,
+                             table.trm_hw_status1, table.blink2, table.ilink1, table.ilink2, table.data1, table.data2,
+                             table.data3, table.last_cmd_id, table.hcmd, table.gp2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+        {   // the commands that led up to it
+            const uint64_t nowUS = r.upUS;
+            const uint32_t total = itlFwCmdHistNext < kItlFwCmdHist ? itlFwCmdHistNext : kItlFwCmdHist;
+            for (uint32_t k = 0; k < total; ++k) {
+                const unsigned slot = (itlFwCmdHistNext - total + k) % kItlFwCmdHist;
+                r.histCode[k] = itlFwCmdHistCode[slot];
+                r.histMsBefore[k] = uint32_t(nowUS > itlFwCmdHistUS[slot] ? (nowUS - itlFwCmdHistUS[slot]) / 1000 : 0);
+                r.histLen[k] = itlFwCmdHistLen[slot];
+            }
+            r.histCount = uint8_t(total);
+        }
+        ++itlFwCrashCount;
     }
     
     if (ERROR_START_OFFSET <= table.valid * ERROR_ELEM_SIZE) {
@@ -18702,7 +21080,7 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data, struct mbuf_list *ml)
                        "stopping device\n",
                        DEVNAME(sc), IWX_NOTIF_FITS(pkt, struct iwx_ct_kill_notif) ? le16toh(notif->temperature) : 0);
                 sc->sc_flags |= IWX_FLAG_HW_ERR;
-                task_add(systq, &sc->init_task);
+                { itlFwNoteRestart(5); task_add(systq, &sc->init_task); }
                 break;
             }
                 
@@ -18885,6 +21263,65 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data, struct mbuf_list *ml)
                 if (!IWX_NOTIF_FITS(pkt, struct iwx_session_prot_notif))
                     break;
                 SYNC_RESP_STRUCT(notif, pkt, struct iwx_session_prot_notif *);
+                // the listener's own sessions, kept away from the station's bookkeeping below.
+                if (awdlSchedSp && awdlSchedSpSent && le32toh(notif->mac_id) == awdlSchedSpMacId) {
+                    const uint64_t spNow = awdlUptimeUS();
+                    const bool spOK = le32toh(notif->status) != 0;
+                    if (!spOK)
+                        ++awdlSchedSpFails;
+                    if (le32toh(notif->start) && !spOK) {
+                        // a failed start opens no window; wait for its paired end before the next request.
+                        ++awdlSchedSpFailedStarts;
+                        awdlSchedSpActive = false;
+                        awdlSchedSpRunStartUS = 0;
+                        awdlSchedSpPublish();
+                    } else if (le32toh(notif->start)) {
+                        if (!awdlStartFirstOkUS)
+                            awdlStartFirstOkUS = spNow;
+                        ++awdlSchedSpStarts;
+                        awdlSchedSpActive = true;
+                        awdlSchedSpStartUS = spNow;
+                        awdlSchedSpAwdlMark = awdlCoexAwdlAction + awdlCoexAwdlData;
+                        // where the session really began against its run (plan runs only).
+                        if (awdlSchedSpAwaitStart && awdlSchedSpRunStartUS) {
+                            const uint64_t run = awdlSchedSpRunStartUS;
+                            if (awdlSchedSpSentUS > run) {
+                                ++awdlSchedStartMidRun;   // requested after the run had begun
+                            } else if (spNow <= run) {
+                                ++awdlSchedStartEarly;
+                                awdlSchedStartEarlySumUS += run - spNow;
+                            } else {
+                                const uint64_t late = spNow - run;
+                                ++(late < 1000 ? awdlSchedStartLate1 : late < 2000 ? awdlSchedStartLate2 :
+                                   late < 4000 ? awdlSchedStartLate4 : late < 8000 ? awdlSchedStartLate8 :
+                                   awdlSchedStartLateMore);
+                                if (late > awdlSchedStartLateMaxUS)
+                                    awdlSchedStartLateMaxUS = late;
+                            }
+                            awdlSchedSpRunStartUS = 0;
+                        }
+                        if (awdlSchedSpAwaitStart && spNow >= awdlSchedSpSentUS) {
+                            const uint64_t delay = spNow - awdlSchedSpSentUS;
+                            ++awdlSchedSpDelays;
+                            awdlSchedSpDelaySumUS += delay;
+                            if (delay < awdlSchedSpDelayMinUS) awdlSchedSpDelayMinUS = delay;
+                            if (delay > awdlSchedSpDelayMaxUS) awdlSchedSpDelayMaxUS = delay;
+                        }
+                        awdlSchedSpAwaitStart = false;
+                    } else {
+                        ++awdlSchedSpEnds;
+                        if (awdlSchedSpActive && awdlSchedSpStartUS) {
+                            const uint64_t len = spNow - awdlSchedSpStartUS;
+                            awdlSchedSpInUS += len;
+                            if (len < awdlSchedSpLenMinUS) awdlSchedSpLenMinUS = len;
+                            if (len > awdlSchedSpLenMaxUS) awdlSchedSpLenMaxUS = len;
+                            awdlSchedSpAwdlIn += awdlCoexAwdlAction + awdlCoexAwdlData - awdlSchedSpAwdlMark;
+                        }
+                        awdlSchedSpActive = false;
+                        awdlSchedSpAwaitStart = false;
+                    }
+                    break;
+                }
                 if (!notif->status) {
                     XYLog("Session protection failure\n");
                     sc->sc_flags &= ~IWX_FLAG_TE_ACTIVE;
@@ -19069,7 +21506,7 @@ iwx_intr(OSObject *object, IOInterruptEventSource* sender, int count)
         handled |= IWX_CSR_INT_BIT_RF_KILL;
         XYLog("%s RF_KILL has been toggled\n", __FUNCTION__);
         that->iwx_check_rfkill(sc);
-        task_add(systq, &sc->init_task);
+        { itlFwNoteRestart(6); task_add(systq, &sc->init_task); }
         rv = 1;
         goto out_ena;
     }
@@ -19095,7 +21532,7 @@ iwx_intr(OSObject *object, IOInterruptEventSource* sender, int count)
         
         XYLog("%s: fatal firmware error\n", DEVNAME(sc));
         if ((sc->sc_flags & IWX_FLAG_SHUTDOWN) == 0)
-            task_add(systq, &sc->init_task);
+            { itlFwNoteRestart(7); task_add(systq, &sc->init_task); }
         rv = 1;
         goto out;
         
@@ -19106,7 +21543,7 @@ iwx_intr(OSObject *object, IOInterruptEventSource* sender, int count)
         XYLog("%s: hardware error, stopping device \n", DEVNAME(sc));
         if ((sc->sc_flags & IWX_FLAG_SHUTDOWN) == 0) {
             sc->sc_flags |= IWX_FLAG_HW_ERR;
-            task_add(systq, &sc->init_task);
+            { itlFwNoteRestart(8); task_add(systq, &sc->init_task); }
         }
         rv = 1;
         goto out;
@@ -19207,20 +21644,20 @@ iwx_intr_msix(OSObject *object, IOInterruptEventSource* sender, int count)
         
         XYLog("%s: fatal firmware error\n", DEVNAME(sc));
         if ((sc->sc_flags & IWX_FLAG_SHUTDOWN) == 0)
-            task_add(systq, &sc->init_task);
+            { itlFwNoteRestart(9); task_add(systq, &sc->init_task); }
         return 1;
     }
     
     if (inta_hw & IWX_MSIX_HW_INT_CAUSES_REG_RF_KILL) {
         that->iwx_check_rfkill(sc);
-        task_add(systq, &sc->init_task);
+        { itlFwNoteRestart(10); task_add(systq, &sc->init_task); }
     }
     
     if (inta_hw & IWX_MSIX_HW_INT_CAUSES_REG_HW_ERR) {
         XYLog("%s: hardware error, stopping device \n", DEVNAME(sc));
         if ((sc->sc_flags & IWX_FLAG_SHUTDOWN) == 0) {
             sc->sc_flags |= IWX_FLAG_HW_ERR;
-            task_add(systq, &sc->init_task);
+            { itlFwNoteRestart(11); task_add(systq, &sc->init_task); }
         }
         return 1;
     }
@@ -20834,6 +23271,9 @@ iwx_attach(struct iwx_softc *sc, struct pci_attach_args *pa)
         awdlCoexOrder = !PE_parse_boot_argn("-itlawdlcoexnoorder", &dummy, sizeof(dummy));
         awdlCoexAwSyncAssume = awdlCoexData && PE_parse_boot_argn("-itlawdlcoexawsync0", &dummy, sizeof(dummy));
         awdlCoexGate = !PE_parse_boot_argn("-itlawdlcoexnogate", &dummy, sizeof(dummy));
+        awdlRxLoss = itlResFlag("-itlrxloss", kItlResDiag);
+        awdlMcastAw = itlResFlag("-itlawdlmcastaw", kItlResWork);
+        awdlMcastRepeat = awdlMcastAw && itlResFlag("-itlawdlmcastrepeat", kItlResWork);
         awdlCoexAssumeZero = !PE_parse_boot_argn("-itlawdlcoexcalwait", &dummy, sizeof(dummy));
         awdlCoexPeerSchedule.assumeZero = awdlCoexAssumeZero;
         if (awdlCoexData) {
@@ -20854,7 +23294,63 @@ iwx_attach(struct iwx_softc *sc, struct pci_attach_args *pa)
             awdlBtCoexRequest = requestedCoexBt;
         awdlCoexSameBand = PE_parse_boot_argn("-itlawdlsameband", &dummy, sizeof(dummy));
         awdlCoexOverlap80 = PE_parse_boot_argn("-itlawdloverlap80", &dummy, sizeof(dummy));
-        awdlCoexNoSearch6 = PE_parse_boot_argn("-itlawdlnosearch6", &dummy, sizeof(dummy));
+        awdlCoexNoSearch6 = itlResFlag("-itlawdlnosearch6", kItlResWork);
+        awdlSchedSp = itlResFlag("-itlschedsp", kItlResWork);
+        itlFwCrashRec = itlResFlag("-itlfwcrashrec", kItlResDiag);
+        if (awdlSchedSp) {
+            // The follower: session protection (P2P_GO_NEGOTIATION) on the handle before each run of the
+            // listener's channel in macOS's plan, with the settings the scheduler set was tested with.
+            awdlSchedSpState = "waiting";
+            awdlSchedAdvertise = itlResFlag("-itlschedadvertise", kItlResWork);
+            awdlSchedHandle = itlResFlag("-itlschedhandle", kItlResWork);
+            awdlSchedClock = itlResFlag("-itlschedclock", kItlResWork);
+            {
+                uint32_t minRssi = 0;
+                if (awdlSchedClock && PE_parse_boot_argn("itlschedelecrssi", &minRssi, sizeof(minRssi)) &&
+                    minRssi >= 40 && minRssi <= 95)
+                    awdlSchedElectionMinRssi = -int32_t(minRssi);
+                else if (awdlSchedClock && PE_parse_boot_argn("-itlschedelecrssi", &dummy, sizeof(dummy)))
+                    awdlSchedElectionMinRssi = ItlAWDL::kElectionDefaultMinRssi;
+                // With IO80211's election rules, -itlschedelecrssi alone means "use macOS's thresholds".
+                awdlSchedElectionApple = awdlSchedClock && itlResFlag("-itlschedelecapple", kItlResWork);
+                if (awdlSchedElectionApple && awdlSchedElectionMinRssi == ItlAWDL::kElectionDefaultMinRssi &&
+                    !PE_parse_boot_argn("itlschedelecrssi", &minRssi, sizeof(minRssi)))
+                    awdlSchedElectionMinRssi = 0;
+            }
+            awdlSchedCh6 = awdlSchedHandle && itlResFlag("-itlschedch6", kItlResWork);
+            awdlSchedCh6Quiet = awdlSchedCh6 && itlResFlag("-itlschedch6quiet", kItlResWork);
+            awdlCoexCh6Group = awdlSchedCh6 && itlResFlag("-itlawdlch6group", kItlResWork);
+            awdlSchedCh6Peer = awdlSchedCh6 && itlResFlag("-itlschedch6peer", 0);   // experiment, flag only
+            awdlSchedCh6Tx = awdlSchedCh6 && itlResFlag("-itlschedch6tx", kItlResWork);
+            awdlSchedMiFirst = itlResFlag("-itlschedmifirst", kItlResWork);
+            awdlSchedMiNow = itlResFlag("-itlschedminow", kItlResWork);
+            awdlSchedOnAir = itlResFlag("-itlschedonair", kItlResWork);
+            awdlSchedMacChan = itlResFlag("-itlschedmacchan", kItlResWork);
+            awdlUmi = PE_parse_boot_argn("-itlawdlumi", &dummy, sizeof(dummy));   // experiment, flag only
+            awdlSchedHandover = itlResFlag("-itlschedhandover", kItlResWork);
+            awdlSchedSkew = itlResFlag("-itlschedskew", kItlResDiag);
+            awdlSchedSyncTx = itlResFlag("-itlschedsynctx", kItlResWork);
+            awdlSyncFirst = awdlSchedSyncTx && PE_parse_boot_argn("-itlschedsyncfirst", &dummy, sizeof(dummy));
+            awdlSchedSafe = itlResFlag("-itlschedsafe", kItlResWork);
+            {   // itlschedstartdelay=N s (0-60), default 3
+                uint32_t delayS = 0;
+                awdlSchedStartDelayUS = PE_parse_boot_argn("itlschedstartdelay", &delayS, sizeof(delayS)) && delayS <= 60 ?
+                    uint64_t(delayS) * 1000000ULL : 3000000ULL;
+            }
+            {   // itlschedlead=N us (1000-20000), default 12000
+                uint32_t lead = 0;
+                awdlSchedLeadUS = PE_parse_boot_argn("itlschedlead", &lead, sizeof(lead)) && lead >= 1000 &&
+                    lead <= 20000 ? lead : 12000;
+            }
+            awdlSchedHonorOff = itlResFlag("-itlschedawdloff", kItlResWork);
+            awdlSchedExtend = itlResFlag("-itlschedextend", kItlResWork);
+            awdlSchedAwStart = awdlSchedHandle && itlResFlag("-itlawstart", kItlResWork);
+            awdlSchedAwEnd = awdlSchedAwStart && itlResFlag("-itlawend", kItlResWork);
+            awdlSchedSpConf = IWX_SESSION_PROTECT_CONF_P2P_GO_NEGOTIATION;
+            awdlSchedSpDurationTU = ItlAWDL::kFollowDutyTU;
+            timeout_set(&awdlSchedFollowTimer, awdlSchedFollowTimeout, sc);
+            task_set(&awdlSchedFollowTaskEntry, awdlSchedFollowTask, sc, "awdlSchedFollowTask");
+        }
         awdlCoexStation44 = PE_parse_boot_argn("-itlawdlsta44", &dummy, sizeof(dummy));
         awdlCoexNoSharedBa = PE_parse_boot_argn("-itlawdlnosharedba", &dummy, sizeof(dummy));
         awdlCoexMultiState = awdlCoexMulti ? "not-added" : "off";
@@ -21200,7 +23696,7 @@ iwx_activate(struct iwx_softc *sc, int act)
         case DVACT_WAKEUP:
             /* Hardware should be up at this point. */
             if (iwx_set_hw_ready(sc))
-                task_add(systq, &sc->init_task);
+                { itlFwNoteRestart(12); task_add(systq, &sc->init_task); }
             break;
     }
     

@@ -7,7 +7,7 @@ import tempfile
 
 root = Path(__file__).resolve().parents[1]
 with tempfile.TemporaryDirectory(prefix="forbiddenitlwm-tests-") as directory:
-    for name in ("awdl_requested_configuration", "awdl_protocol", "awdl_frame_builder", "awdl_sync_prefix", "awdl_local_schedule", "awdl_probe_policy", "awdl_data_payload", "awdl_data_frame", "awdl_observation", "awdl_regulatory", "awdl_tx_burst", "awdl_peer_schedule", "awdl_build_guard", "btleadv_hci", "btleadv_verify", "eapol_key_length", "ptk_derive", "wcl_transition", "counted_copy", "scan_cursor"):
+    for name in ("awdl_requested_configuration", "awdl_protocol", "awdl_frame_builder", "awdl_sync_prefix", "awdl_local_schedule", "awdl_probe_policy", "awdl_data_payload", "awdl_data_frame", "awdl_observation", "awdl_regulatory", "awdl_tx_burst", "awdl_peer_schedule", "awdl_session_follow", "awdl_exec_plan", "awdl_election", "awdl_build_guard", "btleadv_hci", "btleadv_verify", "eapol_key_length", "ptk_derive", "wcl_transition", "counted_copy", "scan_cursor"):
         output = Path(directory) / name
         subprocess.run([
             "xcrun", "clang++", "-std=c++14",
@@ -28,6 +28,10 @@ with tempfile.TemporaryDirectory(prefix="forbiddenitlwm-tests-") as directory:
                     "-I" + str(root / "include"), "-fsanitize=address,undefined",
                     str(root / "tests" / "awdl_build_guard.cpp"), "-o", str(output)], check=True)
     subprocess.run([str(output)], check=True)
+# check-my-mac.pl: its BTLEAdvFixup pattern table must match BTLEAdvPatches.hpp, and it must parse with the system perl.
+subprocess.run(["python3", str(root / "tools/gen_check_my_mac.py"), "--check"], check=True)
+subprocess.run(["/usr/bin/perl", "-c", str(root / "tools/check-my-mac.pl")], check=True, capture_output=True)
+print("check-my-mac.pl: parses")
 subprocess.run(["python3", str(root / "tests/monitor_tx_ownership.py")], check=True)
 subprocess.run(["python3", str(root / "tests/monitor_channel.py")], check=True)
 subprocess.run(["python3", str(root / "tests/monitor_probe.py")], check=True)
