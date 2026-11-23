@@ -65,6 +65,8 @@ Read-only: it changes nothing and sends nothing anywhere. More in [tools/compat]
 
 The checker shows your country and whether channels 149 and 44 are open; [TROUBLESHOOTING](docs/TROUBLESHOOTING.md#the-listener-is-on-channel-6-or-countrylearned-is-no) explains the rest.
 
+**Your macOS build.** `perl tools/check-my-mac.pl` checks, on your Mac, every piece of Apple code the kexts rely on, and says whether your build matches. It reads two system files and sends nothing; paste its output when you report a build that isn't listed. More in [CHECK-MY-MAC](docs/CHECK-MY-MAC.md).
+
 ## Install
 
 See **[docs/INSTALL.md](docs/INSTALL.md)**. In short: on a USB stick with a copy of your EFI, replace `AirportItlwm.kext` with the `ForbiddenItlwm.kext` for your macOS, add `BTLEAdvFixup.kext`, add the [boot flags](docs/BOOT-FLAGS.md), and boot from the stick. Don't load AirportItlwm and ForbiddenItlwm together.

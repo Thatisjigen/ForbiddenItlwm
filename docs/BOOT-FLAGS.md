@@ -33,6 +33,18 @@ What each one does:
 | `-itlawdlcoexbatrace` | Records Block Ack events in the I/O Registry for bug reports. Diagnostic only, cheap |
 | `itlawdltxqueue=4096` | Size of the driver's own transmit queue for `awdl0` |
 
+## AirDrop scheduler
+
+From the next release the driver follows macOS's AirDrop plan and clock, as a real Mac does (see the CHANGELOG). It is on by default with the tested set above; nothing needs to be added.
+
+| Flag | Effect |
+| --- | --- |
+| `itlawdlsched=0` | Turns the scheduler off: the listener stays on its channel all the time, as in 0.6.0-beta.4. Use it to compare, or if AirDrop got worse |
+| `itlawdlsched=3` | The scheduler plus its diagnostics (more I/O Registry keys under `ITLAWDLSched*`, firmware crash records in `ITLFwCrashRecords`). For bug reports |
+| `itlschedlead=N` | How early, in µs, the driver asks the firmware for each of macOS's slots (1000 to 20000, default 12000) |
+| `itlschedstartdelay=N` | Seconds the scheduler waits after AirDrop starts (0 to 60, default 3) |
+| `-btleadvkeepdup` | Leaves `bluetoothd`'s scan duplicate filter on (BTLEAdvFixup). With it the Mac can take up to about 10 s to notice the iPhone asking for a link |
+
 ## Optional
 
 | Flag | Effect |
