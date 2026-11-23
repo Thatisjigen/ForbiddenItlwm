@@ -40,7 +40,7 @@ What's being worked on, what comes next, and what's planned further out. These a
 ## Done recently
 
 - **0.6.0:** channel 44 ([#17](https://github.com/retropineaple/ForbiddenItlwm/issues/17), [PR #21](https://github.com/retropineaple/ForbiddenItlwm/pull/21)); fast Mac → iPhone when the Mac's Wi-Fi shares the listener's channel ([#22](https://github.com/retropineaple/ForbiddenItlwm/issues/22), [PR #47](https://github.com/retropineaple/ForbiddenItlwm/pull/47)); AirDrop's listener and Wi-Fi recover across reconnects ([PR #12](https://github.com/retropineaple/ForbiddenItlwm/pull/12)); a security review.
-- **0.7.0-alpha.1 (experimental, not released yet):** the AirDrop scheduler (`itlawdlsched=1`), Bluetooth without the scan duplicate filter (`-btleadvnodupfilter`), and `tools/check-my-mac.pl`.
+- **0.7.0-alpha.1 (experimental):** the AirDrop scheduler (`itlawdlsched=1`), Bluetooth without the scan duplicate filter (`-btleadvnodupfilter`), and `tools/check-my-mac.pl`.
 - **0.6.0-beta.4:** Bluetooth no longer turns off after hours ([#62](https://github.com/retropineaple/ForbiddenItlwm/issues/62)).
 - **0.5.4:** laobamac's later fixes to the base driver ([#36](https://github.com/retropineaple/ForbiddenItlwm/pull/36)); block ack without `-itlawdlcoexmulti` ([#16](https://github.com/retropineaple/ForbiddenItlwm/issues/16)); new LE mice and keyboards pair again with BTLEAdvFixup 0.9.1 ([#31](https://github.com/retropineaple/ForbiddenItlwm/pull/31)).
 - **0.5.1:** AirDrop works on Sequoia ([#7](https://github.com/retropineaple/ForbiddenItlwm/issues/7), [#13](https://github.com/retropineaple/ForbiddenItlwm/issues/13), [#19](https://github.com/retropineaple/ForbiddenItlwm/issues/19)).

@@ -8,7 +8,7 @@ ioreg -l -w0 | grep -E '"ItlwmAWDL(InterfaceBuild|BuildCheck)"|"ITLAWDLCoex(Adde
 
 | Key | Healthy value |
 | --- | --- |
-| `ItlwmAWDLInterfaceBuild` | `forbidden-` and the version you installed, for example `forbidden-0.6.0-beta.4` (`-sequoia` or `-sonoma` added on those builds) |
+| `ItlwmAWDLInterfaceBuild` | `forbidden-` and the version you installed, for example `forbidden-0.7.0-alpha.1` (`-sequoia` or `-sonoma` added on those builds) |
 | `ItlwmAWDLBuildCheck` | `verified` (`expected: …` on a 15.8.x kernel that wasn't checked offline). Anything starting with `blocked` means AirDrop is off on this macOS build: see below |
 | `ITLAWDLCoexAdded` | Yes: the AirDrop listener exists |
 | `ITLAWDLCoexChannel`, `ITLAWDLCoexOwnWidth` | 149 and 80. From 0.6.0, 44 and 80 (or 20) where your iPhone uses 44 |

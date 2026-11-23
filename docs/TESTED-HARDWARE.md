@@ -20,8 +20,8 @@ Kexts used with ForbiddenItlwm:
 
 | Kext | Version |
 | --- | --- |
-| ForbiddenItlwm | 0.1.0-beta1, 0.2.0-beta1, 0.4.0-beta1's changes in development builds, 0.5.0-test1, 0.6.0-alpha.1's changes in a development build, 0.6.0-beta.1, 0.6.0-beta.2, 0.6.0-beta.3 and 0.6.0-beta.4 (Tahoe, listener on 149). The experimental AirDrop scheduler (`itlawdlsched=1`) in research builds and in 0.7.0-alpha.1's code |
-| BTLEAdvFixup | 0.8.0, 0.8.2's changes in a development build, 0.9.0, 0.9.1, 0.9.2, 0.9.3 and 0.9.4 (Tahoe); `-btleadvnodupfilter` in 0.7.0-alpha.1's code |
+| ForbiddenItlwm | 0.1.0-beta1, 0.2.0-beta1, 0.4.0-beta1's changes in development builds, 0.5.0-test1, 0.6.0-alpha.1's changes in a development build, 0.6.0-beta.1, 0.6.0-beta.2, 0.6.0-beta.3, 0.6.0-beta.4 and 0.7.0-alpha.1 (Tahoe, listener on 149). The experimental AirDrop scheduler (`itlawdlsched=1`) in research builds and in 0.7.0-alpha.1 |
+| BTLEAdvFixup | 0.8.0, 0.8.2's changes in a development build, 0.9.0, 0.9.1, 0.9.2, 0.9.3, 0.9.4 and 0.9.5 (Tahoe); `-btleadvnodupfilter` in 0.9.5 |
 | Lilu | 1.7.2 |
 | IntelBluetoothFirmware | 2.5.1 |
 | BlueToolFixup | 2.7.3 |
