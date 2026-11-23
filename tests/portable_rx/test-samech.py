@@ -93,6 +93,17 @@ int main(){
 with tempfile.TemporaryDirectory(prefix='forbidden-samech-') as d:
  exe=Path(d)/'test';subprocess.run(['xcrun','clang++','-std=c++14','-fsanitize=address,undefined','-I'+str(R/'include'),str(T/'test-samech.cpp'),'-o',str(exe)],check=True);subprocess.run([str(exe)],check=True)
 
+# Normalize only #50's separately tested immediate-ADDBA dispatch before the
+# unchanged RX guard pins below. Keep this adaptation outside those pins so
+# upstream can update its own RX baselines without replacing our normalization.
+rx_start=s.index('iwx_rx_frame(struct')
+start=s.index('                        if (request.immediate) {',s.index('ItlAWDL::parseAddbaRequest(cf, coexLen',rx_start))
+end=s.index('                    } else if (ItlAWDL::parseDelba',start)
+fixture=(T/'fixtures/handoff-before.cpp').read_text()
+oldstart=fixture.index('                        if (request.immediate) {')
+oldend=fixture.index('                    } else if (ItlAWDL::parseDelba',oldstart)
+s=s[:start]+fixture[oldstart:oldend]+s[end:]
+
 # RX parsing/address/reorder guards must be byte-identical to beta.2.
 import hashlib
 # iwx_rx_pkt: the security fixes add only length checks to fixed-size notifications (audit HL05). The AWDL scheduler
