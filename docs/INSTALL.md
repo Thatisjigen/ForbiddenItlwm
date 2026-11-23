@@ -5,9 +5,9 @@ This beta has been tested on one hackintosh: an HP Envy x360 13-bf with an Intel
 ## Before you start
 
 - **Check your macOS build:** `sw_vers -buildVersion`.
-  - **Tahoe:** `25G241`, `25G332` or `25G342`, and from the next release `25G229` (26.7) and `25G330` (26.7.2). Use the Tahoe kexts.
-  - **Sequoia:** `24H23` (15.8) and `24H241` (15.8.3) were checked offline. Up to 0.7.0-alpha.1, `24H32` (15.8.1) and `24H232` (15.8.2) start AirDrop, but the announcement copy stays off, so other devices may not list the Mac. From the next release, 15.8.1 (`24H32`), 15.8.2 (`24H230`, `24H232`), 15.7.3 (`24G419`), 15.7.4 (`24G517`), 15.7.8 (`24G824`) and 15.7.9 (`24G830`) are checked too, with BTLEAdvFixup patterns for 15.7.3, 15.7.8 and 15.7.9. Use the Sequoia kexts. AirDrop transfers on Sequoia need 0.5.1-test1 or later.
-  - **Sonoma (test build):** `23J631` (14.8.9) was checked offline, and from the next release `23J220` (14.8.3), `23J319` (14.8.4), `23J520` (14.8.7) and `23J620` (14.8.8). Use the Sonoma kexts. On other Sonoma 14.4+ builds the Sonoma kext runs as plain Wi-Fi.
+  - **Tahoe:** `25G241`, `25G332` or `25G342`, and from 0.7.0-alpha.2 `25G229` (26.7) and `25G330` (26.7.2). Use the Tahoe kexts.
+  - **Sequoia:** `24H23` (15.8) and `24H241` (15.8.3) were checked offline. Up to 0.7.0-alpha.1, `24H32` (15.8.1) and `24H232` (15.8.2) start AirDrop, but the announcement copy stays off, so other devices may not list the Mac. From 0.7.0-alpha.2, 15.8.1 (`24H32`), 15.8.2 (`24H230`, `24H232`), 15.7.3 (`24G419`), 15.7.4 (`24G517`), 15.7.8 (`24G824`) and 15.7.9 (`24G830`) are checked too, with BTLEAdvFixup patterns for 15.7.3, 15.7.8 and 15.7.9. Use the Sequoia kexts. AirDrop transfers on Sequoia need 0.5.1-test1 or later.
+  - **Sonoma (test build):** `23J631` (14.8.9) was checked offline, and from 0.7.0-alpha.2 `23J220` (14.8.3), `23J319` (14.8.4), `23J520` (14.8.7) and `23J620` (14.8.8). Use the Sonoma kexts. On other Sonoma 14.4+ builds the Sonoma kext runs as plain Wi-Fi.
   - On another build of these macOS versions the driver keeps AirDrop off and works as plain Wi-Fi, apart from "expected" Sequoia 15.8.x kernels (AirDrop starts without the announcement copy) and with `-itlawdlanybuild`. Each kext starts only on its own macOS version.
   - If your build isn't listed, run `perl tools/check-my-mac.pl` and paste its output in [discussion #98](https://github.com/retropineaple/ForbiddenItlwm/discussions/98), so support can be added ([CHECK-MY-MAC](CHECK-MY-MAC.md)).
 - **Use the kexts for your macOS version.** ForbiddenItlwm and BTLEAdvFixup are built separately for Tahoe, Sequoia and Sonoma. A ForbiddenItlwm built for the other version refuses to start, and BTLEAdvFixup's patterns won't match.
@@ -116,7 +116,7 @@ All of this goes on the **USB stick's** EFI.
    ioreg -l -w0 | grep -E '"ItlwmAWDL(InterfaceBuild|BuildCheck)"|"ITLAWDLCoex(Added|Channel|CountryLearned)"'
    ```
 
-   You should see `forbidden-0.7.0-alpha.1` (`forbidden-0.7.0-alpha.1-sequoia` on Sequoia, `forbidden-0.7.0-alpha.1-sonoma` on Sonoma), `BuildCheck` `verified`, `Added` Yes, `Channel` 149 (or 44 where your iPhone uses 44, for example in Japan) and `CountryLearned` Yes. `Channel` 6 means the firmware hasn't opened 149 or 44: see [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
+   You should see `forbidden-0.7.0-alpha.2` (`forbidden-0.7.0-alpha.2-sequoia` on Sequoia, `forbidden-0.7.0-alpha.2-sonoma` on Sonoma), `BuildCheck` `verified`, `Added` Yes, `Channel` 149 (or 44 where your iPhone uses 44, for example in Japan) and `CountryLearned` Yes. `Channel` 6 means the firmware hasn't opened 149 or 44: see [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
 4. Or run `bash tools/compat/check_compat.sh` again. It now also reads the listener's state.
 5. Turn on AirDrop on both devices. Contacts Only works when the iPhone and the Mac share an Apple Account or know each other as contacts. Otherwise use Everyone for 10 Minutes.

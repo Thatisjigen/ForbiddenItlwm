@@ -225,8 +225,8 @@ static uint64_t awdlSchedFollowSendAtUS, awdlSchedFollowEndUS, awdlSchedFollowLa
     awdlSchedFollowLateMaxUS;
 static uint32_t awdlSchedFollowAligned, awdlSchedFollowDuty, awdlSchedFollowArms, awdlSchedFollowFired,
     awdlSchedFollowStale, awdlSchedFollowEntries, awdlSchedFollowLateN;
-// the current session's requested length, and listener sync frames submitted inside sessions.
-static uint32_t awdlSchedSpCurDurTU, awdlSchedFollowTxInSession;
+// the current session's requested length.
+static uint32_t awdlSchedSpCurDurTU;
 // macOS's own plan (AirportItlwmV2.cpp hands it over), followed on the elected AWDL clock.
 extern uint8_t itlAWDLPlanChannels[16];
 extern volatile uint32_t itlAWDLPlanVersion;
@@ -17166,7 +17166,7 @@ static void awdlSchedSpPublish()
         }
         if (awdlSchedSyncTx) {
             char st[120];
-            snprintf(st, sizeof(st), "%s; sync frames in a 149 session %u, held (no session) %u",
+            snprintf(st, sizeof(st), "%s; sync frames in a listener session %u, held (no session) %u",
                      awdlSchedSyncTxGated() ? "on" : "waiting", awdlSchedSyncTxInSession, awdlSchedSyncTxHeld);
             IORegistryEntry::getRegistryRoot()->setProperty("ITLAWDLSchedSyncTx", st);
         }
@@ -17183,12 +17183,11 @@ static void awdlSchedSpPublish()
         // schedule); timer arms, fires, and fires that found the run gone; how late timed sends went out.
         char n4[300];
         snprintf(n4, sizeof(n4), "aligned %u entries %u duty %u; arms %u fired %u stale %u; late n %u mean %llu max %llu us; "
-                 "tx in session %u; advertised %u refused %u",
+                 "advertised %u refused %u",
                  awdlSchedFollowAligned, awdlSchedFollowEntries, awdlSchedFollowDuty, awdlSchedFollowArms,
                  awdlSchedFollowFired, awdlSchedFollowStale, awdlSchedFollowLateN,
                  (unsigned long long)(awdlSchedFollowLateN ? awdlSchedFollowLateSumUS / awdlSchedFollowLateN : 0),
-                 (unsigned long long)awdlSchedFollowLateMaxUS, awdlSchedFollowTxInSession,
-                 awdlSchedAdvertiseServed, awdlSchedAdvertiseRefused);
+                 (unsigned long long)awdlSchedFollowLateMaxUS, awdlSchedAdvertiseServed, awdlSchedAdvertiseRefused);
         IORegistryEntry::getRegistryRoot()->setProperty("ITLAWDLSchedFollow", n4);
         if (awdlSchedHonorOff) {
             // whether macOS has AWDL on, and the follower ticks and timed sends skipped while it was off.

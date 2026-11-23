@@ -10,7 +10,7 @@
 #
 # The verdict is an estimate. The project tests the AX211 (firmware so-a0-gf-a0-68) on macOS 26.7.1
 # (25G241); 26.7.2 (25G332) and 26.7.3 (25G342) were verified offline. On Sequoia, 15.8 (24H23) and 15.8.3
-# (24H241) were verified offline for the separate Sequoia kexts, and from the next release 15.8.1 (24H32),
+# (24H241) were verified offline for the separate Sequoia kexts, and from 0.7.0-alpha.2 15.8.1 (24H32),
 # 15.8.2 (24H230, 24H232) and 15.7.3, 15.7.4, 15.7.8 and 15.7.9 too (Apple's Kernel Debug Kits). Users report AirDrop working with the AX201, AX200, AX210 and AX411 class (see
 # docs/TESTED-HARDWARE.md). Everything else is predicted from the firmware's capabilities and the code.
 
@@ -53,12 +53,12 @@ if [ "$ARCH" != "x86_64" ]; then
 fi
 OS_MAJOR=${OS_VER%%.*}
 # Builds the driver allows AirDrop on (include/AWDLBuildGuard.hpp): 25G241 tested on hardware, the others
-# verified offline from Apple's Kernel Debug Kits (25G229 and 25G330 from the next release).
+# verified offline from Apple's Kernel Debug Kits (25G229 and 25G330 from 0.7.0-alpha.2).
 OFFLINE_BUILDS="25G332 25G342"
 if [ "$OS_BUILD" = "$TESTED_BUILD" ]; then
     pass "Same build as the tested one ($TESTED_VERSION, $TESTED_BUILD)."
 elif [ "$OS_BUILD" = "25G229" ] || [ "$OS_BUILD" = "25G330" ]; then
-    pass "macOS $OS_VER ($OS_BUILD): its Wi-Fi stack was checked offline and is supported from the next release;"
+    pass "macOS $OS_VER ($OS_BUILD): its Wi-Fi stack was checked offline and is supported from 0.7.0-alpha.2;"
     warn "0.7.0-alpha.1 and older keep AirDrop off here. See the bluetoothd check below."
 elif [ -n "$OS_BUILD" ] && echo " $OFFLINE_BUILDS " | grep -q " $OS_BUILD "; then
     pass "macOS $OS_VER ($OS_BUILD): supported. Its Wi-Fi stack was checked against $TESTED_BUILD and is the same where"
@@ -66,13 +66,13 @@ elif [ -n "$OS_BUILD" ] && echo " $OFFLINE_BUILDS " | grep -q " $OS_BUILD "; the
 elif [ "${OS_MAJOR:-0}" = "15" ]; then
     # The Sequoia kexts (ForbiddenItlwm and BTLEAdvFixup for Sequoia), not the Tahoe ones.
     SEQ_VERIFIED="24H23 24H241"   # checked offline as build pairs
-    SEQ_NEXT="24H32 24H230 24H232 24G419 24G517 24G824 24G830"   # checked offline; on the list from the next release
+    SEQ_NEXT="24H32 24H230 24H232 24G419 24G517 24G824 24G830"   # checked offline; on the list from 0.7.0-alpha.2
     OS_MINOR=$(echo "$OS_VER" | cut -d. -f2)
     if echo " $SEQ_VERIFIED " | grep -q " $OS_BUILD "; then
         pass "macOS $OS_VER ($OS_BUILD): supported by the Sequoia kexts. Users report AirDrop working on 15.8.1 to 15.8.3"
         pass "with 0.5.1-test1 or later. Use the Sequoia ForbiddenItlwm and BTLEAdvFixup."
     elif echo " $SEQ_NEXT " | grep -q " $OS_BUILD "; then
-        pass "macOS $OS_VER ($OS_BUILD): its Wi-Fi stack was checked offline and is fully supported from the next release."
+        pass "macOS $OS_VER ($OS_BUILD): its Wi-Fi stack was checked offline and is fully supported from 0.7.0-alpha.2."
         warn "With 0.7.0-alpha.1 or older, AirDrop's announcement copy stays off here (15.8.1, 15.8.2) or AirDrop stays off"
         warn "(15.7.x). See the bluetoothd check below for BTLEAdvFixup. Please report your result."
     elif [ "${OS_MINOR:-0}" = "8" ]; then
@@ -83,10 +83,10 @@ elif [ "${OS_MAJOR:-0}" = "15" ]; then
         BLOCKERS=$((BLOCKERS + 1))
     fi
 elif [ "${OS_MAJOR:-0}" = "14" ]; then
-    # The Sonoma kexts (test build): 14.8.9 checked offline, and 14.8.3, 14.8.4, 14.8.7 and 14.8.8 from the next release.
+    # The Sonoma kexts (test build): 14.8.9 checked offline, and 14.8.3, 14.8.4, 14.8.7 and 14.8.8 from 0.7.0-alpha.2.
     if [ "$OS_BUILD" = "23J220" ] || [ "$OS_BUILD" = "23J319" ] || [ "$OS_BUILD" = "23J520" ] || [ "$OS_BUILD" = "23J620" ]; then
-        pass "macOS $OS_VER ($OS_BUILD): its Wi-Fi stack was checked offline and is supported by the Sonoma kexts from the"
-        warn "next release; 0.7.0-alpha.1 and older keep AirDrop off here. See the bluetoothd check below."
+        pass "macOS $OS_VER ($OS_BUILD): its Wi-Fi stack was checked offline and is supported by the Sonoma kexts from"
+        warn "0.7.0-alpha.2; 0.7.0-alpha.1 and older keep AirDrop off here. See the bluetoothd check below."
     elif [ "$OS_BUILD" = "23J631" ]; then
         pass "macOS $OS_VER ($OS_BUILD): supported by the Sonoma kexts. Their Wi-Fi stack was checked offline, but Sonoma"
         pass "isn't confirmed working on hardware yet, so please report your result. Use the Sonoma ForbiddenItlwm and BTLEAdvFixup."
