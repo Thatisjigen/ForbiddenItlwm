@@ -23,6 +23,8 @@
 // Lilu's onProcLoad route was tried first and didn't apply to this process.
 static mach_vm_address_t orig_cs_validate {};
 static bool patchScanning {};
+//: -btleadvkeepdup leaves bluetoothd's scan duplicate filter as it is.
+static bool keepDuplicateFilter {};
 
 // The original bytes of every bluetoothd page a kext patched, for APFS's integrity check (BTLEAdvVerify.hpp, #62).
 // This hook sees BlueToolFixup's patches too when it runs outside BlueToolFixup's, that is when BTLEAdvFixup loads
@@ -52,7 +54,7 @@ static void patched_cs_validate_page(vnode_t vp, memory_object_t pager, memory_o
     FunctionCast(patched_cs_validate_page, orig_cs_validate)(vp, pager, page_offset, data, validated_p, tainted_p, nx_p);
     // Each set only matches its own bluetoothd build; on any other build nothing changes.
     for (const auto &patch : BTLEAdv::kPatches)
-        if (!patch.scanningOnly || patchScanning)
+        if ((!patch.scanningOnly || patchScanning) && (!patch.dupFilter || !keepDuplicateFilter))
             KernelPatcher::findAndReplace(const_cast<void *>(data), PAGE_SIZE, patch.find, patch.size,
                                           patch.replace, patch.size);
     if (!keep)
@@ -511,6 +513,7 @@ PluginConfiguration ADDPR(config) {
             return;
         // Advertising alone, to compare with both.
         patchScanning = !checkKernelArgument("-btlenoscan");
+        keepDuplicateFilter = checkKernelArgument("-btleadvkeepdup");
         // For the integrity check of bluetoothd's patched pages (#62). Without any of these it stays off and the
         // pages are patched as before.
         pagesLock = IOLockAlloc();

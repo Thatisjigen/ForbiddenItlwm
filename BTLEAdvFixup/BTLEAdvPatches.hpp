@@ -51,6 +51,19 @@ static const uint8_t extendedConnectionFind[] = {
 static const uint8_t extendedConnectionReplace[] = {
     0xbf,0x01,0x00,0x00,0x00,0x90,0x90, 0xe8,0xcb,0x9d,0xcf,0xff };
 static_assert(sizeof(extendedConnectionFind) == sizeof(extendedConnectionReplace), "patch size");
+// (26.7.1 25G241 and 26.7.3 25G342 have these exact bytes, at 0x100750690 / 0x1007504f0): in the extended-scan setup (bluetoothd 0x10074e92c), the byte that becomes
+// LE Set Extended Scan Enable's Filter_Duplicates is 1 unless the scan is active or a client allows duplicates. The Intel
+// controller's duplicate filter keys on the address only, so an iPhone's changed advertising data (NeedsCLink) waited for
+// bluetoothd's next scan restart, up to ~10 s; a Mac's Broadcom chip has a data-aware filter
+// (BD_VSC_ENABLE_EXTENDED_DUPLICATE_FILTER). This writes the scan type exactly as before (byte 0 = !active) and the filter
+// byte as 0, then skips the old stores: "not r14b; and $1,r14b; mov r14b,(r13); movb $0,3(r13); jmp +0x11".
+static const uint8_t dupFilterFind[] = {
+    0x41,0xf6,0xc6,0x01, 0x75,0x0e, 0xf6,0x85,0x18,0xfe,0xff,0xff,0x01, 0x74,0x05, 0x45,0x31,0xf6, 0xeb,0x0b,
+    0x41,0xf6,0xd6, 0x41,0x80,0xe6,0x01, 0x45,0x88,0x75,0x00, 0x45,0x88,0x75,0x03 };
+static const uint8_t dupFilterReplace[] = {
+    0x41,0xf6,0xd6, 0x41,0x80,0xe6,0x01, 0x45,0x88,0x75,0x00, 0x41,0xc6,0x45,0x03,0x00, 0xeb,0x11,
+    0xeb,0x0b, 0x41,0xf6,0xd6, 0x41,0x80,0xe6,0x01, 0x45,0x88,0x75,0x00, 0x45,0x88,0x75,0x03 };
+static_assert(sizeof(dupFilterFind) == sizeof(dupFilterReplace), "patch size");
 static_assert(sizeof(advertisingFind) == sizeof(advertisingReplace), "patch size");
 static_assert(sizeof(scanningFind) == sizeof(scanningReplace), "patch size");
 // macOS 26.7.3 (25G342), from Apple's installer (x86_64 slice SHA-256 5ac2b687...). The same four sites,
@@ -113,6 +126,18 @@ static_assert(sizeof(advertisingFind) == sizeof(advertisingReplace), "patch size
 static_assert(sizeof(scanningFind) == sizeof(scanningReplace), "patch size");
 static_assert(sizeof(randomAddressFind) == sizeof(randomAddressReplace), "patch size");
 static_assert(sizeof(extendedConnectionFind) == sizeof(extendedConnectionReplace), "patch size");
+// (Sequoia 15.8 / 15.8.2 / 15.8.3: the same bytes, at 0x1006c45aa / 0x1006c45aa / 0x1006c45ba): the same
+// extended-scan decision as Tahoe's dupFilter; the scan type comes from [rbp-0x208] ^ 1 into (r15), the filter byte is 3(r15).
+// "mov eax,[rbp-0x208]; xor al,1; mov (r15),al; movb $0,3(r15); jmp +0x13".
+static const uint8_t dupFilterFind[] = {
+    0xf6,0x85,0x00,0xfe,0xff,0xff,0x01,0x75,0x0d,0xf6,0x85,0x28,0xfe,0xff,0xff,0x01,
+    0x74,0x04,0x31,0xc0,0xeb,0x0b,0x8b,0x85,0xf8,0xfd,0xff,0xff,0x34,0x01,0x41,0x88,
+    0x07,0x41,0x88,0x47,0x03 };
+static const uint8_t dupFilterReplace[] = {
+    0x8b,0x85,0xf8,0xfd,0xff,0xff,0x34,0x01,0x41,0x88,0x07,0x41,0xc6,0x47,0x03,0x00,
+    0xeb,0x13,0x31,0xc0,0xeb,0x0b,0x8b,0x85,0xf8,0xfd,0xff,0xff,0x34,0x01,0x41,0x88,
+    0x07,0x41,0x88,0x47,0x03 };
+static_assert(sizeof(dupFilterFind) == sizeof(dupFilterReplace), "patch size");
 #else
 // macOS 14.8.9 (23J631), from Apple's installer (codesign-verified). The capability queries are
 // "callq *0x700(%rcx)" (advertising sets) and "callq *0x770(%rcx)" (extended scanning), the je
@@ -143,16 +168,29 @@ static_assert(sizeof(advertisingFind) == sizeof(advertisingReplace), "patch size
 static_assert(sizeof(scanningFind) == sizeof(scanningReplace), "patch size");
 static_assert(sizeof(randomAddressFind) == sizeof(randomAddressReplace), "patch size");
 static_assert(sizeof(extendedConnectionFind) == sizeof(extendedConnectionReplace), "patch size");
+// (Sonoma 14.8.9 23J631, 0x100634e7f): the same decision; scan type from [rbp-0x1fc] ^ 1 into (rbx),
+// filter byte 3(rbx). "mov eax,[rbp-0x1fc]; xor al,1; mov (rbx),al; movb $0,3(rbx); jmp +0x13".
+static const uint8_t dupFilterFind[] = {
+    0x80,0xbd,0x04,0xfe,0xff,0xff,0x00,0x75,0x0d,0x80,0xbd,0x10,0xfe,0xff,0xff,0x00,
+    0x74,0x04,0x31,0xc0,0xeb,0x0a,0x8b,0x85,0x04,0xfe,0xff,0xff,0x34,0x01,0x88,0x03,
+    0x88,0x43,0x03 };
+static const uint8_t dupFilterReplace[] = {
+    0x8b,0x85,0x04,0xfe,0xff,0xff,0x34,0x01,0x88,0x03,0xc6,0x43,0x03,0x00,0xeb,0x13,
+    0x74,0x04,0x31,0xc0,0xeb,0x0a,0x8b,0x85,0x04,0xfe,0xff,0xff,0x34,0x01,0x88,0x03,
+    0x88,0x43,0x03 };
+static_assert(sizeof(dupFilterFind) == sizeof(dupFilterReplace), "patch size");
 #endif
 
 // Every patch this build tries, in the order they're applied. scanningOnly ones are skipped with -btlenoscan.
-struct Patch { const uint8_t *find; const uint8_t *replace; size_t size; bool scanningOnly; };
-#define BTLEADV_PATCH(f, r, scan) Patch{f, r, sizeof(f), scan}
+// dupFilter ones are also skipped with -btleadvkeepdup.
+struct Patch { const uint8_t *find; const uint8_t *replace; size_t size; bool scanningOnly; bool dupFilter; };
+#define BTLEADV_PATCH(f, r, scan) Patch{f, r, sizeof(f), scan, false}
 static const Patch kPatches[] = {
     BTLEADV_PATCH(advertisingFind, advertisingReplace, false),
     BTLEADV_PATCH(randomAddressFind, randomAddressReplace, false),
     BTLEADV_PATCH(extendedConnectionFind, extendedConnectionReplace, false),
     BTLEADV_PATCH(scanningFind, scanningReplace, true),
+    Patch{dupFilterFind, dupFilterReplace, sizeof(dupFilterFind), true, true},   // every build set
 #if !defined(BTLEADV_SEQUOIA) && !defined(BTLEADV_SONOMA)
     BTLEADV_PATCH(advertisingFind2673, advertisingReplace2673, false),
     BTLEADV_PATCH(randomAddressFind2673, randomAddressReplace2673, false),
