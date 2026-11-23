@@ -35,11 +35,11 @@ What each one does:
 
 ## Experimental
 
-Off by default; without them the driver behaves like 0.6.0-beta.4. Add them on top of the tested set to try them, and say in your report that you did.
+**These flags work only from 0.7.0-alpha.1;** older versions ignore them. They're off by default, and without them the driver behaves like 0.6.0-beta.4. Add them on top of the tested set to try them, and say in your report that you did.
 
 | Flag | Effect |
 | --- | --- |
-| `itlawdlsched=1` | The AirDrop scheduler: the driver follows macOS's AirDrop plan, channel and clock, as a real Mac does, and covers the channel-6 slot itself ([HOW-IT-WORKS](HOW-IT-WORKS.md#3b-with-itlawdlsched1-following-macoss-plan-experimental)). Fixes the failed first send after the iPhone was idle. It turns off the channel-6 search (`-itlawdlnosearch6`), which it no longer needs |
+| `itlawdlsched=1` | The AirDrop scheduler: the driver follows macOS's AirDrop plan, channel and clock, as a real Mac does, and covers the channel-6 slot itself ([HOW-IT-WORKS](HOW-IT-WORKS.md#3b-new-in-070-alpha1-following-macoss-plan-itlawdlsched1-experimental)). Fixes the failed first send after the iPhone was idle. It turns off the channel-6 search (`-itlawdlnosearch6`), which it no longer needs |
 | `itlawdlsched=3` | The scheduler plus its diagnostics: more I/O Registry keys under `ITLAWDLSched*`, firmware crash records in `ITLFwCrashRecords`, counts of AirDrop frames lost before reaching macOS, and `-itlawdlpmdebug`. For bug reports |
 | `itlschedlead=N` | With the scheduler: how early, in µs, the driver asks the firmware for each of macOS's slots (1000 to 20000, default 12000) |
 | `itlschedstartdelay=N` | With the scheduler: seconds it waits after AirDrop starts (0 to 60, default 3) |

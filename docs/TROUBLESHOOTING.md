@@ -74,9 +74,10 @@ Fixed in 0.5.1-test1 ([#7](https://github.com/retropineaple/ForbiddenItlwm/issue
 
 ## The first iPhone → Mac send is slow to connect, or sits on "Waiting"
 
-This is the main known problem. The time goes into the iPhone finding the Mac's AirDrop service before any data moves, and it's worst when both devices have been idle. Cancelling and sending again usually connects quickly. Mac → iPhone can sit on "Waiting" too, less often.
+**Fixed in 0.7.0-alpha.1, with its experimental flags.** Add `itlawdlsched=1 -btleadvnodupfilter` to the tested set ([BOOT-FLAGS](BOOT-FLAGS.md#experimental)); they work only from 0.7.0-alpha.1. On the project's hackintosh connects then take about 1 to 2 s, the first send after the iPhone was idle no longer fails, and Mac → iPhone sends no longer sit on "Waiting". The Mac's announcement now reaches the iPhone first, and with `-btleadvnodupfilter` the Mac notices at once when the iPhone asks for a link over Bluetooth. Please report your result, with `ioreg -l -w0 | grep '"ITLAWDLSched'`.
 
-**Try the experimental scheduler:** add `itlawdlsched=1` (and `-btleadvnodupfilter`) to the tested set ([BOOT-FLAGS](BOOT-FLAGS.md#experimental)). On the project's hackintosh it fixes the failed first send after the iPhone was idle and Mac → iPhone sends stuck on "Waiting": the Mac's announcement now reaches the iPhone first, and with `-btleadvnodupfilter` the Mac notices at once when the iPhone asks for a link over Bluetooth. Please report your result, with `ioreg -l -w0 | grep '"ITLAWDLSched'`.
+**Up to 0.6.0-beta.4, or without the flags,** this is the main known problem. The time goes into the iPhone finding the Mac's AirDrop service before any data moves, and it's worst when both devices have been idle. Cancelling and sending again usually connects quickly. Mac → iPhone can sit on "Waiting" too, less often.
+
 
 **Both directions stay on "Waiting"?** Check that the Mac is connected to a Wi-Fi network. The AirDrop listener runs beside the Wi-Fi connection, so with Wi-Fi on but no network joined, AirDrop can't connect (a known limitation; a real Mac doesn't need a network).
 

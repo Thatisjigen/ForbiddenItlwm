@@ -6,7 +6,9 @@
 
 **AirDrop for Intel Wi-Fi cards on macOS.** ForbiddenItlwm is a fork of AirportItlwm that adds AWDL, the peer-to-peer Wi-Fi link AirDrop runs on. Apple's own Wi-Fi stack does the rest. Normal Wi-Fi stays connected while AirDrop works.
 
-> **Public beta. Newest release: [0.7.0-alpha.1](https://github.com/retropineaple/ForbiddenItlwm/releases/tag/v0.7.0-alpha.1),** whose new parts are experimental and off unless you add their boot flags. Works on macOS Tahoe 26.7.x and Sequoia 15.8.x, with a Sonoma 14.8.9 test build. Each macOS version has its own kexts. Fixes come out often: before reporting a problem, update to the newest release (**Watch → Custom → Releases** to be notified).
+> **New alpha: [0.7.0-alpha.1](https://github.com/retropineaple/ForbiddenItlwm/releases/tag/v0.7.0-alpha.1).** For testers: the driver can follow macOS's own AirDrop plan, which makes connects fast and fixes the failed first send. Experimental, and off unless you add its [boot flags](docs/BOOT-FLAGS.md#experimental).
+
+> **Public beta: [0.6.0-beta.4](https://github.com/retropineaple/ForbiddenItlwm/releases/tag/v0.6.0-beta.4).** Works on macOS Tahoe 26.7.x and Sequoia 15.8.x, with a Sonoma 14.8.9 test build. Each macOS version has its own kexts. Fixes come out often: before reporting a problem, update to the newest release (**Watch → Custom → Releases** to be notified).
 
 ## ⚠️ Read this first
 
@@ -18,7 +20,7 @@
 
 - Test from a USB stick with a copy of your EFI, never your only working one.
 - Run the [compatibility checker](#will-it-work-on-my-hackintosh) first.
-- **Before you update macOS, boot once without `-btleadv`.** Otherwise an incremental update can fail.
+- **Before you update macOS, boot once without `-btleadv` and `-btleadvnodupfilter`.** Otherwise an incremental update can fail.
 
 ## What works
 
@@ -27,7 +29,7 @@ On the project's test machine (AX211, macOS 26.7.1, iPhone 11), with normal 5 GH
 | | Result |
 | --- | --- |
 | Mac → iPhone | Works. About 22 MB/s, connects in 1 to 4 s |
-| iPhone → Mac | Works. About 20 MB/s, a cold connect usually takes 3 to 10 s |
+| iPhone → Mac | Works. About 20 MB/s. A cold connect takes 3 to 10 s up to 0.6.0-beta.4; with 0.7.0-alpha.1's experimental flags it takes about 1 to 2 s |
 | Handoff, Universal Clipboard | Work |
 | iMessage and push over Wi-Fi | Work |
 
@@ -60,6 +62,7 @@ Read-only: it changes nothing and sends nothing anywhere. More in [tools/compat]
 **Channels 149 and 44, and your country.** AirDrop is fast on 5 GHz at 80 MHz. Apple devices use channel 149 or 44 for it, each by its own country rules (in Japan, Germany and Russia, for example, iPhones use 44).
 - **The card has to learn your country first,** from a nearby Wi-Fi network that advertises it (most routers do; an iPhone's Personal Hotspot switched on nearby also works). Until then it falls back to channel 6.
 - **From 0.6.0-alpha.1 the listener follows your iPhone** onto 44 when the iPhone uses 44 ([#17](https://github.com/retropineaple/ForbiddenItlwm/issues/17), [PR #21](https://github.com/retropineaple/ForbiddenItlwm/pull/21)). Up to 0.5.4 it stayed on 149 or fell back to channel 6, which works but is slow.
+- **From 0.7.0-alpha.1, with `itlawdlsched=1`,** the listener uses the AirDrop channel macOS itself picks with Apple's rules, instead of guessing from what nearby devices announce, and visits channel 6 in the slot Apple devices use it. If macOS names no usable channel, it falls back to the old choice.
 - **Some countries allow neither** (Turkey, Egypt and Saudi Arabia have no 149, for example), or only at 20 or 40 MHz. AirDrop then uses channel 6.
 - **Where the card marks a channel passive** (China's 149, Japan's 44), AirDrop uses it once it has heard a Wi-Fi network there, or from 0.6.0 while your Mac's own Wi-Fi is connected nearby in the same channel group.
 
@@ -89,7 +92,7 @@ Please report what you find, working or not, in a [GitHub issue](https://github.
 ## Known limitations
 
 - **Mac → iPhone can still be slower than iPhone → Mac** on some setups ([#24](https://github.com/retropineaple/ForbiddenItlwm/issues/24), [#63](https://github.com/retropineaple/ForbiddenItlwm/issues/63)). 0.6.0's same-channel fix ([PR #47](https://github.com/retropineaple/ForbiddenItlwm/pull/47)) solved the main case (#22).
-- **Connects can be slow,** mostly iPhone → Mac, and the first send after the iPhone was idle can fail (sending again works). The experimental AirDrop scheduler (`itlawdlsched=1`, see [BOOT-FLAGS](docs/BOOT-FLAGS.md#experimental)) fixes the failed first send on the project's hackintosh.
+- **Slow connects, mostly iPhone → Mac, and a failed first send after the iPhone was idle:** fixed in 0.7.0-alpha.1 with its experimental flags (`itlawdlsched=1 -btleadvnodupfilter`, see [BOOT-FLAGS](docs/BOOT-FLAGS.md#experimental)), which also stop Mac → iPhone sends from sitting on "Waiting". Up to 0.6.0-beta.4, and without the flags, they remain (sending again works).
 - **Normal Wi-Fi loses some speed while AirDrop's listener runs** (they share the radio).
 - **A long list of boot flags,** sleep untested on the project's hackintosh (one user reports four of five nights fine; 0.6.0-beta.4 fixes the failed wake they caught, [#38](https://github.com/retropineaple/ForbiddenItlwm/issues/38)), tested with iPhones (users report iPads working, and AirDrop with a Mac as the other device, [#33](https://github.com/retropineaple/ForbiddenItlwm/issues/33), [#81](https://github.com/retropineaple/ForbiddenItlwm/issues/81)).
 - **Not working yet:**

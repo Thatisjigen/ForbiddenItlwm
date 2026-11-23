@@ -102,7 +102,7 @@ All of this goes on the **USB stick's** EFI.
 
    Set `IntelBTPatcher.kext` to `Enabled` = false if you have it. This is required. Make sure no `AirportItlwm.kext` or `itlwm.kext` entry is still enabled.
 
-3. **Boot arguments:** add the tested set from [BOOT-FLAGS.md](BOOT-FLAGS.md) to `boot-args` under `NVRAM` → `Add` → `7C436110-AB2A-4BBB-A880-FE41995C9F82`. Keep your existing arguments. Because OpenCore only writes NVRAM keys listed under `Delete`, check that `boot-args` is listed there for the same GUID. The experimental flags in BOOT-FLAGS are optional, for testers. macOS ignores `boot-args` longer than 1023 characters, so keep the line shorter than that.
+3. **Boot arguments:** add the tested set from [BOOT-FLAGS.md](BOOT-FLAGS.md) to `boot-args` under `NVRAM` → `Add` → `7C436110-AB2A-4BBB-A880-FE41995C9F82`. Keep your existing arguments. Because OpenCore only writes NVRAM keys listed under `Delete`, check that `boot-args` is listed there for the same GUID. The experimental flags in BOOT-FLAGS are optional, for testers, and work only from 0.7.0-alpha.1. macOS ignores `boot-args` longer than 1023 characters, so keep the line shorter than that.
 
 4. **Validate:** `plutil -lint config.plist`, and `ocvalidate` if you have it.
 
@@ -124,7 +124,7 @@ All of this goes on the **USB stick's** EFI.
 
 ## Before a macOS update
 
-Boot once without `-btleadv` (or with BTLEAdvFixup disabled), then update. While BTLEAdvFixup is active, `bluetoothd`'s patched pages are what the system reads, and an incremental update that checks the file can fail. If the update still fails, disable BlueToolFixup and BTLEAdvFixup too for the update (#78): BlueToolFixup patches `bluetoothd` the same way, whatever the flags. Then check that the new build is supported before turning `-btleadv` back on: see [the macOS builds](TESTED-HARDWARE.md#macos-builds). If it isn't listed, run `perl tools/check-my-mac.pl` on the new build and post the output in [discussion #98](https://github.com/retropineaple/ForbiddenItlwm/discussions/98).
+Boot once without `-btleadv` and `-btleadvnodupfilter` (or with BTLEAdvFixup disabled), then update. `-btleadvnodupfilter` is new in 0.7.0-alpha.1 and hasn't been tried with an update yet, so remove it too. While BTLEAdvFixup is active, `bluetoothd`'s patched pages are what the system reads, and an incremental update that checks the file can fail. If the update still fails, disable BlueToolFixup and BTLEAdvFixup too for the update (#78): BlueToolFixup patches `bluetoothd` the same way, whatever the flags. Then check that the new build is supported before turning the flags back on: see [the macOS builds](TESTED-HARDWARE.md#macos-builds). If it isn't listed, run `perl tools/check-my-mac.pl` on the new build and post the output in [discussion #98](https://github.com/retropineaple/ForbiddenItlwm/discussions/98).
 
 ## Uninstalling
 
