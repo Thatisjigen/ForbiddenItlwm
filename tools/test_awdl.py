@@ -47,6 +47,9 @@ pattern_set = {"25G241": "2671", "25G332": "2672", "25G342": "2673"}.get(build, 
 subprocess.run(["python3", str(root / "tests/btleadv_patterns.py"), "--set", pattern_set], check=True)
 # The same-channel probe model and its source pins (PR #47); it builds its own test (audit T02).
 subprocess.run(["python3", str(root / "tests/portable_rx/test-samech.py")], check=True)
+# PR #50: the idle receive-peer handoff (-itlawdlpeerhandoff), its helper and its ADDBA dispatch.
+subprocess.run(["python3", str(root / "tests/portable_rx/test-handoff.py")], check=True)
+subprocess.run(["python3", str(root / "tests/portable_rx/test-handoff-rx.py")], check=True)
 # The Sonoma set needs a 14.8.9 bluetoothd. Point this at one to check it.
 if os.environ.get("FORBIDDEN_SONOMA_BLUETOOTHD"):
     subprocess.run(["python3", str(root / "tests/btleadv_patterns.py"), "--target", "sonoma",
