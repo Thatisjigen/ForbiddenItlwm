@@ -98,8 +98,9 @@ import hashlib
 # iwx_rx_pkt: the security fixes add only length checks to fixed-size notifications (audit HL05). The AWDL scheduler
 # adds a session-protection tap for the follower's own sessions (-itlschedsp): their starts and ends, a failed start
 # (status 0) opening no window, each start timed against its plan run (ITLAWDLSchedStartVsRun); and restart counts
-# at the init_task sites only with -itlfwcrashrec.
-a=s.index('iwx_rx_pkt(struct');b=s.index("\nvoid ItlIwx::",a);assert hashlib.sha256(s[a:b].encode()).hexdigest()=='6904019c1c32a1fc679176c9108a0f567e15042038ba13318a34873ece9a6347'
+# at the init_task sites only with -itlfwcrashrec. The next release adds only the generation of the last successful
+# listener session start (awdlSchedStartedGen), which the overlap exceptions wait for.
+a=s.index('iwx_rx_pkt(struct');b=s.index("\nvoid ItlIwx::",a);assert hashlib.sha256(s[a:b].encode()).hexdigest()=='4adbe847d5cd3b4ca77a0918e5f3cefed5c6d6f727cbb330e05efb47f057a66e'
 a=s.index('iwx_rx_mpdu_mq(struct');b=s.index("\nvoid ItlIwx::",a);assert hashlib.sha256(s[a:b].encode()).hexdigest()=='761fc4d25edb443d274e376efdd0a7011f20cd0b2f408de292f0ed16a5f38470'
 # iwx_rx_frame: 0.6.0 adds only the phone's 5 GHz channel tracking from its TLV 18 sequence (PR #21). The AWDL
 # scheduler adds, each behind its own flag: frame counts while the follower runs (-itlschedsp); each peer's election v2
@@ -107,5 +108,6 @@ a=s.index('iwx_rx_mpdu_mq(struct');b=s.index("\nvoid ItlIwx::",a);assert hashlib
 # -itlschedelecapple) at its on-air time (-itlschedonair); a count of AWDL frames heard on 6 and a drop of channel 6's
 # promiscuous frames after the AWDL hand-off unless the station is on 6 (-itlschedch6); group AWDL data heard on 6
 # passed to the hand-off (-itlawdlch6group), without the schedule-peer timing note; group data per slot
-# (-itlschedch6peer); measurements only with -itlsvctiming, -itlschedskew and -itlrxloss.
-a=s.index('iwx_rx_frame(struct');b=s.index("\nvoid ItlIwx::",a);assert hashlib.sha256(s[a:b].encode()).hexdigest()=='c7b8160f8e604a046d73db029402a35589892d492004eff9bc7a57012a525b48'
+# (-itlschedch6peer); measurements only with -itlsvctiming, -itlschedskew and -itlrxloss. The next release adds only a
+# count of received frames by reported channel while the listener is added (ITLAWDLListenerRxChan), read-only.
+a=s.index('iwx_rx_frame(struct');b=s.index("\nvoid ItlIwx::",a);assert hashlib.sha256(s[a:b].encode()).hexdigest()=='4e6e56cf787914af9e81658ddce0ccca41522549676ea381620be715e60d259e'

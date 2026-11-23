@@ -201,25 +201,28 @@ static uint32_t itlAwStartPosted, itlAwStartIdle, itlAwStartWatch;
 // manager, +0x18 = its state; RX at +0x79c, TX at +0x7b0 on 26.7.x (Tahoe); RX +0x78c, TX +0x7a0 on 15.8.x
 // (Sequoia). From the disassembly of updateInterfaceDataStats, updateLocalCounters, inputPacket and preQueuePacket.
 // Supported-builds audit (2026-11-23): the interface -> peer manager step is IO80211SkywalkInterface::getPeerManager(),
-// which differs per macOS: +0x120 -> +0x28 on Tahoe (26.7.2/26.7.3), +0x110 -> +0x28 on Sequoia (15.8/15.8.3),
-// +0x110 -> +0x30 on Sonoma 14.8.9. Before, Tahoe's +0x120 was used everywhere, a wrong pointer on Sequoia. The state
+// now called directly (it differs per macOS: +0x120 -> +0x28 on Tahoe (26.7.2/26.7.3), +0x110 -> +0x28 on Sequoia (15.8/15.8.3),
+// +0x110 -> +0x30 on Sonoma 14.8.9). Before, Tahoe's +0x120 was used everywhere, a wrong pointer on Sequoia. The state
 // is the peer manager's +0x18 everywhere; RX/TX from IO80211PeerManager::inputPacket / preQueuePacket per build.
 extern bool itlAWDLDataCounts(uint32_t *rxPkts, uint32_t *txPkts);
+extern bool itlAWDLBuildVerified();
+extern bool itlAWDLBuildForced();
+// IO80211SkywalkInterface::getPeerManager() (exported, non-virtual; on Tahoe "mov 0x120(%rdi),%rax; mov 0x28(%rax),%rax")
+// and IO80211AWDLPeerManager's vtable (exported on every build checked, 14.8.3 to 26.7.3). The counters write only
+// when the returned object's vtable is that one, so a moved layout on an unverified build turns them off instead.
+extern "C" void *itlSkywalkGetPeerManager(void *interface) __asm__("__ZN23IO80211SkywalkInterface14getPeerManagerEv");
+extern const uintptr_t itlNativeAWDLPeerManagerVtable[] __asm__("__ZTV22IO80211AWDLPeerManager");
 #if __IO80211_TARGET == __MAC_26_0
-static constexpr size_t kItlAwdlIfPrivOff = 0x120, kItlAwdlPrivPmOff = 0x28;
 static constexpr size_t kItlAwdlPmRxOff = 0x79c, kItlAwdlPmTxOff = 0x7b0;
 #elif __IO80211_TARGET == __MAC_15_2
-static constexpr size_t kItlAwdlIfPrivOff = 0x110, kItlAwdlPrivPmOff = 0x28;
 static constexpr size_t kItlAwdlPmRxOff = 0x78c, kItlAwdlPmTxOff = 0x7a0;
 #elif __IO80211_TARGET == __MAC_14_4
-static constexpr size_t kItlAwdlIfPrivOff = 0x110, kItlAwdlPrivPmOff = 0x30;
 static constexpr size_t kItlAwdlPmRxOff = 0x77c, kItlAwdlPmTxOff = 0x790;
 #else
-static constexpr size_t kItlAwdlIfPrivOff = 0, kItlAwdlPrivPmOff = 0;
 static constexpr size_t kItlAwdlPmRxOff = 0, kItlAwdlPmTxOff = 0;
 #endif
 static int itlAwdlStatsState;   // 0 not read yet, 1 off, 2 on
-static uint32_t itlAwdlStatsCalls, itlAwdlStatsLastRx, itlAwdlStatsAdded, itlAwdlStatsNoPath;
+static uint32_t itlAwdlStatsCalls, itlAwdlStatsLastRx, itlAwdlStatsAdded, itlAwdlStatsNoPath, itlAwdlStatsWrongPm;
 static uint32_t itlAwdlStatsLastTx, itlAwdlStatsAddedTx;
 static bool itlAwdlStatsPrimed;
 static void itlReportAWDLData(AirportItlwm *self);
@@ -362,9 +365,9 @@ void ItlAWDLInterface::acceptNativeRequests()
     peerCacheAccept = itlResFlag("-itlpeercache", 0x1);
     setProperty("ITLAWDLPeerCache", peerCacheAccept ? "on, no requests yet" : "off");
     // The request carries a raw pointer at a fixed offset, a layout checked only for the verified
-    // builds. On an "expected" build the copy stays off. With -itlawdlanybuild it's on too, so an unverified
-    // build can be tested with AirDrop working (other devices list the Mac only with it): the pointer is then
-    // still range-checked and the copy validated (storeMasterIndication), but the layout isn't known to match.
+    // builds. On any other build the copy is off, unless -itlawdlanybuild is set (itlAWDLBuildForced): then an
+    // unverified build works like a verified one (other devices list the Mac only with it), with the pointer still
+    // range-checked and the copy validated (storeMasterIndication), but the layout not known to match.
     const bool wanted = PE_parse_boot_argn("-itlawdlmitx", &debug, sizeof(debug));
     const bool verified = itlAWDLBuildVerified();
     const bool forced = !verified && itlAWDLBuildForced();
@@ -2057,9 +2060,10 @@ static void itlReportAWDLData(AirportItlwm *self)
         itlAwdlStatsState = itlResFlag("-itlawdlstats", 0x1) && kItlAwdlPmRxOff ? 2 : 1;
     }
     uint32_t rx = 0, tx = 0;
-    // Supported-builds audit: these pointers and offsets were checked only on the verified kernel + macOS pairs, so
-    // like the master indication copy this runs only there (an "expected" or -itlawdlanybuild build stays off).
-    if (itlAwdlStatsState != 2 || !self || !self->fAWDLInterface || !itlAWDLBuildVerified() || !itlAWDLDataCounts(&rx, &tx))
+    // Supported-builds audit: these offsets were checked on the verified kernel + macOS pairs. Like the master
+    // indication copy, this runs there, and with -itlawdlanybuild on any other build (itlAWDLBuildForced).
+    if (itlAwdlStatsState != 2 || !self || !self->fAWDLInterface || !(itlAWDLBuildVerified() || itlAWDLBuildForced()) ||
+        !itlAWDLDataCounts(&rx, &tx))
         return;
     ++itlAwdlStatsCalls;
     const uint32_t rxDelta = itlAwdlStatsPrimed && rx >= itlAwdlStatsLastRx ? rx - itlAwdlStatsLastRx : 0;
@@ -2069,12 +2073,23 @@ static void itlReportAWDLData(AirportItlwm *self)
     itlAwdlStatsLastTx = tx;
     if (!rxDelta && !txDelta)
         return;
-    auto *base = reinterpret_cast<uint8_t *>(static_cast<IO80211SkywalkInterface *>(
-        static_cast<ItlAWDLInterface *>(self->fAWDLInterface)));
-    uint8_t *priv = *reinterpret_cast<uint8_t **>(base + kItlAwdlIfPrivOff);
-    uint8_t *pm = priv ? *reinterpret_cast<uint8_t **>(priv + kItlAwdlPrivPmOff) : nullptr;
-    uint8_t *state = pm ? *reinterpret_cast<uint8_t **>(pm + 0x18) : nullptr;
-    if (!state) {
+    // The peer manager through macOS's own accessor, and only if it is one: its vtable must be
+    // IO80211AWDLPeerManager's (address point = symbol + two words). Anything else turns the counters off for good.
+    auto *pm = static_cast<uint8_t *>(itlSkywalkGetPeerManager(static_cast<IO80211SkywalkInterface *>(
+        static_cast<ItlAWDLInterface *>(self->fAWDLInterface))));
+    if (!pm) {
+        ++itlAwdlStatsNoPath;
+        return;
+    }
+    if (reinterpret_cast<uintptr_t>(pm) < 0xffffff8000000000ULL ||
+        *reinterpret_cast<const uintptr_t *>(pm) != reinterpret_cast<uintptr_t>(itlNativeAWDLPeerManagerVtable + 2)) {
+        ++itlAwdlStatsWrongPm;
+        itlAwdlStatsState = 1;
+        self->setProperty("ITLAWDLDataStats", "off: getPeerManager() didn't return an IO80211AWDLPeerManager");
+        return;
+    }
+    uint8_t *state = *reinterpret_cast<uint8_t **>(pm + 0x18);
+    if (reinterpret_cast<uintptr_t>(state) < 0xffffff8000000000ULL) {
         ++itlAwdlStatsNoPath;
         return;
     }
@@ -2198,9 +2213,10 @@ void AirportItlwm::watchdogAction(IOTimerEventSource *timer)
         setProperty("ITLAWDLAwStartPosts", aw);
     }
     if (itlAwdlStatsState == 2 && itlAwStartWatch % 5 == 0) {
-        char st[96];
-        snprintf(st, sizeof(st), "calls %u; rx seen %u added %u; tx seen %u added %u; no path %u", itlAwdlStatsCalls,
-                 itlAwdlStatsLastRx, itlAwdlStatsAdded, itlAwdlStatsLastTx, itlAwdlStatsAddedTx, itlAwdlStatsNoPath);
+        char st[160];
+        snprintf(st, sizeof(st), "calls %u; rx seen %u added %u; tx seen %u added %u; no path %u; not a peer manager %u%s",
+                 itlAwdlStatsCalls, itlAwdlStatsLastRx, itlAwdlStatsAdded, itlAwdlStatsLastTx, itlAwdlStatsAddedTx,
+                 itlAwdlStatsNoPath, itlAwdlStatsWrongPm, itlAWDLBuildVerified() ? "" : " (-itlawdlanybuild)");
         setProperty("ITLAWDLDataStats", st);
     }
 #ifdef AIRPORT_WCL

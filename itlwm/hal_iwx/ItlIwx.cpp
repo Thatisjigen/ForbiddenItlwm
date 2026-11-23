@@ -206,6 +206,9 @@ static uint32_t awdlSchedSpConf = 2, awdlSchedSpSent, awdlSchedSpStarts, awdlSch
     awdlSchedSpLisIn, awdlSchedSpStaIn, awdlSchedSpLisOut, awdlSchedSpStaOut, awdlSchedSpStation;
 static uint64_t awdlSchedSpNextUS, awdlSchedSpFirstUS, awdlSchedSpStartUS, awdlSchedSpInUS;
 static int awdlSchedSpGen = -1, awdlSchedSpLastErr;
+// The firmware generation in which a listener session last started (-1: none yet). The overlap exceptions
+// (-itlsched80, -itlsched160) wait for it, so they never run before the scheduler really works.
+static int awdlSchedStartedGen = -1;
 static const char *awdlSchedSpState = "off";
 // Session timing: start delay (send to start notification) and real length, host time.
 static uint32_t awdlSchedSpDurationTU = 64;
@@ -423,6 +426,25 @@ static uint32_t awdlSchedCh6QuietSlots;
 // firmware's regulatory answer stays final).
 extern volatile uint32_t itlAWDLReqSecondaryMaster;
 static bool awdlSchedMacChan;
+// #101: the follower pauses while macOS's AirDrop channel (awdlSchedMacChanWant) isn't the listener's, e.g. macOS asks for
+// 44 inside a 160 MHz station channel (PR #21's rule keeps the listener out). Following macOS's plan then gave the
+// listener no slots at all, so the Mac and the iPhone never met. Paused, the listener runs as without the scheduler.
+static bool awdlSchedPaused;
+static uint32_t awdlSchedPauses, awdlSchedPausedTicks;
+// -itlsched160 (part of itlawdlsched=1): with the scheduler, the listener may sit inside a 160 MHz (or 80+80)
+// station channel, at 20 MHz, instead of PR #21's rule keeping it out (that rule came from a listener sharing time by
+// quota, not sessions).
+static bool awdlSched160;
+// -itlsched80 (part of itlawdlsched=1): with the scheduler, the listener stays at 80 MHz when the station is at 80 MHz
+// in the same block on another primary (e.g. station 157/80, listener 149), instead of dropping to 20 MHz (#26's rule,
+// seen with quota time-sharing). With -itlsched160 too, the listener inside a 160 MHz station channel gets 80 MHz.
+// Either needs a running scheduler (awdlSchedOverlapReady) for 80 MHz; -itlschedoldoverlap turns both off.
+static bool awdlSched80;
+// Test-only, to recreate #101 without a 160 MHz router: -itlsimsta160 tells the firmware the station's 80 MHz link in
+// 36-64 or 100-128 is 160 MHz wide (the AP still uses 80); itlsimmacchan=N stands in for macOS's AirDrop channel, and
+// the follower runs macOS's AirDrop slots on N; -itlsimunusable treats macOS's channel as unusable.
+static bool awdlSimSta160, awdlSimUnusable;
+static unsigned awdlSimMacChan;
 static unsigned awdlSchedMacChanWant, awdlSchedMacChanPicked;
 static uint32_t awdlSchedMacChanFollowed, awdlSchedMacChanUnusable, awdlSchedMacChanNone, awdlSchedMacChanFromPlan;
 // -itlawdlumi: macOS's one-shot unicast MI (AirportItlwmV2.cpp) goes out as the next sync frame, at the
@@ -6907,6 +6929,11 @@ static uint32_t awdlCoexDataRxUcast, awdlCoexDataRxGroup, awdlCoexPromiscDropped
 static bool awdlCoexPromiscLive;      // Applied: the firmware accepted a MAC command that set it.
 static bool awdlCoexPromiscUncertain; // A MAC command failed: the firmware may hold either filter.
 static uint32_t awdlCoexPromiscAmbiguous, awdlCoexMacMaskSeen[4];
+// Every received frame by the channel the firmware reports, while the listener is added: with the station and the
+// listener on different primaries, frames reported on the listener's channel can only have come through its context,
+// so an overlapping listener (same block, or inside a 160 MHz station channel) shows whether it really receives on its
+// own primary or was merged with the station's (#26). The RX MAC mask can't tell: this firmware always reports 0.
+static uint32_t awdlListenerRxChan[200];
 static ItlAWDL::SameChannelProbe awdlCoexSameChannelProbe;
 static bool awdlCoexSameChannelProbeWanted(struct iwx_softc *sc, uint64_t now)
 {
@@ -7933,10 +7960,14 @@ static bool awdlCoexChannelEligible(struct ieee80211com *ic, struct ieee80211_ch
 // 149 handle (not channel 6's), with at least 5 ms left, as a real Mac sends inside its AWs on its channel.
 static bool awdlSchedSyncTx;
 static uint32_t awdlSchedSyncTxHeld, awdlSchedSyncTxInSession;
+// the station and the listener on the same channel (a router on the AirDrop channel). The radio is already on that
+// channel for both, so the follower runs only macOS's channel-6 entries, and sync frames aren't held to sessions.
+static bool awdlSchedSharedChannel;
+static uint32_t awdlSchedSharedTicks;
 static bool awdlSchedSyncTxGated()
 {
     return awdlSchedSyncTx && awdlSchedHandle && !awdlSchedHandleOff && awdlSchedHandleAdded &&
-        awdlSchedSp && !awdlSchedSpOff;
+        awdlSchedSp && !awdlSchedSpOff && !awdlSchedSharedChannel && !awdlSchedPaused;
 }
 
 // whether macOS's MI bitmap allows the slot we are in (one bit per slot, either of the two 16-slot sequences).
@@ -7995,7 +8026,7 @@ bool itlAWDLExecPlan(uint8_t *out)
     const bool scheduled =
         (awdlSchedHandle && !awdlSchedHandleOff && awdlSchedHandleAdded && awdlSchedHandleGen == awdlCoexGeneration &&
          awdlSchedSp && !awdlSchedSpOff);
-    if (!out || !awdlSchedAdvertise || !scheduled || awdlSchedAwdlOff() ||
+    if (!out || !awdlSchedAdvertise || !scheduled || awdlSchedAwdlOff() || awdlSchedPaused ||
         !awdlCoexMultiActive || !awdlSchedSpStation || awdlSchedSpStation == awdlCoexChannel ||
         awdlCoexChannel > 0xff || awdlSchedSpStation > 0xff) {
         ++awdlSchedAdvertiseRefused;
@@ -10079,8 +10110,11 @@ iwx_rx_frame(struct iwx_softc *sc, mbuf_t m, int chanidx,
             awdlSchedSpStaOut += sta;
         }
     }
-    if (awdlCoexProbe && awdlCoexAdded && awdlRxMacMaskValid)
+    if (awdlCoexProbe && awdlCoexAdded && awdlRxMacMaskValid) {
         ++awdlCoexMacMaskSeen[awdlRxMacMask < 3 ? awdlRxMacMask : 3];
+    }
+    if (awdlCoexProbe && awdlCoexAdded && chanidx > 0 && chanidx < 200)
+        ++awdlListenerRxChan[chanidx];
     
     if (awdlCoexProbe && awdlCoexAdded && mbuf_len(m) >= 24) {
         static const uint8_t awdlBssid[6] = {0x00, 0x25, 0x00, 0xff, 0x94, 0x73};
@@ -11949,6 +11983,17 @@ iwx_binding_cmd(struct iwx_softc *sc, struct iwx_node *in, uint32_t action)
     return err;
 }
 
+// -itlsimsta160: the station's own PHY (not the listener's or channel 6's), on its BSS channel, with an 80 MHz link in a
+// 160 MHz group (36-64 or 100-128).
+static bool awdlSimSta160Applies(struct ieee80211com *ic, struct ieee80211_channel *c)
+{
+    if (!ic->ic_bss || !ic->ic_bss->ni_chan || c != ic->ic_bss->ni_chan || ic->ic_bss->ni_chw != IEEE80211_CHAN_WIDTH_80 ||
+        awdlPhyBuildingId == kAwdlCoexPhyId || awdlPhyBuildingId == kAwdlSchedCh6PhyId)
+        return false;
+    const unsigned ch = ieee80211_chan2ieee(ic, c);
+    return (ch >= 36 && ch <= 64) || (ch >= 100 && ch <= 128);
+}
+
 static uint8_t
 iwx_get_channel_width(struct ieee80211com *ic, struct ieee80211_channel *c)
 {
@@ -11964,6 +12009,8 @@ iwx_get_channel_width(struct ieee80211com *ic, struct ieee80211_channel *c)
     if (ic->ic_bss == NULL || ic->ic_state < IEEE80211_S_ASSOC) {
         return ret;
     }
+    if (awdlSimSta160 && awdlSimSta160Applies(ic, c))
+        return IWX_PHY_VHT_CHANNEL_MODE160;
     switch (ic->ic_bss->ni_chw) {
         case IEEE80211_CHAN_WIDTH_20_NOHT:
         case IEEE80211_CHAN_WIDTH_20:
@@ -11998,6 +12045,19 @@ iwx_get_ctrl_pos(struct ieee80211com *ic, struct ieee80211_channel *c)
     }
     if (ic->ic_bss == NULL || ic->ic_state < IEEE80211_S_ASSOC || iwx_get_channel_width(ic, c) == IWX_PHY_VHT_CHANNEL_MODE20)
         return IWX_PHY_VHT_CTRL_POS_1_BELOW;
+    if (awdlSimSta160 && awdlSimSta160Applies(ic, c)) {   // 160 MHz centred on 50 or 114: 20 MHz steps from the centre
+        const int ch = int(ieee80211_chan2ieee(ic, c)), centre = ch <= 64 ? 50 : 114, off = (ch - centre) * 5;
+        switch (off) {
+            case -70: return IWX_PHY_VHT_CTRL_POS_4_BELOW;
+            case -50: return IWX_PHY_VHT_CTRL_POS_3_BELOW;
+            case -30: return IWX_PHY_VHT_CTRL_POS_2_BELOW;
+            case -10: return IWX_PHY_VHT_CTRL_POS_1_BELOW;
+            case 10: return IWX_PHY_VHT_CTRL_POS_1_ABOVE;
+            case 30: return IWX_PHY_VHT_CTRL_POS_2_ABOVE;
+            case 50: return IWX_PHY_VHT_CTRL_POS_3_ABOVE;
+            default: return IWX_PHY_VHT_CTRL_POS_4_ABOVE;
+        }
+    }
 
     signed int offset = ic->ic_bss->ni_chan->ic_freq - ic->ic_bss->ni_chan->ic_center_freq1;
     switch (offset) {
@@ -16683,6 +16743,17 @@ awdlCoexChannelUsable(struct ieee80211com *ic, unsigned ch)
         !(c.ic_flags & (IEEE80211_CHAN_DFS | IEEE80211_CHAN_NOADHOC));
 }
 
+// The scheduler really runs in firmware generation gen: switched on, its handle added in that generation, and a
+// listener session started in it. 80 MHz over an overlap needs this, not just the flags: before the first session
+// and after the scheduler stops, the listener uses 20 MHz there (inside a 160 MHz station channel only while the
+// scheduler is switched on, so its first sessions can start).
+static bool
+awdlSchedOverlapReady(int gen)
+{
+    return awdlSchedSp && !awdlSchedSpOff && awdlSchedHandleAdded && awdlSchedHandleGen == gen &&
+        awdlSchedStartedGen == gen;
+}
+
 static int
 awdlCoexPickOwn(struct iwx_softc *sc, uint8_t *width)
 {
@@ -16715,7 +16786,9 @@ awdlCoexPickOwn(struct iwx_softc *sc, uint8_t *width)
     const bool stationKnown = !awdlCoexOverlap80 && ic->ic_state == IEEE80211_S_RUN && ic->ic_bss &&
         ic->ic_bss->ni_chan;
     const unsigned stationPrimary = stationKnown ? ieee80211_chan2ieee(ic, ic->ic_bss->ni_chan) : 0U;
-    const uint8_t stationChw = stationKnown ? ic->ic_bss->ni_chw : 0;
+    const uint8_t stationChw = !stationKnown ? 0 :
+        awdlSimSta160 && ic->ic_bss->ni_chw == IEEE80211_CHAN_WIDTH_80 && group160(stationPrimary) &&
+        group160(stationPrimary) != 3 ? IEEE80211_CHAN_WIDTH_160 : ic->ic_bss->ni_chw;
     auto overlapFor = [&](unsigned c) -> uint8_t {
         if (!stationKnown)
             return 0;
@@ -16732,10 +16805,23 @@ awdlCoexPickOwn(struct iwx_softc *sc, uint8_t *width)
     // or (allow20) when the phone is known to use this channel.
     auto tryChannel = [&](unsigned c, bool allow20, uint8_t *w) -> bool {
         overlap = overlapFor(c);
-        if (overlap == 2)
+        // Taking the channel at 20 MHz inside the station's 160 MHz channel needs the scheduler switched on: its
+        // sessions can only start once the listener is on macOS's channel, so this can't wait for them. 80 MHz
+        // over an overlap needs it really running (a session in this generation).
+        const bool schedIntent = awdlSchedSp && !awdlSchedSpOff;
+        const bool schedOn = awdlSchedOverlapReady(sc->sc_generation);
+        if (overlap == 2 && !(awdlSched160 && schedIntent))
             return false;
         const unsigned f = awdlCoex80BlockFirst(c);
-        if (!overlap && f && awdlCoexWide80FailedGen != sc->sc_generation &&
+        // -itlsched80: overlap 1 (and, with -itlsched160, overlap 2) may still use the whole block at 80 MHz.
+        const bool wideAllowed = !overlap || (awdlSched80 && schedOn);
+        if (overlap == 2 && !wideAllowed) {   // -itlsched160: inside the station's 160 MHz channel, at 20 MHz
+            if (!usable(c))
+                return false;
+            *w = IWX_PHY_VHT_CHANNEL_MODE20;
+            return true;
+        }
+        if (wideAllowed && f && awdlCoexWide80FailedGen != sc->sc_generation &&
             (ic->ic_channels[c].ic_flags & IEEE80211_CHAN_VHT80)) {
             bool all = true;
             for (unsigned ch = f; ch <= f + 12; ch += 4)
@@ -16814,8 +16900,10 @@ awdlCoexPickOwn(struct iwx_softc *sc, uint8_t *width)
             }
         }
     }
+    if (awdlSimMacChan)
+        macCh = awdlSimMacChan, macFromPlan = false;
     bool macFollowed = false;
-    if (macCh && tryChannel(macCh, true, &w)) {
+    if (macCh && !awdlSimUnusable && tryChannel(macCh, true, &w)) {
         pick = int(macCh);
         macFollowed = true;
     } else if (search6) {
@@ -16975,8 +17063,20 @@ static void awdlSchedSpPublish()
     const uint64_t total = awdlSchedSpFirstUS ? awdlUptimeUS() - awdlSchedSpFirstUS : 0;
     const uint64_t out = total > awdlSchedSpInUS ? total - awdlSchedSpInUS : 0;
     char text[300];
-    snprintf(text, sizeof(text), "%s; mac %u conf %u sent %u err %d starts %u ends %u fails %u; in %llu ms lis %u sta %u; "
-             "out %llu ms lis %u sta %u", awdlSchedSpState, awdlSchedSpMacId, awdlSchedSpConf, awdlSchedSpSent, awdlSchedSpLastErr,
+    char pausedText[96] = "";
+    if (awdlSchedPaused)
+        snprintf(pausedText, sizeof(pausedText), " (paused: macOS wants %u, listener on %u; pauses %u)",
+                 awdlSchedMacChanWant, awdlCoexChannel, awdlSchedPauses);
+    else if (awdlSchedPauses)
+        snprintf(pausedText, sizeof(pausedText), " (pauses %u)", awdlSchedPauses);
+    snprintf(text, sizeof(text), "%s%s%s%s%s%s; mac %u conf %u sent %u err %d starts %u ends %u fails %u; in %llu ms lis %u sta %u; "
+             "out %llu ms lis %u sta %u", awdlSchedSpState,
+             awdlSchedSharedChannel ? " (shared channel: channel 6 only)" : "", pausedText,
+             awdlSched160 ? (awdlSched80 ? " [160 and same-block 80 allowed]" : " [160 allowed]") :
+             awdlSched80 ? " [same-block 80 allowed]" : "",
+             (awdlSched80 || awdlSched160) && !awdlSchedOverlapReady(awdlCoexGeneration) ?
+                 " (overlap waits for a session in this generation)" : "",
+             awdlSimSta160 || awdlSimMacChan || awdlSimUnusable ? " [SIMULATION]" : "", awdlSchedSpMacId, awdlSchedSpConf, awdlSchedSpSent, awdlSchedSpLastErr,
              awdlSchedSpStarts, awdlSchedSpEnds, awdlSchedSpFails, (unsigned long long)(awdlSchedSpInUS / 1000),
              awdlSchedSpLisIn, awdlSchedSpStaIn, (unsigned long long)(out / 1000), awdlSchedSpLisOut,
              awdlSchedSpStaOut);
@@ -17126,6 +17226,22 @@ static void awdlSchedSpPublish()
                  !awdlSchedHandle ? "off" : awdlSchedHandleOff ? "stopped" : awdlSchedHandleAdded ? "bound" : "waiting",
                  awdlSchedHandleAdds, awdlSchedHandleRemoves, awdlSchedHandleErr);
         IORegistryEntry::getRegistryRoot()->setProperty("ITLAWDLSchedHandle", handle);
+        {   // the listener's own frames by reported channel, the four busiest
+            unsigned top[4] = {}, cnt[4] = {};
+            for (unsigned ch = 1; ch < 200; ++ch) {
+                const uint32_t v = awdlListenerRxChan[ch];
+                for (unsigned k = 0; k < 4; ++k)
+                    if (v > cnt[k]) {
+                        for (unsigned j = 3; j > k; --j) { cnt[j] = cnt[j - 1]; top[j] = top[j - 1]; }
+                        cnt[k] = v; top[k] = ch;
+                        break;
+                    }
+            }
+            char lr[160];
+            snprintf(lr, sizeof(lr), "listener on %u/%d MHz; frames by reported channel %u: %u, %u: %u, %u: %u, %u: %u",
+                     awdlCoexChannel, awdlCoexOwnWidth, top[0], cnt[0], top[1], cnt[1], top[2], cnt[2], top[3], cnt[3]);
+            IORegistryEntry::getRegistryRoot()->setProperty("ITLAWDLListenerRxChan", lr);
+        }
         if (awdlSchedCh6) {
             char ch6[160];
             snprintf(ch6, sizeof(ch6), "ch6 %s adds %u err 0x%x; sessions %u; awdl frames on 6 %u; other frames on 6 dropped %u"
@@ -17300,10 +17416,10 @@ awdlSchedSpTick(struct iwx_softc *sc)
         awdlSchedSpPublish();
         return;
     }
-    if (sc->sc_device_family < IWX_DEVICE_FAMILY_AX210 ||
-        !isset(sc->sc_enabled_capa, IWX_UCODE_TLV_CAPA_SESSION_PROT_CMD)) {
+    // AX200 (22000) and AX210 families: every bundled firmware of both has session protection.
+    if (!isset(sc->sc_enabled_capa, IWX_UCODE_TLV_CAPA_SESSION_PROT_CMD)) {
         awdlSchedSpOff = true;
-        awdlSchedSpState = "off: needs an AX210-family card with session protection";
+        awdlSchedSpState = "off: the firmware has no session protection";
         awdlSchedSpPublish();
         return;
     }
@@ -17333,7 +17449,7 @@ awdlSchedSpTick(struct iwx_softc *sc)
     struct iwx_node *in = (struct iwx_node *)ic->ic_bss;
     const unsigned stationChannel = in && in->in_phyctxt && in->in_phyctxt->channel ?
         unsigned(ieee80211_chan2ieee(ic, in->in_phyctxt->channel)) : 0;
-    if (!awdlCoexMultiActive || !stationChannel || stationChannel == awdlCoexChannel || awdlCoexMovePending ||
+    if (!awdlCoexMultiActive || !stationChannel || awdlCoexMovePending ||
         awdlCoexTxHalted || awdlCoexBrokenGeneration == gen) {
         awdlStartNote(1, awdlUptimeUS(), awdlSchedFollowStartedUS != 0);   // station/listener not ready
         return;
@@ -17345,6 +17461,27 @@ awdlSchedSpTick(struct iwx_softc *sc)
     }
     awdlSchedSpGen = gen;
     awdlSchedSpStation = stationChannel;
+    awdlSchedSharedChannel = stationChannel == awdlCoexChannel;
+    if (awdlSchedSharedChannel)
+        ++awdlSchedSharedTicks;
+    {
+        // #101: macOS's AirDrop channel isn't the listener's (it couldn't be used here). Pause: no sessions, the fixed
+        // channel advertised, the listener on its own as without the scheduler. Resumes once they match again.
+        const unsigned want = awdlSchedMacChanWant;
+        const bool pause = awdlSchedMacChan && want && want != awdlCoexChannel;
+        if (pause != awdlSchedPaused) {
+            awdlSchedPaused = pause;
+            if (pause)
+                ++awdlSchedPauses;
+            awdlSchedSpPublish();
+        }
+        if (pause) {
+            // the status and the listener's channel counts stay current while paused (every 10th tick).
+            if (++awdlSchedPausedTicks % 10 == 0)
+                awdlSchedSpPublish();
+            return;
+        }
+    }
     // settle rule, checked until the follower starts in this generation.
     if (awdlSchedSafe) {
         if (!itlAWDLSyncOn)
@@ -17829,7 +17966,27 @@ awdlSchedFollowPlan(struct iwx_softc *sc, uint64_t nowUS)
         // AW extension into 0 entries while AWDL data flows (see awdlSchedExtend).
         uint8_t listenerPlan[16];
         memcpy(listenerPlan, plan, sizeof(listenerPlan));
-        if (usable && awdlSchedExtend) {
+        if (awdlSimMacChan && awdlSimMacChan == awdlCoexChannel) {
+            // itlsimmacchan (test only): macOS's own AirDrop entries (its secondary master, else the plan's most
+            // named 5 GHz channel other than the station's) run on the simulated channel, so its slots get sessions.
+            unsigned real = itlAWDLReqSecondaryMaster >= 36 && itlAWDLReqSecondaryMaster <= 177 ? itlAWDLReqSecondaryMaster : 0;
+            if (!real) {
+                unsigned best = 0;
+                for (unsigned n = 0; n < 16; ++n) {
+                    unsigned cnt = 0;
+                    if (plan[n] < 36 || plan[n] == awdlSchedSpStation) continue;
+                    for (unsigned m = 0; m < 16; ++m) cnt += plan[m] == plan[n];
+                    if (cnt > best) { best = cnt; real = plan[n]; }
+                }
+            }
+            for (unsigned n = 0; real && n < 16; ++n)
+                if (listenerPlan[n] == real)
+                    listenerPlan[n] = uint8_t(awdlSimMacChan);
+        }
+        const bool shared = awdlSchedSharedChannel;
+        if (shared)
+            memset(listenerPlan, 0, sizeof(listenerPlan));   // the radio is on the listener's channel already
+        if (usable && awdlSchedExtend && !shared) {
             const uint32_t rx = awdlCoexAwdlData, tx = awdlCoexDataTx;
             if (rx != awdlSchedExtLastRx || tx != awdlSchedExtLastTx) {
                 awdlSchedExtLastRx = rx;
@@ -17851,7 +18008,7 @@ awdlSchedFollowPlan(struct iwx_softc *sc, uint64_t nowUS)
                 ++awdlSchedExtIdleTicks;
             }
         }
-        d = ItlAWDL::followDecidePlan(usable ? &listenerPlan : nullptr, uint8_t(awdlCoexChannel), nowUS,
+        d = ItlAWDL::followDecidePlan(usable || shared ? &listenerPlan : nullptr, uint8_t(awdlCoexChannel), nowUS,
                                       awdlSchedFollowLastDutyUS, planClock, awdlSchedLeadUS);
         awdlSchedSpTargetMac = kAwdlCoexMacId;
         // channel 6's plan = macOS's channel-6 entries plus the peer's, where macOS's entry isn't our listener's.
@@ -18014,6 +18171,11 @@ awdlCoexRetarget(struct iwx_softc *sc)
     const int want = awdlCoexPickOwn(sc, &width);
     const int have = own->channel ? ieee80211_chan2ieee(ic, own->channel) : 0;
     const int haveWidth = awdlCoexOwnWidth;
+    // The scheduler stopped (or isn't running in this generation) while the listener uses the overlap exception at
+    // 80 MHz: going back to 20 MHz on the same channel is a safety step, so it skips the settle, quiet and cooldown
+    // waits below. The drain, peer removal and command checks after them still apply.
+    const bool safetyNarrowing = awdlSched80 && awdlSchedSp && !awdlSchedOverlapReady(gen) && want > 14 &&
+        want == have && haveWidth == 80 && width == IWX_PHY_VHT_CHANNEL_MODE20;
     // Same channel and the same width: nothing to do. 20 MHz and 80 MHz on one channel are different choices.
     const uint64_t now = awdlUptimeUS();
     if (!want || (want == have && (width == IWX_PHY_VHT_CHANNEL_MODE80) == (haveWidth == 80))) {
@@ -18036,7 +18198,7 @@ awdlCoexRetarget(struct iwx_softc *sc)
         !awdlCoexPeerVisits(awdlCoexPeerSeq, unsigned(have)) && awdlCoexPeerVisits(awdlCoexPeerSeq, unsigned(want));
     if (haveUnvisited && awdlCoexSettleWant)
         awdlCoexSettleWant = 0;
-    if (!haveUnvisited && !awdlCoexMovePending && want != 6 && have && have != 6 &&
+    if (!safetyNarrowing && !haveUnvisited && !awdlCoexMovePending && want != 6 && have && have != 6 &&
         awdlCoexChannelUsable(ic, unsigned(have))) {
         // A choice from an earlier listener (another generation) starts over.
         if (want != awdlCoexSettleWant || width != awdlCoexSettleWidth || awdlCoexSettleGen != gen) {
@@ -18053,7 +18215,7 @@ awdlCoexRetarget(struct iwx_softc *sc)
     }
     awdlCoexSettleWant = 0;
     // Up to 5 GHz (149 or 44) at most every 10 s; back to 6 at once.
-    if (want != 6 && awdlCoexLastMoveUS && now - awdlCoexLastMoveUS < 10000000ULL) {
+    if (!safetyNarrowing && want != 6 && awdlCoexLastMoveUS && now - awdlCoexLastMoveUS < 10000000ULL) {
         awdlCoexMovePending = false;
         return;
     }
@@ -21279,6 +21441,7 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data, struct mbuf_list *ml)
                         if (!awdlStartFirstOkUS)
                             awdlStartFirstOkUS = spNow;
                         ++awdlSchedSpStarts;
+                        awdlSchedStartedGen = sc->sc_generation;
                         awdlSchedSpActive = true;
                         awdlSchedSpStartUS = spNow;
                         awdlSchedSpAwdlMark = awdlCoexAwdlAction + awdlCoexAwdlData;
@@ -23297,6 +23460,20 @@ iwx_attach(struct iwx_softc *sc, struct pci_attach_args *pa)
         awdlCoexNoSearch6 = itlResFlag("-itlawdlnosearch6", kItlResWork);
         awdlSchedSp = itlResFlag("-itlschedsp", kItlResWork);
         itlFwCrashRec = itlResFlag("-itlfwcrashrec", kItlResDiag);
+        // Part of itlawdlsched=1 (#26, #101: the user can't tell when the router's width or channel puts the
+        // listener in an overlap). -itlschedoldoverlap keeps the old 20 MHz / skip rules, for comparison.
+        {
+            const bool oldOverlap = PE_parse_boot_argn("-itlschedoldoverlap", &dummy, sizeof(dummy));
+            awdlSched160 = !oldOverlap && itlResFlag("-itlsched160", kItlResWork);
+            awdlSched80 = !oldOverlap && itlResFlag("-itlsched80", kItlResWork);
+        }
+        awdlSimSta160 = PE_parse_boot_argn("-itlsimsta160", &dummy, sizeof(dummy));
+        awdlSimUnusable = PE_parse_boot_argn("-itlsimunusable", &dummy, sizeof(dummy));
+        {
+            int simCh = 0;
+            if (PE_parse_boot_argn("itlsimmacchan", &simCh, sizeof(simCh)) && simCh >= 36 && simCh <= 177)
+                awdlSimMacChan = unsigned(simCh);
+        }
         if (awdlSchedSp) {
             // The follower: session protection (P2P_GO_NEGOTIATION) on the handle before each run of the
             // listener's channel in macOS's plan, with the settings the scheduler set was tested with.

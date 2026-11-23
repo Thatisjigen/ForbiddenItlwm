@@ -1,7 +1,7 @@
 # Help add support for your macOS build
 
-If your macOS build isn't supported yet, `tools/check-my-mac.pl` collects what's needed to add it. It reads, on your own
-Mac, every piece of Apple code that ForbiddenItlwm and BTLEAdvFixup depend on, and prints a short report to paste in
+If your macOS build isn't supported yet, `tools/check-my-mac.pl` collects what's needed to add it. It checks, on your own
+Mac, the parts of Apple's code that the kexts' layouts and patches depend on, and prints a short report to paste in
 [discussion #98](https://github.com/retropineaple/ForbiddenItlwm/discussions/98). It replaces sending in system files: nothing is uploaded, copied or changed.
 
 ## Run it
@@ -34,16 +34,20 @@ bluetoothd. It doesn't contain your user name, Mac name, serial number, network 
   - the election RSSI threshold request;
   - the size of the AirDrop protocol table that the driver checks when it starts.
 - **bluetoothd:** whether each place BTLEAdvFixup patches matches one of its patterns. A site that doesn't match is
-  listed with the candidates found by code shape, so support for your build can be added from the report alone.
+  listed with the candidates found by code shape. That's often enough to add your build, but some sites (such as
+  extendedConnection) match many places, and may still need a closer look.
 - **IO80211 tables and imports:** the size and a short hash of the names of six IO80211 class tables, and whether every
   kernel function ForbiddenItlwm imports is present on this build.
 - **The Apple signature of bluetoothd.** While BTLEAdvFixup is loaded it patches bluetoothd in memory, so the signature
-  then reads as invalid. That's expected, and the report says so. A broken signature without BTLEAdvFixup means the
+  then reads as invalid. That's expected, and the report says so. BlueToolFixup patches bluetoothd in memory the
+  same way, so it reads as invalid with BlueToolFixup alone too. With neither loaded, a broken signature means the
   system files were modified, for example by OpenCore Legacy Patcher, so tell us if you use it.
 
-`RESULT: everything ... matches this build` means the code the kexts rely on is the same as on a supported build, so
-support can usually be added quickly. Anything else lists what differs, which is what we need to add it. Until a release
-adds your build, the driver keeps AirDrop off on it.
+`RESULT: everything ... matches this build` means every check the script makes passed. That's good evidence, so
+support can usually be added quickly, but it doesn't prove the build behaves the same: the script doesn't check
+everything, for example not BTLEAdvFixup's APFS and USB hooks. Anything else lists what differs, which is what we need to add it. Until a release
+adds your build, the driver keeps AirDrop off on it (unless it runs an "expected" Sequoia 15.8.x kernel, or you use
+`-itlawdlanybuild`).
 
 ## Unsupported macOS versions (Ventura and older)
 

@@ -49,6 +49,7 @@ struct Anchor { unsigned slot; uintptr_t expected; };
 int gAllowed = -1;
 bool gVerified = false;
 bool gForced = false;   // allowed only because of -itlawdlanybuild
+bool gAnyBuild = false; // -itlawdlanybuild is set
 const char *gStatus = "not-checked";
 
 bool vtableMatches()
@@ -107,6 +108,7 @@ bool itlAWDLBuildAllowed()
         return gAllowed == 1;
     int dummy = 0;
     const bool anyBuild = PE_parse_boot_argn("-itlawdlanybuild", &dummy, sizeof(dummy));
+    gAnyBuild = anyBuild;
     const ItlAWDL::BuildCheck build = ItlAWDL::checkBuild(version, nullptr);
     if (!vtableMatches()) {
         gStatus = "blocked: IO80211AWDLProtocol table differs";
@@ -139,13 +141,19 @@ bool itlAWDLBuildAllowed()
 // gVerified only says the kernel is on the list. The macOS build must pair with it too (audit P-A08);
 // kern.osversion can still be empty when the driver starts, so it's read here, when first needed (the
 // peer manager's start), and the answer kept once the build is known.
-// True when AirDrop runs only because the tester set -itlawdlanybuild on a build the driver hasn't verified.
-// From 0.6.0-beta.2 the master indication is sent there too, so the build can be tested for real; its request
-// layout is then unchecked, the risk the flag already carries (BOOT-FLAGS).
+// True when -itlawdlanybuild is set and AirDrop runs on a build the list doesn't verify as a pair: an unknown
+// kernel (allowed only by the flag), an "expected" Sequoia kernel, or a listed kernel with an unlisted macOS build.
+// The flag then makes the build behave like a verified one: the master indication copy (from 0.6.0-beta.2, unknown
+// kernels only; now all three cases) and the AirDrop packet counters run too. Both keep their runtime checks: the
+// copy's pointer is range-checked and the copy validated, and the counters only write once getPeerManager()
+// returns a real IO80211AWDLPeerManager (its vtable). The layouts behind them are otherwise unchecked, the risk
+// the flag carries (BOOT-FLAGS).
+bool itlAWDLBuildVerified();
 bool itlAWDLBuildForced()
 {
-    itlAWDLBuildAllowed();
-    return gForced;
+    if (!itlAWDLBuildAllowed())
+        return false;
+    return gForced || (gAnyBuild && !itlAWDLBuildVerified());
 }
 
 bool itlAWDLBuildVerified()
@@ -164,7 +172,8 @@ bool itlAWDLBuildVerified()
     if (!pairVerified) {
         snprintf(statusText, sizeof(statusText), "allowed: kernel verified, macOS build %s not verified", osBuild);
         gStatus = statusText;
-        IOLog("ForbiddenItlwm: AirDrop %s; the master indication copy stays off\n", gStatus);
+        IOLog("ForbiddenItlwm: AirDrop %s; the master indication copy and packet counters %s\n", gStatus,
+              gAnyBuild ? "run anyway (-itlawdlanybuild)" : "stay off");
     }
     return pairVerified == 1;
 }
