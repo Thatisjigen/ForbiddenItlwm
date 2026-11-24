@@ -52,6 +52,7 @@ subprocess.run(["python3", str(root / "tests/portable_rx/test-handoff.py")], che
 subprocess.run(["python3", str(root / "tests/portable_rx/test-handoff-rx.py")], check=True)
 # Several AWDL peers, each with its own receive Block Ack station (-itlawdlmultipeer).
 subprocess.run(["python3", str(root / "tests/awdl_multi_peer.py")], check=True)
+subprocess.run(["python3", str(root / "tests/awdl_second_channel.py")], check=True)
 # The Sonoma set needs a 14.8.9 bluetoothd. Point this at one to check it.
 if os.environ.get("FORBIDDEN_SONOMA_BLUETOOTHD"):
     subprocess.run(["python3", str(root / "tests/btleadv_patterns.py"), "--target", "sonoma",

@@ -574,6 +574,12 @@ static int awdlSchedSecondOffGen = -1, awdlSchedSecondLastErr;
 static uint32_t awdlSchedSecondRuns, awdlSchedSecondAway, awdlSchedSecondHome, awdlSchedSecondErrors,
     awdlSchedSecondRefused, awdlSchedSecondTxHeld;
 static uint64_t awdlSchedSecondTookSumUS, awdlSchedSecondTookMaxUS;
+// A PHY command can sleep with the gate released. Stop every listener submission while draining/switching.
+static bool awdlSchedSecondSwitching, awdlSchedSecondDraining;
+static uint32_t awdlSchedSecondBusy, awdlSchedSecondStale, awdlSchedSecondRx;
+static unsigned awdlSchedFollowArmedChannel;
+static uint32_t awdlSchedFollowArmedToken, awdlSchedFollowArmedPlan;
+static ItlAWDL::Clock awdlSchedFollowArmedClock;
 // -itlschedskew, measurement only: (1) how long our sync frames take from build (when their sync TLV
 // is stamped with the time) to TX completion; (2) while we are our own master, where the schedule peer puts the end
 // of each extended AW in its own sync TLV (its copy of our clock) against where our clock puts it: skew = its end -
@@ -8202,11 +8208,34 @@ static bool awdlCoexBlockIneligible(struct ieee80211com *ic, struct ieee80211_ch
     return false;
 }
 
+// Home-channel traffic must never enter a firmware queue during a retune or a listen-only visit.
+static bool awdlSchedSecondTxBlocked()
+{
+    return awdlSchedSecond && (awdlSchedSecondSwitching || awdlSchedSecondDraining || awdlSchedSecondTuned ||
+        awdlCoexPhyUncertainGen == awdlCoexGeneration);
+}
+
+// The ordinary home-channel mover must not dismantle a scheduled excursion or an armed departure.
+static bool awdlSchedSecondOwnsPhy()
+{
+    return awdlSchedSecond && (awdlSchedSecondSwitching || awdlSchedSecondDraining || awdlSchedSecondTuned ||
+        awdlSchedSpActive || awdlSchedSpAwaitStart || awdlSchedFollowArmed);
+}
+
+// An executed second-channel visit, not simply a channel that appeared in an old plan.
+static bool awdlSchedSecondReceiveChannel(struct ieee80211com *ic, unsigned channel)
+{
+    return awdlSchedSecond && awdlCoexAdded && awdlCoexMultiActive && !awdlSchedSecondSwitching &&
+        !awdlCoexTxHalted && awdlCoexGeneration == awdlSchedSpGen &&
+        awdlCoexPhyUncertainGen != awdlCoexGeneration && awdlSchedSecondTuned &&
+        channel < nitems(ic->ic_channels) && awdlSchedSecondTuned == &ic->ic_channels[channel];
+}
+
 static bool awdlCoexChannelEligible(struct ieee80211com *ic, struct ieee80211_channel *channel, const char *phase,
                                     int generation)
 {
     // -itlschedsecond: the listener's PHY is on the second channel for a run; our frames wait for the home channel.
-    if (channel && channel == awdlSchedSecondTuned) {
+    if (awdlSchedSecondTxBlocked()) {
         ++awdlSchedSecondTxHeld;
         return false;
     }
@@ -8320,6 +8349,13 @@ bool itlAWDLExecPlan(uint8_t *out)
         return false;
     }
     const bool ch6 = awdlSchedCh6 && !awdlSchedCh6Off && awdlSchedCh6Added && awdlSchedCh6Gen == awdlCoexGeneration;
+    // A simulated excursion replaces home slots too. Do not tell the peer we remain home in those slots;
+    // second-channel availability itself stays unadvertised until its TX/ACK path has been validated.
+    if (awdlSchedSecond && awdlSimSecondChan && awdlSchedSecondOffGen != awdlCoexGeneration) {
+        uint8_t secondPlan[16];
+        (void)ItlAWDL::secondChannelPlan(plan, awdlCoexChannel, awdlSchedSpStation, 0,
+                                       awdlSimSecondChan, awdlSimSecondMask, secondPlan);
+    }
     // while the AW extension is active, the extended plan (macOS's entries plus the 0 entries the
     // listener takes); the extension only turns 0 entries into ours, so channel 6 and the station's stay as they are.
     if (awdlSchedExtend && awdlSchedExtPlanUS && awdlUptimeUS() - awdlSchedExtPlanUS < kAwdlSchedExtHoldUS) {
@@ -9448,7 +9484,7 @@ bool ItlIwx::
 awdlCoexSendMgmt(struct iwx_softc *sc, const uint8_t *frame, size_t length, uint8_t kind)
 {
     struct ieee80211com *ic = &sc->sc_ic;
-    if (awdlUptimeUS() < awdlCoexTxPauseUntilUS)
+    if (awdlSchedSecondTxBlocked() || awdlUptimeUS() < awdlCoexTxPauseUntilUS)
         return false;
     if (awdlCoexQueue < 0 || awdlCoexQueue >= int(nitems(sc->txq)) || sc->txq[awdlCoexQueue].queued >= 64)
         return false;
@@ -10112,6 +10148,8 @@ void ItlIwx::
 awdlCoexBaHandle(struct iwx_softc *sc)
 {
 #if defined(ITL_AWDL_NATIVE)
+    if (awdlSchedSecondTxBlocked())
+        return;   // do not change peer width/filter state during a listen-only visit or a PHY command
     const int gen = sc->sc_generation;
     awdlPeerSlotsUsable = ItlAWDL::usablePeerSlots(awdlCoexMultiPeer, unsigned(sc->sc_capa_num_stations));
     if (awdlCoexBaGen != gen) {
@@ -11092,8 +11130,14 @@ iwx_rx_frame(struct iwx_softc *sc, mbuf_t m, int chanidx,
             if (awdlCoexRx && !mbuf_next(m) &&
                 ItlAWDL::parseAction(cf, coexLen, &coexAction) == ItlAWDL::ParseResult::Valid) {
                 const uint64_t heardUS = awdlUptimeUS();
-                const bool ourChannel = chanValid && unsigned(chanidx) == awdlCoexChannel;
                 const bool fromOwnAddr = awdlCoexAddrKnown && ItlAWDL::sameAddress(cf + 10, awdlCoexAddr);
+                const bool secondChannel = chanValid && awdlSchedSecondReceiveChannel(ic, unsigned(chanidx));
+                const bool ourChannel = chanValid && unsigned(chanidx) == awdlCoexChannel;
+                if (secondChannel) {
+                    ++awdlSchedSecondRx;
+                    if (!(cf[10] & 1) && !fromOwnAddr)
+                        awdlCoexPeerHeard(cf + 10, heardUS);
+                }
                 if (!fromOwnAddr && itlSvcTimingOn())
                     awdlSvcNoteResponses(cf, coexLen, heardUS);
                 if (awdlSchedClock && !fromOwnAddr) {   // every peer's election view and clock
@@ -11453,7 +11497,8 @@ iwx_rx_frame(struct iwx_softc *sc, mbuf_t m, int chanidx,
                 ItlAWDL::DataFrameView view;
                 const bool ch6Group = awdlCoexCh6Group && chanValid && (cf[4] & 1) && awdlSchedCh6 &&
                     unsigned(chanidx) == kAwdlSchedCh6Channel;
-                if (!chanValid || (unsigned(chanidx) != awdlCoexChannel && !ch6Group)) {
+                const bool secondChannel = chanValid && awdlSchedSecondReceiveChannel(ic, unsigned(chanidx));
+                if (!chanValid || (unsigned(chanidx) != awdlCoexChannel && !ch6Group && !secondChannel)) {
                     ++awdlCoexDataRxOffChannel;
                 } else if (!awdlCoexPeerKnown(cf + 10, awdlUptimeUS())) {
                     ++awdlCoexDataRxUnknownPeer;
@@ -11473,7 +11518,7 @@ iwx_rx_frame(struct iwx_softc *sc, mbuf_t m, int chanidx,
                         if ((cf[0] & 0xf0) == 0x80 && dataLen >= 26 && !(cf[4] & 1) && (cf[24] & 0x0f) < 8 &&
                             awdlCoexAddrKnown && ItlAWDL::sameAddress(cf + 4, awdlCoexAddr))
                             awdlPeer.rxTidLastUS[cf[24] & 7] = awdlPeer.lastUS;
-                        if (&awdlPeer != &awdlPeers[0] && !ch6Group) {
+                        if (&awdlPeer != &awdlPeers[0] && !ch6Group && !secondChannel) {
                             awdlPeer.scheduleRxUS = awdlPeer.lastUS;
                             if (awdlPeerScheduleCurrent(awdlPeer))
                                 awdlPeer.schedule.notePeerFrame(awdlPeer.scheduleRxUS);
@@ -11486,11 +11531,13 @@ iwx_rx_frame(struct iwx_softc *sc, mbuf_t m, int chanidx,
                         const uint32_t slot = ItlAWDL::clockEawAt(awdlSchedPlanClockNow, awdlUptimeUS(), nullptr) % 16;
                         ++(ch6Group ? awdlGroupRxSlotCh6 : awdlGroupRxSlotListener)[slot];
                     }
-                    if (!ch6Group && awdlCoexScheduleCurrent() && ItlAWDL::sameAddress(cf + 10, awdlCoexSchedPeer)) {
+                    if (!ch6Group && !secondChannel && awdlCoexScheduleCurrent() && ItlAWDL::sameAddress(cf + 10, awdlCoexSchedPeer)) {
                         awdlCoexSchedPeerRxUS = awdlUptimeUS();
                         awdlCoexPeerSchedule.notePeerFrame(awdlCoexSchedPeerRxUS);
                     }
                     ++awdlCoexDataRxDelivered;
+                    if (secondChannel)
+                        ++awdlSchedSecondRx;
                     awdlCoexLastDataUS = awdlUptimeUS();
                 } else {
                     ++awdlCoexDataRxMalformed;
@@ -14317,6 +14364,11 @@ iwx_tx(struct iwx_softc *sc, mbuf_t m, struct ieee80211_node *ni, int ac, int mo
     // Receive/queue-allocation experiments must not submit even incidental
     // network traffic to a newly allocated firmware queue.
     ItlAWDL::PeerSlot *aggSlot = awdlCoexData && !awdlRx ? awdlPeerForTxQueue(monitorQueue) : nullptr;
+    if ((aggSlot || (!awdlRx && awdlCoexTx && monitorQueue >= 0 && monitorQueue == awdlCoexQueue)) &&
+        awdlSchedSecondTxBlocked()) {
+        mbuf_freem(m);
+        return EAGAIN;
+    }
     if (aggSlot) {
         // A listener peer's aggregation queue: only AWDL data the pump converted, while the session is up.
         ItlAWDL::PeerSlot &awdlPeer = *aggSlot;
@@ -18417,17 +18469,18 @@ static void awdlSchedSpPublish()
         if (awdlSchedSecond) {
             // -itlschedsecond: the second channel's runs and what retuning the listener's PHY cost.
             const uint32_t retunes = awdlSchedSecondAway + awdlSchedSecondHome;
-            char sec[260];
+            char sec[420];
             snprintf(sec, sizeof(sec),
                      "%s%s second %u%s; runs %u, retunes away %u home %u (mean %llu us, max %llu us), refused %u, "
-                     "errors %u (last %d); our frames held while away %u",
+                     "errors %u (last %d); our frames held while away %u; drain waits %u, stale %u, second RX %u",
                      awdlSchedSecondOffGen >= 0 && awdlSchedSecondOffGen == awdlSchedSpGen ? "off for this generation, " : "",
                      awdlSimSecondChan ? "[SIMULATION]" : "on", awdlSchedSecondNow,
                      awdlSchedSecondTuned ? " (retuned now)" : "", awdlSchedSecondRuns, awdlSchedSecondAway,
                      awdlSchedSecondHome,
                      (unsigned long long)(retunes ? awdlSchedSecondTookSumUS / retunes : 0),
                      (unsigned long long)awdlSchedSecondTookMaxUS, awdlSchedSecondRefused, awdlSchedSecondErrors,
-                     awdlSchedSecondLastErr, awdlSchedSecondTxHeld);
+                     awdlSchedSecondLastErr, awdlSchedSecondTxHeld, awdlSchedSecondBusy, awdlSchedSecondStale,
+                     awdlSchedSecondRx);
             IORegistryEntry::getRegistryRoot()->setProperty("ITLAWDLSchedSecond", sec);
         }
     }
@@ -18441,6 +18494,9 @@ awdlSchedSpSend(struct iwx_softc *sc, uint32_t durationTU)
     struct iwx_node *in = (struct iwx_node *)ic->ic_bss;
     const int gen = sc->sc_generation;
     const uint64_t now = awdlUptimeUS();
+    if (awdlSchedSecond && (awdlSchedSpActive || awdlSchedSpAwaitStart || awdlCoexTxHalted ||
+                            awdlCoexStationTransitionGen == gen || awdlCoexPhyUncertainGen == gen))
+        return EBUSY;
     const uint32_t listenerMac = awdlSchedSpTargetMac == kAwdlSchedCh6MacId && awdlSchedCh6Added ? kAwdlSchedCh6MacId :
         awdlSchedHandle && awdlSchedHandleAdded ? kAwdlSchedHandleMacId : kAwdlCoexMacId;
     if (listenerMac == kAwdlSchedCh6MacId)
@@ -18482,6 +18538,7 @@ int ItlIwx::
 awdlSchedSpCancel(struct iwx_softc *sc)
 {
     const int gen = sc->sc_generation;
+    awdlSchedSecondDraining = false;
     if (!awdlSchedSp || !awdlSchedSpSent || awdlSchedSpGen != gen || !(awdlSchedSpActive || awdlSchedSpAwaitStart))
         return 0;
     struct iwx_session_prot_cmd cmd = {
@@ -18498,8 +18555,13 @@ awdlSchedSpCancel(struct iwx_softc *sc)
                                      sizeof(cmd), &cmd);
     if (gen != sc->sc_generation)
         return ECANCELED;
-    if (err)
+    if (err) {
         awdlSchedLeaveCancelErr = err;
+        if (awdlSchedSecond) {
+            awdlSchedSpOff = true;
+            awdlCoexTxHalted = true;
+        }
+    }
     awdlSchedSpPublish();
     return err;
 }
@@ -18535,6 +18597,7 @@ awdlSchedSpTick(struct iwx_softc *sc)
             awdlSchedSpNextUS = 0;
             awdlSchedSettledAtUS = 0;
             awdlSchedSecondTuned = nullptr;   // the new generation's listener PHY is set by its add
+            awdlSchedSecondSwitching = awdlSchedSecondDraining = false;
             awdlSchedSpGen = gen;
             ++awdlSchedResumes;
             awdlSchedSpState = "running (resumed after a firmware restart)";
@@ -18602,7 +18665,7 @@ awdlSchedSpTick(struct iwx_softc *sc)
             awdlSchedSpPublish();
         }
         if (pause) {
-            if (awdlSchedSecondTuned)   // -itlschedsecond: the listener's PHY back home while paused
+            if (awdlSchedSecondTuned || awdlSchedSecondDraining)   // restore, or abandon a departure still at home
                 (void)awdlSchedSecondRetune(sc, awdlCoexChannel);
             // the status and the listener's channel counts stay current while paused (every 10th tick).
             if (++awdlSchedPausedTicks % 10 == 0)
@@ -18637,7 +18700,7 @@ awdlSchedSpTick(struct iwx_softc *sc)
     const bool ready = !why && (!awdlSchedHandle || awdlSchedHandleEnsure(sc));
     if (!why && !ready)
         why = 8;
-    if (!ready && awdlSchedSecondTuned)   // -itlschedsecond: the listener's PHY back home while not following
+    if (!ready && (awdlSchedSecondTuned || awdlSchedSecondDraining))   // no stranded drain while not following
         (void)awdlSchedSecondRetune(sc, awdlCoexChannel);
     awdlStartNote(why, now, awdlSchedFollowStartedUS != 0);
     if (ready) {
@@ -19041,37 +19104,66 @@ awdlSchedSecondRetune(struct iwx_softc *sc, unsigned channel)
     struct ieee80211com *ic = &sc->sc_ic;
     struct iwx_phy_ctxt *own = &sc->sc_phyctxt[kAwdlCoexPhyId];
     const int gen = sc->sc_generation;
-    if (!awdlCoexMultiActive || !awdlCoexOwnChan || !own->channel || !channel || channel > 255 ||
-        awdlCoexPhyUncertainGen == gen || awdlCoexMovePending)
+    const uint32_t token = awdlCoexToken;
+    if (!awdlCoexAdded || !awdlCoexMultiActive || awdlCoexGeneration != gen || !awdlCoexOwnChan ||
+        !own->channel || !channel || channel >= nitems(ic->ic_channels) || awdlCoexTxHalted ||
+        awdlCoexPhyUncertainGen == gen || awdlCoexMovePending || awdlSchedSecondSwitching ||
+        awdlSchedSpActive || awdlSchedSpAwaitStart || awdlCoexStationTransitionGen == gen)
         return false;
     const bool home = channel == unsigned(ieee80211_chan2ieee(ic, awdlCoexOwnChan));
     struct ieee80211_channel *target = home ? awdlCoexOwnChan : &ic->ic_channels[channel];
     if (own->channel == target) {
         if (home)
             awdlSchedSecondTuned = nullptr;
+        awdlSchedSecondSwitching = false;
+        awdlSchedSecondDraining = false;
         return true;
     }
-    // The second channel only where the listener itself could be: an active 5 GHz channel, no radar, not no-IR
-    // (the firmware's regulatory answer stays final).
-    if (!home && (awdlSchedSecondOffGen == gen || !IEEE80211_IS_CHAN_5GHZ(target) || !isset(ic->ic_chan_active, channel) ||
-                  (target->ic_flags & (IEEE80211_CHAN_DFS | IEEE80211_CHAN_PASSIVE)) || awdlCoexNoIr(ic, channel))) {
+    // Keep firmware regulatory restrictions intact. A rejected away channel does not prevent returning home.
+    // Use the same firmware-map policy as ordinary listener setup. A passive flag alone is not a refusal
+    // when a beacon hint or the firmware's IR-concurrent permission and current association allow this channel.
+    if (!home && (awdlSchedSecondOffGen == gen || !IEEE80211_IS_CHAN_5GHZ(target) ||
+                  !awdlCoexChannelUsable(ic, channel))) {
         ++awdlSchedSecondRefused;
-        awdlSchedSecondOffGen = gen;   // not usable here: home runs only, for this generation
+        awdlSchedSecondOffGen = gen;
+        awdlSchedSecondDraining = false;
         awdlSchedSpPublish();
         return false;
     }
+    // A PHY MODIFY must not carry a home-channel frame onto the other channel. The final iwx_tx guard also
+    // enforces this barrier while firmware waits release the gate. Never flush or free queued frames here.
+    awdlSchedSecondDraining = true;
+    bool queued = awdlCoexInFlight || awdlCoexQueue < 0 || awdlCoexQueue >= int(nitems(sc->txq));
+    if (!queued)
+        queued = sc->txq[awdlCoexQueue].queued != 0;
+    for (const auto &peer : awdlPeers) {
+        if (peer.adding || peer.queueAllocPending || peer.resumePending)
+            queued = true;
+        if (peer.txQueue >= 0 && (peer.txQueue >= int(nitems(sc->txq)) || sc->txq[peer.txQueue].queued))
+            queued = true;
+    }
+    if (queued) {
+        ++awdlSchedSecondBusy;
+        return false;   // completions keep running; the next decision may retry or skip this run
+    }
+    awdlSchedSecondSwitching = true;
     struct ieee80211_channel *before = own->channel;
     own->channel = target;
     awdlCoexPhyWidth = home && awdlCoexOwnWidth == 80 ? IWX_PHY_VHT_CHANNEL_MODE80 : IWX_PHY_VHT_CHANNEL_MODE20;
     const uint64_t startUS = awdlUptimeUS();
     const int err = iwx_phy_ctxt_cmd(sc, own, 1, 1, IWX_FW_CTXT_ACTION_MODIFY, 0);
     awdlCoexPhyWidth = -1;
-    const uint64_t took = awdlUptimeUS() - startUS;
-    if (gen != sc->sc_generation)
-        return false;
+    if (gen != sc->sc_generation || token != awdlCoexToken || !awdlCoexAdded || awdlCoexGeneration != gen) {
+        ++awdlSchedSecondStale;
+        return false;   // a newer listener owns these globals; its lifecycle reset clears the old barrier
+    }
+    awdlSchedSecondSwitching = false;
+    awdlSchedSecondDraining = false;
     if (err) {
-        own->channel = before;
+        own->channel = before;   // software rollback is not proof that the firmware stayed on this channel
         awdlCoexPhyUncertainGen = gen;
+        awdlCoexTxHalted = true;
+        awdlSchedSpOff = true;
         awdlSchedSecondOffGen = gen;
         awdlSchedSecondLastErr = err;
         ++awdlSchedSecondErrors;
@@ -19083,25 +19175,34 @@ awdlSchedSecondRetune(struct iwx_softc *sc, unsigned channel)
         ++awdlSchedSecondHome;
     else
         ++awdlSchedSecondAway;
+    const uint64_t took = awdlUptimeUS() - startUS;
     awdlSchedSecondTookSumUS += took;
     if (took > awdlSchedSecondTookMaxUS)
         awdlSchedSecondTookMaxUS = took;
+    awdlSchedSpPublish();
     return true;
 }
 
 void ItlIwx::
 awdlSchedFollowPlan(struct iwx_softc *sc, uint64_t nowUS)
 {
+    if (awdlSchedSecondSwitching)
+        return;
+    const int decisionGen = sc->sc_generation;
+    const uint32_t decisionToken = awdlCoexToken;
+    uint32_t decisionPlan = 0;
     if (awdlSchedAwdlOff()) {
         // macOS has AWDL off; an armed send finds this too and is dropped as stale.
         ++awdlSchedOffSkips;
-        if (awdlSchedSecondTuned)
+        if (awdlSchedSecondTuned || awdlSchedSecondDraining)
             (void)awdlSchedSecondRetune(sc, awdlCoexChannel);
         return;
     }
-    if (awdlSchedFollowArmed && awdlSchedFollowArmedGen == sc->sc_generation)
+    const bool requestPending = awdlSchedFollowArmed && awdlSchedFollowArmedGen == sc->sc_generation;
+    if (requestPending && !awdlSchedSecond)
         return;   // a timed send is pending
-    awdlSchedFollowArmed = false;
+    if (!requestPending)
+        awdlSchedFollowArmed = false;
     awdlSchedSpTargetMac = kAwdlCoexMacId;   // the 149 handle unless channel 6's run comes first
     ItlAWDL::FollowDecision d;
     bool secondRun = false;   // d is a run on the second channel (-itlschedsecond)
@@ -19145,6 +19246,7 @@ awdlSchedFollowPlan(struct iwx_softc *sc, uint64_t nowUS)
         memcpy(plan, itlAWDLPlanChannels, sizeof(plan));
         __atomic_thread_fence(__ATOMIC_SEQ_CST);
         const bool usable = before && !(before & 1) && before == itlAWDLPlanVersion;
+        decisionPlan = usable ? before : 0;
         if (before && !usable)
             ++awdlSchedPlanTorn;
         if (usable && before != awdlSchedPlanVersionSeen) {
@@ -19290,19 +19392,28 @@ awdlSchedFollowPlan(struct iwx_softc *sc, uint64_t nowUS)
             }
         }
     }
+    if (awdlSchedSecond && (awdlSchedSpActive || awdlSchedSpAwaitStart || requestPending))
+        return;   // clocks above stay current even while the timer owns the next request
     // -itlschedsecond: the listener's PHY goes to the run's channel before its session is asked for (no session runs
     // now: one at a time), and home for anything else on the listener's handle. Channel 6's runs use their own PHY.
-    if (awdlSchedSecond && (secondRun || awdlSchedSecondTuned) && awdlSchedSpTargetMac != kAwdlSchedCh6MacId) {
-        const bool away = secondRun && (d.action == ItlAWDL::FollowAction::SendNow ||
-                                        d.action == ItlAWDL::FollowAction::Arm);
+    if (d.action != ItlAWDL::FollowAction::Arm && awdlSchedSecond &&
+        (secondRun || awdlSchedSecondTuned || awdlSchedSecondDraining) &&
+        awdlSchedSpTargetMac != kAwdlSchedCh6MacId) {
+        const bool away = secondRun && d.action == ItlAWDL::FollowAction::SendNow;
         if (!awdlSchedSecondRetune(sc, away ? awdlSchedSecondNow : awdlCoexChannel))
             return;   // tried again on the next tick (or off for this generation)
+        if (decisionGen != sc->sc_generation || decisionToken != awdlCoexToken ||
+            (decisionPlan && decisionPlan != itlAWDLPlanVersion) || awdlSchedPaused || awdlSchedAwdlOff() ||
+            awdlCoexStationTransitionGen == sc->sc_generation || awdlCoexTxHalted) {
+            ++awdlSchedSecondStale;
+            return;
+        }
         if (away)
             ++awdlSchedSecondRuns;
     }
     switch (d.action) {
     case ItlAWDL::FollowAction::SendNow: {
-        const uint32_t tu = ItlAWDL::followDurationTU(nowUS, d.endUS);
+        const uint32_t tu = ItlAWDL::followDurationTU(awdlUptimeUS(), d.endUS);
         awdlSchedSpRunStartUS = d.runStartUS;
         if (tu && awdlSchedSpSend(sc, tu) == 0) {
             awdlSchedSpPlannedEndUS = d.endUS;
@@ -19313,6 +19424,10 @@ awdlSchedFollowPlan(struct iwx_softc *sc, uint64_t nowUS)
     }
     case ItlAWDL::FollowAction::Arm:
         awdlSchedFollowArmedMac = awdlSchedSpTargetMac;
+        awdlSchedFollowArmedChannel = secondRun ? awdlSchedSecondNow : awdlCoexChannel;
+        awdlSchedFollowArmedToken = decisionToken;
+        awdlSchedFollowArmedPlan = decisionPlan;
+        awdlSchedFollowArmedClock = awdlSchedPlanClockNow;
         awdlSchedFollowArmed = true;
         awdlSchedFollowArmedGen = sc->sc_generation;
         awdlSchedFollowSendAtUS = d.sendAtUS;
@@ -19360,29 +19475,63 @@ awdlSchedFollowTask(void *arg)
     }
     if (awdlStopping || !awdlSchedFollowArmed)
         return;
+    const int requestGen = awdlSchedFollowArmedGen;
+    const uint32_t requestToken = awdlSchedFollowArmedToken, requestPlan = awdlSchedFollowArmedPlan;
+    const uint32_t requestMac = awdlSchedFollowArmedMac;
+    const unsigned requestChannel = awdlSchedFollowArmedChannel;
+    const uint64_t requestEndUS = awdlSchedFollowEndUS, requestSendUS = awdlSchedFollowSendAtUS;
+    const uint64_t requestRunUS = awdlSchedFollowArmedRunStartUS;
+    const ItlAWDL::Clock requestClock = awdlSchedFollowArmedClock;
     awdlSchedFollowArmed = false;
     ++awdlSchedFollowFired;
     const uint64_t now = awdlUptimeUS();
-    const uint32_t tu = ItlAWDL::followDurationTU(now, awdlSchedFollowEndUS);
-    if (awdlSchedFollowArmedGen != sc->sc_generation || awdlSchedSpOff || awdlSchedSpActive || awdlSchedSpAwaitStart ||
+    uint32_t tu = ItlAWDL::followDurationTU(now, requestEndUS);
+    if (requestGen != sc->sc_generation ||
+        (awdlSchedSecond && (requestToken != awdlCoexToken || requestPlan != itlAWDLPlanVersion ||
+         requestClock.anchorEaw != awdlSchedPlanClockNow.anchorEaw ||
+         requestClock.anchorEndUS != awdlSchedPlanClockNow.anchorEndUS ||
+         requestClock.eawUS != awdlSchedPlanClockNow.eawUS ||
+         awdlSchedPaused || awdlCoexTxHalted ||
+         sc->sc_ic.ic_state != IEEE80211_S_RUN || awdlCoexStationTransitionGen == sc->sc_generation)) ||
+        awdlSchedSpOff || awdlSchedSpActive || awdlSchedSpAwaitStart ||
         awdlCoexMovePending || !awdlCoexMultiActive || !tu || awdlSchedAwdlOff() ||
         (sc->sc_flags & (IWX_FLAG_HW_ERR | IWX_FLAG_SHUTDOWN | IWX_FLAG_RFKILL))) {
         if (awdlSchedAwdlOff())
             ++awdlSchedOffStale;
         ++awdlSchedFollowStale;
+        awdlSchedSecondDraining = false;
         awdlSchedSpPublish();
         return;
     }
-    const uint64_t late = now > awdlSchedFollowSendAtUS ? now - awdlSchedFollowSendAtUS : 0;
+    if (awdlSchedSecond && requestMac != kAwdlSchedCh6MacId) {
+        if (!that->awdlSchedSecondRetune(sc, requestChannel)) {
+            // Queues may still be draining; recompute the run on the regular tick instead of sending on the old PHY.
+            ++awdlSchedFollowStale;
+            return;
+        }
+        // MODIFY can sleep: recheck the run and listener after it, and calculate duration from the new time.
+        tu = ItlAWDL::followDurationTU(awdlUptimeUS(), requestEndUS);
+        if (!tu || requestGen != sc->sc_generation ||
+            requestToken != awdlCoexToken || requestPlan != itlAWDLPlanVersion ||
+            requestClock.anchorEaw != awdlSchedPlanClockNow.anchorEaw ||
+            requestClock.anchorEndUS != awdlSchedPlanClockNow.anchorEndUS ||
+            requestClock.eawUS != awdlSchedPlanClockNow.eawUS ||
+            awdlCoexTxHalted || awdlSchedPaused || awdlSchedAwdlOff() ||
+            awdlCoexStationTransitionGen == sc->sc_generation) {
+            ++awdlSchedSecondStale;
+            return;
+        }
+    }
+    const uint64_t late = now > requestSendUS ? now - requestSendUS : 0;
     ++awdlSchedFollowLateN;
     awdlSchedFollowLateSumUS += late;
     if (late > awdlSchedFollowLateMaxUS)
         awdlSchedFollowLateMaxUS = late;
-    awdlSchedSpTargetMac = awdlSchedFollowArmedMac;   // the run's own handle
-    awdlSchedSpRunStartUS = awdlSchedFollowArmedRunStartUS;
+    awdlSchedSpTargetMac = requestMac;   // the run's own handle
+    awdlSchedSpRunStartUS = requestRunUS;
     if (that->awdlSchedSpSend(sc, tu) == 0) {
         ++awdlSchedFollowAligned;
-        awdlSchedSpPlannedEndUS = awdlSchedFollowEndUS;
+        awdlSchedSpPlannedEndUS = requestEndUS;
     }
 }
 
@@ -19390,6 +19539,10 @@ void ItlIwx::
 awdlCoexRetarget(struct iwx_softc *sc)
 {
     const int gen = sc->sc_generation;
+    // A scheduled excursion is not a new home-channel choice. Do not tear down peers or the listener while
+    // the follower owns its PHY/session, including the firmware wait that releases the gate.
+    if (awdlSchedSecondOwnsPhy())
+        return;
     if (!awdlCoexMultiActive || !awdlCoexAdded || awdlCoexGeneration != gen || awdlCoexAddingGen == gen ||
         awdlCoexRemovingGen == gen || awdlCoexPhyUncertainGen == gen || awdlCoexBrokenGeneration == gen ||
         awdlStopping) {
@@ -19400,7 +19553,9 @@ awdlCoexRetarget(struct iwx_softc *sc)
     struct iwx_phy_ctxt *own = &sc->sc_phyctxt[kAwdlCoexPhyId];
     uint8_t width = IWX_PHY_VHT_CHANNEL_MODE20;
     const int want = awdlCoexPickOwn(sc, &width);
-    const int have = own->channel ? ieee80211_chan2ieee(ic, own->channel) : 0;
+    // -itlschedsecond: the PHY may be on the second channel for a run; the home choice is awdlCoexOwnChan.
+    struct ieee80211_channel *homeChan = awdlSchedSecond ? awdlCoexOwnChan : own->channel;
+    const int have = homeChan ? ieee80211_chan2ieee(ic, homeChan) : 0;
     const int haveWidth = awdlCoexOwnWidth;
     // The scheduler stopped (or isn't running in this generation) while the listener uses the overlap exception at
     // 80 MHz: going back to 20 MHz on the same channel is a safety step, so it skips the settle, quiet and cooldown
@@ -19540,6 +19695,7 @@ awdlCoexRetarget(struct iwx_softc *sc)
     awdlCoexOwnChan = own->channel;
     awdlCoexOwnWidth = width == IWX_PHY_VHT_CHANNEL_MODE80 ? 80 : 20;
     awdlSchedSecondTuned = nullptr;
+    awdlSchedSecondSwitching = awdlSchedSecondDraining = false;
     awdlCoexPeerSchedule.reset();
     awdlCoexChannel = want;
     if (awdlCoexTx)
@@ -19627,6 +19783,7 @@ awdlCoexListener(struct iwx_softc *sc, bool add)
         awdlCoexMultiActive = false;
         awdlCoexOwnChan = nullptr;
         awdlSchedSecondTuned = nullptr;
+        awdlSchedSecondSwitching = awdlSchedSecondDraining = false;
         awdlCoexMovePending = false;
         awdlCoexSameChannelProbe.noteApplied(false, awdlUptimeUS());
         awdlCoexSameChannelProbe.restorePending = false;
@@ -19710,6 +19867,7 @@ awdlCoexListener(struct iwx_softc *sc, bool add)
         awdlCoexOwnChan = nullptr;
         awdlCoexMovePending = false;
     awdlSchedSecondTuned = nullptr;   // add or removal: the listener's PHY is set again or goes
+    awdlSchedSecondSwitching = awdlSchedSecondDraining = false;
     if (add && awdlCoexMulti) {
         uint8_t ownWidth = IWX_PHY_VHT_CHANNEL_MODE20;
         const int ownNumber = awdlCoexPickOwn(sc, &ownWidth);
@@ -19740,11 +19898,13 @@ awdlCoexListener(struct iwx_softc *sc, bool add)
                 awdlCoexOwnChan = target;
                 awdlCoexOwnWidth = ownWidth == IWX_PHY_VHT_CHANNEL_MODE80 ? 80 : 20;
                 awdlSchedSecondTuned = nullptr;
+                awdlSchedSecondSwitching = awdlSchedSecondDraining = false;
                 awdlCoexLastMoveUS = awdlUptimeUS();
             }
             if (!stillWanted()) {
                 awdlCoexOwnChan = nullptr;
                 awdlSchedSecondTuned = nullptr;
+                awdlSchedSecondSwitching = awdlSchedSecondDraining = false;
                 awdlCoexMovePending = false;
                 awdlCoexMultiState = "add-cancelled";
                 awdlCoexPublish();
@@ -19906,6 +20066,7 @@ awdlCoexListener(struct iwx_softc *sc, bool add)
         awdlCoexAddrApplied = false;
         awdlCoexOwnChan = nullptr;
         awdlSchedSecondTuned = nullptr;
+        awdlSchedSecondSwitching = awdlSchedSecondDraining = false;
         awdlCoexMovePending = false;
         if (awdlCoexMultiActive)
             awdlCoexMultiState = "removed";

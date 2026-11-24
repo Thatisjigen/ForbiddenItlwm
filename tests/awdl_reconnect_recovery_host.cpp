@@ -98,6 +98,7 @@ static uint32_t awdlCoexAddsAfterRemove, awdlCoexAddsAfterRestart;
 static bool awdlCoexLostToRestart;
 static uint64_t awdlCoexLastMoveUS;
 static ieee80211_channel *awdlCoexOwnChan;
+static bool awdlSchedSecondSwitching, awdlSchedSecondDraining;
 static ieee80211_channel *awdlSchedSecondTuned;   // -itlschedsecond: reset by the listener add and removal
 static const char *awdlCoexMultiState;
 static ItlAWDL::PeerHandoff awdlCoexPeerHandoff;
