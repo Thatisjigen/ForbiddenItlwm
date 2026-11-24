@@ -588,7 +588,8 @@ static uint32_t awdlSchedSecondVariant;
 // ends. Without the flag a visit holds every frame, as before.
 static bool awdlSchedSecondTx;
 static ItlAWDL::TxPassList awdlSchedSecondPass;
-static uint32_t awdlSchedSecondTxSent, awdlSchedSecondTxRefused, awdlSchedSecondTxNearEnd, awdlSchedSecondPassPeak;
+static uint32_t awdlSchedSecondTxSent, awdlSchedSecondTxRefused, awdlSchedSecondTxNearEnd, awdlSchedSecondPassPeak,
+    awdlSchedSecondTxIdle;
 static constexpr uint64_t kAwdlSchedSecondTxStopUS = 4000;
 static bool awdlSchedSecondBootOff;
 static uint64_t awdlSchedSpEndedUS;
@@ -8938,6 +8939,15 @@ awdlCoexDataPump(struct iwx_softc *sc, unsigned budget)
                 (void)awdlSchedSecondPass.add(awdlPeers[i].addr);
         if (awdlSchedSecondPass.count > awdlSchedSecondPassPeak)
             awdlSchedSecondPassPeak = awdlSchedSecondPass.count;
+        if (!awdlSchedSecondPass.count) {
+            // Nobody to send to here: leave awdl0's queue as it is, as a listen-only visit does. Parking every
+            // frame for the visit filled the park ring (2048) under bulk traffic; back home, the iPhone's frames
+            // held by its schedule then kept it full and a held frame at the head stopped everything behind it,
+            // the Mac's mDNS answers included (iPhone: resolve failed, NWError -65553).
+            ++awdlSchedSecondTxIdle;
+            (void)itlAWDLServiceTransmit(getController());
+            return;
+        }
     } else if (awdlSchedSecondPass.active) {
         awdlSchedSecondPass.clear();
     }
@@ -8983,7 +8993,7 @@ awdlCoexDataPump(struct iwx_softc *sc, unsigned budget)
                 awdlCoexGateLimitUS = 0;
             }
         }
-    } else {
+    } else if (!away) {   // a visit leaves the gate's state for home as it was
         awdlCoexGateSinceUS = 0;
         awdlCoexGateKind = 0;
     }
@@ -18567,7 +18577,7 @@ static void awdlSchedSpPublish()
                      "(last ch %u why 0x%x flags 0x%x), "
                      "errors %u (last %d); our frames held while away %u; drain waits %u, stale %u, second RX %u; "
                      "variant %u: settle waits %u, peer removals %u, MAC errors %u; "
-                     "tx there %s: sent %u, refused %u, not open %u, peers there peak %u",
+                     "tx there %s: sent %u, refused %u, not open %u, nobody there %u, peers there peak %u",
                      awdlSchedSecondBootOff ? "off for this boot (a retune failed), " :
                      awdlSchedSecondOffGen >= 0 && awdlSchedSecondOffGen == awdlSchedSpGen ? "off for this generation, " : "",
                      awdlSimSecondChan ? "[SIMULATION]" : "on", awdlSchedSecondNow,
@@ -18580,7 +18590,8 @@ static void awdlSchedSpPublish()
                      awdlSchedSecondLastErr, awdlSchedSecondTxHeld, awdlSchedSecondBusy, awdlSchedSecondStale,
                      awdlSchedSecondRx, awdlSchedSecondVariant, awdlSchedSecondSettleWaits,
                      awdlSchedSecondPeerRemovals, awdlSchedSecondMacErrors, awdlSchedSecondTx ? "on" : "off",
-                     awdlSchedSecondTxSent, awdlSchedSecondTxRefused, awdlSchedSecondTxNearEnd, awdlSchedSecondPassPeak);
+                     awdlSchedSecondTxSent, awdlSchedSecondTxRefused, awdlSchedSecondTxNearEnd, awdlSchedSecondTxIdle,
+                     awdlSchedSecondPassPeak);
             IORegistryEntry::getRegistryRoot()->setProperty("ITLAWDLSchedSecond", sec);
         }
     }

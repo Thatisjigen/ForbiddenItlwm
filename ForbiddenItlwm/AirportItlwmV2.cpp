@@ -1153,7 +1153,13 @@ bool ItlAWDLInterface::popTransmit(uint8_t *output, size_t available, size_t *wr
         const bool behindParked = parkedAt >= 0;
         if (held || behindParked) {
             const bool shortFrame = *written < 1200;
-            if (parkedFrames && parkedUsed < parkedFrameCount && (behindParked || parkedPeerCount < parkedPeerMax)) {
+            // A frame held only by the pass list (another channel) may use half the ring: the rest stays for the
+            // home channel's own holds, so a visit can't fill it and stop awdl0 behind a held frame once home.
+            const bool passOnly = !(unicastData && holdPayloadFor && ItlAWDL::sameAddress(output + 4, holdPayloadFor)) &&
+                pass && pass->holds(output + 4);
+            const bool roomForPass = !passOnly || parkedUsed < parkedFrameCount / 2;
+            if (parkedFrames && parkedUsed < parkedFrameCount && roomForPass &&
+                (behindParked || parkedPeerCount < parkedPeerMax)) {
                 const unsigned index = (parkedHead + parkedUsed) % parkedFrameCount;
                 auto &slot = parkedFrames[index];
                 slot.length = frame.length;
@@ -1226,6 +1232,7 @@ bool ItlAWDLInterface::serviceTransmit()
         setProperty("ItlwmAWDLTxDropped", transmitDropped, 32);
         setProperty("ItlwmAWDLTxParked", transmitParked, 32);
         setProperty("ItlwmAWDLTxParkedPeak", parkedPeak, 32);
+        setProperty("ItlwmAWDLTxParkTableFull", parkedTableFull, 32);
         setProperty("ItlwmAWDLTxPassedParked", transmitPassed, 32);
         if (auto *depths = OSData::withBytes(transmitDepthBins, sizeof(transmitDepthBins))) {
             setProperty("ItlwmAWDLTxDepthBins", depths);
