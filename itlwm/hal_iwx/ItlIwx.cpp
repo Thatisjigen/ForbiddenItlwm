@@ -131,6 +131,7 @@ extern bool itlAWDLDefaults();
 #include <AWDLPeerSlot.hpp>
 #include <AWDLChannelMix.hpp>
 #include <AWDLRxDup.hpp>
+#include <AWDLChainRssi.hpp>
 #include <AWDLServiceMerge.hpp>
 #include <AWDLSameChannelProbe.hpp>
 
@@ -7158,9 +7159,30 @@ static bool awdlCoexPeerKnown(const uint8_t *addr, uint64_t nowUS, bool refresh 
     }
     return false;
 }
+// ITLAWDLChainRssi (AWDLChainRssi.hpp): received signal per antenna for AWDL frames and for the AP's, and the
+// antenna every management frame, AWDL's too, goes out on.
+static ItlAWDL::ChainRssi awdlChainAwdl, awdlChainSta;
+static uint8_t awdlMgmtAntIdx, awdlValidTxAnt;
+static uint32_t awdlMgmtAntToggles;
+
+static void awdlChainPublish(IORegistryEntry *root)
+{
+    char text[400];
+    const auto &w = awdlChainAwdl, &s = awdlChainSta;
+    snprintf(text, sizeof(text),
+             "awdl %u: A %d (%d..%d) n %u, B %d (%d..%d) n %u, A >=10 dB ahead %u, B ahead %u, only A %u, only B %u; "
+             "ap %u: A %d n %u, B %d n %u, A ahead %u, B ahead %u; mgmt tx antenna %c (valid 0x%x), toggles %u",
+             w.frames, w.meanA(), w.nA ? w.minA : 0, w.nA ? w.maxA : 0, w.nA, w.meanB(), w.nB ? w.minB : 0,
+             w.nB ? w.maxB : 0, w.nB, w.aAhead10, w.bAhead10, w.onlyA, w.onlyB,
+             s.frames, s.meanA(), s.nA, s.meanB(), s.nB, s.aAhead10, s.bAhead10,
+             awdlMgmtAntIdx == 0 ? 'A' : awdlMgmtAntIdx == 1 ? 'B' : '?', awdlValidTxAnt, awdlMgmtAntToggles);
+    root->setProperty("ITLAWDLChainRssi", text);
+}
+
 static void awdlCoexPublish()
 {
     auto *root = IORegistryEntry::getRegistryRoot();
+    awdlChainPublish(root);
     root->setProperty("ITLAWDLCoexAdded", awdlCoexAdded);
     root->setProperty("ITLAWDLCoexSameChannelProbeEnabled", awdlCoexSameChannelProbe.enabled);
     root->setProperty("ITLAWDLCoexSameChannelProbeLive", awdlCoexSameChannelProbe.applied);
@@ -12132,6 +12154,19 @@ iwx_rx_mpdu_mq(struct iwx_softc *sc, mbuf_t m, void *pktdata,
     }
     
     rssi = iwx_rxmq_get_signal_strength(sc, desc);
+    {
+        // Both antennas' signal, AWDL frames and the AP's apart (ITLAWDLChainRssi).
+        const uint8_t eA = sc->sc_device_family >= IWX_DEVICE_FAMILY_AX210 ? desc->v3.energy_a : desc->v1.energy_a;
+        const uint8_t eB = sc->sc_device_family >= IWX_DEVICE_FAMILY_AX210 ? desc->v3.energy_b : desc->v1.energy_b;
+        if (mbuf_len(m) >= 24) {
+            static const uint8_t awdlBssid[6] = {0x00, 0x25, 0x00, 0xff, 0x94, 0x73};
+            const uint8_t *hdr = mtod(m, const uint8_t *);
+            if (!memcmp(hdr + 16, awdlBssid, 6))
+                awdlChainAwdl.note(eA, eB);
+            else if (ic->ic_bss && ic->ic_state == IEEE80211_S_RUN && IEEE80211_ADDR_EQ(hdr + 10, ic->ic_bss->ni_macaddr))
+                awdlChainSta.note(eA, eB);
+        }
+    }
     rssi = (0 - IWX_MIN_DBM) + rssi;    /* normalize */
     rssi = MIN(rssi, ic->ic_max_rssi);    /* clip to max. 100% */
     
@@ -13583,6 +13618,11 @@ iwx_toggle_tx_ant(struct iwx_softc *sc, uint8_t *ant)
             *ant = ind;
             break;
         }
+    }
+    if (ant == &sc->sc_mgmt_last_antenna_idx) {
+        awdlMgmtAntIdx = *ant;
+        awdlValidTxAnt = valid;
+        ++awdlMgmtAntToggles;
     }
 }
 
