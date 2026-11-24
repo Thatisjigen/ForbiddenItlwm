@@ -473,6 +473,7 @@ public:
     int    awdlSchedSpSend(struct iwx_softc *, uint32_t durationTU);
     int    awdlSchedSpCancel(struct iwx_softc *);
     void   awdlSchedFollowPlan(struct iwx_softc *, uint64_t nowUS);
+    bool   awdlSchedSecondRetune(struct iwx_softc *, unsigned channel);
     int    awdlSchedHandleMac(struct iwx_softc *, uint32_t action);
     bool   awdlSchedHandleEnsure(struct iwx_softc *);
     bool   awdlSchedCh6Ensure(struct iwx_softc *);

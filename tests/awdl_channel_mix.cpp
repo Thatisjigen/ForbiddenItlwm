@@ -86,5 +86,45 @@ int main() {
         assert(!found);
         cases += 2;
     }
+    // -itlschedsecond: the second channel's runs. A mixed plan (state 8's types on 149 home, 44 common).
+    {
+        uint8_t plan[16] = {149, 149, 149, 149, 149, 149, 6, 6, 36, 44, 149, 44, 44, 44, 6, 6}, sec[16];
+        uint8_t copy[16];
+        memcpy(copy, plan, 16);
+        assert(secondChannelPlan(plan, 149, 36, 44, 0, 0, sec) == 44);
+        assert(!memcmp(plan, copy, 16));                                       // real: the plan isn't changed
+        for (unsigned i = 0; i < 16; ++i)
+            assert(sec[i] == (plan[i] == 44 ? 44 : 0));
+        // never the home or the Wi-Fi channel, never 2.4 GHz; none named: 0 and an empty plan
+        assert(!secondChannelPlan(plan, 149, 36, 149, 0, 0, sec) && !secondChannelPlan(plan, 149, 44, 44, 0, 0, sec));
+        assert(!secondChannelPlan(plan, 149, 36, 6, 0, 0, sec) && !secondChannelPlan(plan, 149, 36, 0, 0, 0, sec));
+        for (unsigned i = 0; i < 16; ++i)
+            assert(!sec[i]);
+        uint8_t no44[16] = {149, 0, 0, 0, 0, 0, 0, 0, 6, 0, 149, 0, 0, 0, 0, 0};
+        assert(!secondChannelPlan(no44, 149, 36, 44, 0, 0, sec));              // named but no entry on it
+        cases += 6;
+    }
+    {
+        // simulation: masked entries on the home channel move; others (Wi-Fi, 6, 0) stay.
+        uint8_t idle[16] = {36, 36, 149, 0, 0, 0, 0, 36, 6, 36, 149, 36, 0, 0, 0, 36}, sec[16];
+        assert(secondChannelPlan(idle, 149, 36, 0, 44, 0x0c00, sec) == 44);
+        assert(idle[10] == 44 && idle[11] == 36 && idle[2] == 149 && sec[10] == 44 && !sec[11] && !sec[2]);
+        uint8_t busy[16];
+        memset(busy, 149, 16);
+        busy[8] = 6;
+        assert(secondChannelPlan(busy, 149, 36, 0, 44, 0x0c00, sec) == 44);
+        unsigned on149 = 0, on44 = 0;
+        for (unsigned i = 0; i < 16; ++i)
+            on149 += busy[i] == 149, on44 += sec[i] == 44;
+        assert(on149 == 13 && on44 == 2 && busy[8] == 6);
+        // the simulated channel overrides what the plan names; refused when it is home or Wi-Fi
+        uint8_t again[16];
+        memset(again, 149, 16);
+        assert(!secondChannelPlan(again, 149, 36, 44, 149, 0x0c00, sec) && again[10] == 149);
+        assert(!secondChannelPlan(again, 149, 36, 44, 36, 0x0c00, sec) && again[10] == 149);
+        assert(!secondChannelPlan(again, 0, 36, 44, 44, 0x0c00, sec) && again[10] == 149);   // no listener yet
+        assert(secondChannelPlan(again, 149, 36, 0, 44, 0x0001, sec) == 44 && again[0] == 44 && sec[0] == 44);
+        cases += 8;
+    }
     printf("AWDL channel mix: %u cases passed (host only)\n", cases);
 }

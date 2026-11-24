@@ -148,4 +148,33 @@ struct PeerChannelMix {
     }
 };
 
+// -itlschedsecond (step 2): the runs of the listener's plan on a second 5 GHz channel, which the listener's own PHY
+// context is retuned to for each run and back after. `planSecond` is the second channel macOS's plan names (PlanMix),
+// never the listener's `home` or the Mac's Wi-Fi `station` channel. Test only (itlsimsecond): `simChannel` takes the
+// place of a second channel, and the entries in `simMask` that are on `home` move to it in `listenerPlan`, so the cost
+// of retuning can be measured without a device on that channel. Returns the second channel, or 0 when the plan has no
+// entry on it; `secondPlan` holds only its entries.
+inline unsigned secondChannelPlan(uint8_t (&listenerPlan)[16], unsigned home, unsigned station, unsigned planSecond,
+                                  unsigned simChannel, uint16_t simMask, uint8_t (&secondPlan)[16]) {
+    memset(secondPlan, 0, sizeof(secondPlan));
+    unsigned second = 0;
+    if (simChannel) {
+        if (!isFiveGHz(simChannel) || simChannel == home || simChannel == station || !home)
+            return 0;
+        for (unsigned i = 0; i < 16; ++i)
+            if ((simMask >> i & 1) && listenerPlan[i] == home)
+                listenerPlan[i] = uint8_t(simChannel);
+        second = simChannel;
+    } else if (isFiveGHz(planSecond) && planSecond != home && planSecond != station) {
+        second = planSecond;
+    }
+    unsigned entries = 0;
+    for (unsigned i = 0; second && i < 16; ++i)
+        if (listenerPlan[i] == second) {
+            secondPlan[i] = uint8_t(second);
+            ++entries;
+        }
+    return entries ? second : 0;
+}
+
 }  // namespace ItlAWDL
