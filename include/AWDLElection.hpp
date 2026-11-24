@@ -120,6 +120,22 @@ inline uint64_t clockEawStart(const Clock &c, uint32_t eaw) {
     return uint64_t(int64_t(c.anchorEndUS) + steps * int64_t(c.eawUS));
 }
 
+// How far clock `b` puts each extended AW from where clock `a` puts the same one (b minus a, in us). A clock
+// re-anchored on a newer sync frame from the same master moves only by the drift between them (microseconds);
+// a different master or numbering moves it by whole windows.
+inline int64_t clockShiftUS(const Clock &a, const Clock &b) {
+    return int64_t(b.anchorEndUS - a.anchorEndUS) - int64_t(int32_t(b.anchorEaw - a.anchorEaw)) * int64_t(a.eawUS);
+}
+
+// Whether a run timed on clock `a` is still where clock `b` puts it: the same window length and every window
+// within `toleranceUS`.
+inline bool clockSameWithin(const Clock &a, const Clock &b, uint64_t toleranceUS) {
+    if (a.eawUS != b.eawUS)
+        return false;
+    const int64_t s = clockShiftUS(a, b);
+    return uint64_t(s < 0 ? -s : s) <= toleranceUS;
+}
+
 // A clock taken from a peer's sync TLV heard at `heardUS`: the AW counter it carries, and the TU left until
 // its current extended AW ends (as PeerSchedule::note).
 inline Clock clockFromSync(const PeerSyncInfo &s, uint64_t heardUS) {

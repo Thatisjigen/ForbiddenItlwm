@@ -103,6 +103,10 @@ static ItlAWDL::TxPassList awdlSchedSecondPass;
 static constexpr uint64_t kAwdlSchedSecondTxStopUS = 4000;
 static unsigned awdlSchedFollowFired, awdlSchedOffStale, awdlSchedFollowStale, awdlSchedFollowLateN, awdlSchedFollowAligned;
 static ItlAWDL::Clock awdlSchedFollowArmedClock, awdlSchedPlanClockNow;
+static uint32_t awdlCoexChannel = 149;
+static uint32_t awdlSchedFollowStalePlan, awdlSchedFollowStaleClock, awdlSchedFollowStaleBusy,
+    awdlSchedFollowStaleState, awdlSchedFollowStaleLate;
+static constexpr uint64_t kAwdlSchedSecondClockToleranceUS = 1000;
 using IOReturn = int;
 using OSObject = void;
 constexpr IOReturn kIOReturnSuccess = 0;
@@ -329,6 +333,24 @@ int main() {
     reset(driver.com); awdlSchedFollowArmed = true; awdlSchedFollowArmedToken = 8;
     ItlIwx::awdlSchedFollowTask(&driver.com);
     assert(!commands && !sessionCalls);
+    // The elected clock is re-anchored on every frame from the master: drift within 1 ms keeps a second-channel
+    // run; a larger move drops it (counted as clock); a home run is never dropped for the clock (the 2026-11-25
+    // idle-connect stall: exact matching dropped most home runs).
+    reset(driver.com); awdlSchedFollowArmed = true; awdlSchedFollowStaleClock = 0;
+    awdlSchedPlanClockNow.anchorEaw += 2; awdlSchedPlanClockNow.anchorEndUS += 2 * awdlSchedPlanClockNow.eawUS + 300;
+    ItlIwx::awdlSchedFollowTask(&driver.com);
+    assert(commands == 1 && sessionCalls == 1 && awdlSchedFollowStaleClock == 0);
+    reset(driver.com); awdlSchedFollowArmed = true; awdlSchedFollowStale = awdlSchedFollowStaleClock = 0;
+    awdlSchedPlanClockNow.anchorEndUS += 1500;
+    ItlIwx::awdlSchedFollowTask(&driver.com);
+    assert(!commands && !sessionCalls && awdlSchedFollowStale == 1 && awdlSchedFollowStaleClock == 1);
+    reset(driver.com); awdlSchedFollowArmed = true; awdlSchedFollowArmedChannel = 149; awdlSchedFollowStaleClock = 0;
+    awdlSchedPlanClockNow.anchorEndUS += 20000;
+    ItlIwx::awdlSchedFollowTask(&driver.com);
+    assert(sessionCalls == 1 && awdlSchedFollowStaleClock == 0);
+    reset(driver.com); awdlSchedFollowArmed = true; awdlSchedFollowStalePlan = 0; itlAWDLPlanVersion += 2;
+    ItlIwx::awdlSchedFollowTask(&driver.com);
+    assert(!sessionCalls && awdlSchedFollowStalePlan == 1);
     reset(sc); awdlSchedSecond = false;
     awdlSchedSecondSwitching = awdlSchedSecondDraining = awdlSchedSpActive = true;
     assert(!awdlSchedSecondOwnsPhy() && !awdlSchedSecondTxBlocked());

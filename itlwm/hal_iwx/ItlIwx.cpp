@@ -307,6 +307,12 @@ static uint64_t awdlSchedFollowSendAtUS, awdlSchedFollowEndUS, awdlSchedFollowLa
     awdlSchedFollowLateMaxUS;
 static uint32_t awdlSchedFollowAligned, awdlSchedFollowDuty, awdlSchedFollowArms, awdlSchedFollowFired,
     awdlSchedFollowStale, awdlSchedFollowEntries, awdlSchedFollowLateN;
+// why fired requests were dropped: plan/generation/token changed, the elected clock moved a second-channel run,
+// a session or move still running, a state that stops the follower, or the run already over.
+static uint32_t awdlSchedFollowStalePlan, awdlSchedFollowStaleClock, awdlSchedFollowStaleBusy,
+    awdlSchedFollowStaleState, awdlSchedFollowStaleLate;
+// -itlschedsecond: how far the elected clock may move an armed second-channel run before it is dropped.
+static constexpr uint64_t kAwdlSchedSecondClockToleranceUS = 1000;
 // the current session's requested length.
 static uint32_t awdlSchedSpCurDurTU;
 // macOS's own plan (AirportItlwmV2.cpp hands it over), followed on the elected AWDL clock.
@@ -18365,11 +18371,12 @@ static void awdlSchedSpPublish()
     {
         // aligned sessions (before a run of the peer's entries on our channel) and duty sessions (no
         // schedule); timer arms, fires, and fires that found the run gone; how late timed sends went out.
-        char n4[300];
-        snprintf(n4, sizeof(n4), "aligned %u entries %u duty %u; arms %u fired %u stale %u; late n %u mean %llu max %llu us; "
-                 "advertised %u refused %u",
+        char n4[360];
+        snprintf(n4, sizeof(n4), "aligned %u entries %u duty %u; arms %u fired %u stale %u (plan %u clock %u busy %u "
+                 "state %u over %u); late n %u mean %llu max %llu us; advertised %u refused %u",
                  awdlSchedFollowAligned, awdlSchedFollowEntries, awdlSchedFollowDuty, awdlSchedFollowArms,
-                 awdlSchedFollowFired, awdlSchedFollowStale, awdlSchedFollowLateN,
+                 awdlSchedFollowFired, awdlSchedFollowStale, awdlSchedFollowStalePlan, awdlSchedFollowStaleClock,
+                 awdlSchedFollowStaleBusy, awdlSchedFollowStaleState, awdlSchedFollowStaleLate, awdlSchedFollowLateN,
                  (unsigned long long)(awdlSchedFollowLateN ? awdlSchedFollowLateSumUS / awdlSchedFollowLateN : 0),
                  (unsigned long long)awdlSchedFollowLateMaxUS, awdlSchedAdvertiseServed, awdlSchedAdvertiseRefused);
         IORegistryEntry::getRegistryRoot()->setProperty("ITLAWDLSchedFollow", n4);
@@ -19665,19 +19672,24 @@ awdlSchedFollowTask(void *arg)
     ++awdlSchedFollowFired;
     const uint64_t now = awdlUptimeUS();
     uint32_t tu = ItlAWDL::followDurationTU(now, requestEndUS);
-    if (requestGen != sc->sc_generation || requestToken != awdlCoexToken ||
-        requestPlan != itlAWDLPlanVersion ||
-        (awdlSchedSecond && (requestClock.anchorEaw != awdlSchedPlanClockNow.anchorEaw ||
-         requestClock.anchorEndUS != awdlSchedPlanClockNow.anchorEndUS ||
-         requestClock.eawUS != awdlSchedPlanClockNow.eawUS)) ||
-        awdlSchedPaused || awdlCoexTxHalted ||
-        sc->sc_ic.ic_state != IEEE80211_S_RUN || awdlCoexStationTransitionGen == sc->sc_generation ||
-        awdlSchedSpOff || awdlSchedSpActive || awdlSchedSpAwaitStart ||
-        awdlCoexMovePending || !awdlCoexMultiActive || !tu || awdlSchedAwdlOff() ||
-        (sc->sc_flags & (IWX_FLAG_HW_ERR | IWX_FLAG_SHUTDOWN | IWX_FLAG_RFKILL))) {
+    // -itlschedsecond: a run on the second channel is dropped if the elected clock moved it (another master, or more
+    // than drift since it was armed). The clock is re-anchored on every frame heard from the master, so an exact
+    // match dropped most runs, home ones included; home runs need no retune and are timed as without the flag.
+    const bool secondRequest = awdlSchedSecond && requestMac != kAwdlSchedCh6MacId && requestChannel != awdlCoexChannel;
+    const bool clockMoved = secondRequest &&
+        !ItlAWDL::clockSameWithin(requestClock, awdlSchedPlanClockNow, kAwdlSchedSecondClockToleranceUS);
+    const bool planMoved = requestGen != sc->sc_generation || requestToken != awdlCoexToken ||
+        requestPlan != itlAWDLPlanVersion;
+    const bool busy = awdlSchedSpActive || awdlSchedSpAwaitStart || awdlCoexMovePending;
+    const bool state = awdlSchedPaused || awdlCoexTxHalted || sc->sc_ic.ic_state != IEEE80211_S_RUN ||
+        awdlCoexStationTransitionGen == sc->sc_generation || awdlSchedSpOff || !awdlCoexMultiActive ||
+        awdlSchedAwdlOff() || (sc->sc_flags & (IWX_FLAG_HW_ERR | IWX_FLAG_SHUTDOWN | IWX_FLAG_RFKILL));
+    if (planMoved || clockMoved || busy || state || !tu) {
         if (awdlSchedAwdlOff())
             ++awdlSchedOffStale;
         ++awdlSchedFollowStale;
+        ++(planMoved ? awdlSchedFollowStalePlan : clockMoved ? awdlSchedFollowStaleClock :
+           busy ? awdlSchedFollowStaleBusy : state ? awdlSchedFollowStaleState : awdlSchedFollowStaleLate);
         awdlSchedSecondDraining = false;
         awdlSchedSpPublish();
         return;
@@ -19692,9 +19704,8 @@ awdlSchedFollowTask(void *arg)
         tu = ItlAWDL::followDurationTU(awdlUptimeUS(), requestEndUS);
         if (!tu || requestGen != sc->sc_generation ||
             requestToken != awdlCoexToken || requestPlan != itlAWDLPlanVersion ||
-            requestClock.anchorEaw != awdlSchedPlanClockNow.anchorEaw ||
-            requestClock.anchorEndUS != awdlSchedPlanClockNow.anchorEndUS ||
-            requestClock.eawUS != awdlSchedPlanClockNow.eawUS ||
+            (secondRequest &&
+             !ItlAWDL::clockSameWithin(requestClock, awdlSchedPlanClockNow, kAwdlSchedSecondClockToleranceUS)) ||
             awdlCoexTxHalted || awdlSchedPaused || awdlSchedAwdlOff() ||
             awdlCoexStationTransitionGen == sc->sc_generation) {
             ++awdlSchedSecondStale;

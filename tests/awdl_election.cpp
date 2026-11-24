@@ -171,6 +171,33 @@ int main() {
         assert(a.startUS == b.startUS && a.endUS == b.endUS && a.entries == b.entries);
     }
 
+    // A clock re-anchored on a later frame from the same master is the same clock (within drift); another
+    // numbering, a whole-window jump or another window length is not.
+    {
+        const Clock pc = clockFromSync(s, t0);
+        Clock later = pc;   // the same master heard 3 windows on, 40 us of drift
+        later.anchorEaw = pc.anchorEaw + 3;
+        later.anchorEndUS = pc.anchorEndUS + 3 * pc.eawUS + 40;
+        assert(clockShiftUS(pc, later) == 40 && clockShiftUS(later, pc) == -40);
+        assert(clockSameWithin(pc, later, 1000) && clockSameWithin(later, pc, 1000));
+        assert(clockSameWithin(pc, pc, 0));
+        Clock early = later;
+        early.anchorEndUS = later.anchorEndUS - 1100;   // 1060 us the other way
+        assert(clockShiftUS(pc, early) == -1060 && !clockSameWithin(pc, early, 1000));
+        Clock renumbered = pc;   // same instants, numbering one window off: every run lands on another entry
+        renumbered.anchorEaw = pc.anchorEaw + 1;
+        assert(!clockSameWithin(pc, renumbered, 1000));
+        Clock period = pc;
+        period.eawUS = pc.eawUS + 1024;
+        assert(!clockSameWithin(pc, period, 1000000));
+        // Wraps of the 32-bit window number are taken the short way.
+        Clock a = pc, b = pc;
+        a.anchorEaw = 0xfffffffeU;
+        b.anchorEaw = 1;
+        b.anchorEndUS = a.anchorEndUS + 3 * a.eawUS + 7;
+        assert(clockShiftUS(a, b) == 7 && clockSameWithin(a, b, 1000));
+    }
+
     // Our sync TLV carries the clock: epoch and AW counter reproduce the peer's counter and down counter.
     {
         const Clock pc = clockFromSync(s, t0);
