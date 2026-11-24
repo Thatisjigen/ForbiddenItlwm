@@ -2261,6 +2261,15 @@ void AirportItlwm::watchdogAction(IOTimerEventSource *timer)
     }
     publishRxErrors();
 #ifdef AIRPORT_WCL
+    // ItlwmWCLTrace (WCL.cpp): once a second, only when something new was recorded.
+    {
+        static uint32_t traceVersion = UINT32_MAX;
+        static char traceText[3072];
+        if (itlWCLTraceText(traceText, sizeof(traceText), &traceVersion))
+            setProperty("ItlwmWCLTrace", traceText);
+    }
+#endif
+#ifdef AIRPORT_WCL
     if (fNetIf)
         static_cast<AirportItlwmSkywalkInterface *>(fNetIf)->wclPostLinkQuality();
 #else
@@ -3148,6 +3157,7 @@ IOReturn AirportItlwm::setHardwareAddress(const void *addrP, UInt32 addrBytes)
     auto ic = fHalService->get80211Controller();
     bool initializing = (ic->ic_if.if_flags & IFF_UP) && !(ic->ic_if.if_flags & IFF_RUNNING);
     auto update = AirportWCL::planMacUpdate(ic->ic_myaddr, address, addrBytes, initializing);
+    itlWCLTrace('m', 0, uint32_t(update), (ic->ic_if.if_flags & IFF_RUNNING) ? 1 : 0);
     if (update == AirportWCL::MacUpdate::Invalid)
         return kIOReturnBadArgument;
     if (update == AirportWCL::MacUpdate::Busy) {

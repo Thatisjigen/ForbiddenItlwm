@@ -12,6 +12,13 @@
 #include <ItlScanCursor.hpp>
 #ifdef AIRPORT_WCL
 #include "WCL/WCL.hpp"
+
+// ItlwmWCLTrace: the last 64 WCL interactions, for joins that fail between WCL and the driver.
+// kind: '>' message to WCL (id = message, a = first payload word), '<' WCL command (id = command,
+// a = result), 'e' net80211 event (id = code), 'm' MAC address set (a = MacUpdate, b = result),
+// 'j' join start (a = result, b = 1 if deferred until the firmware restart ends).
+void itlWCLTrace(char kind, uint32_t id, uint32_t a, uint32_t b);
+bool itlWCLTraceText(char *out, size_t size, uint32_t *version);
 #endif
 
 #include <Airport/Apple80211.h>
@@ -429,6 +436,8 @@ public:
     void completeWCLScan();
 private:
     static IOReturn wclCommand(OSObject *, void *, void *, void *, void *);
+    static IOReturn wclCommandBody(OSObject *, void *, void *, void *);
+    void wclPost(uint32_t, void *, unsigned long, bool);
     struct CountryUpdate;
     static void wclCountryUpdateThread(void *, void *);
     static IOReturn wclCountryUpdateGated(OSObject *, void *, void *, void *, void *);
