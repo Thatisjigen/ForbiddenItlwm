@@ -116,8 +116,9 @@ import hashlib
 # adds a session-protection tap for the follower's own sessions (-itlschedsp): their starts and ends, a failed start
 # (status 0) opening no window, each start timed against its plan run (ITLAWDLSchedStartVsRun); and restart counts
 # at the init_task sites only with -itlfwcrashrec. The next release adds only the generation of the last successful
-# listener session start (awdlSchedStartedGen), which the overlap exceptions wait for.
-a=s.index('iwx_rx_pkt(struct');b=s.index("\nvoid ItlIwx::",a);assert hashlib.sha256(s[a:b].encode()).hexdigest()=='4adbe847d5cd3b4ca77a0918e5f3cefed5c6d6f727cbb330e05efb47f057a66e'
+# listener session start (awdlSchedStartedGen), which the overlap exceptions wait for. Then a frame-release
+# notification for a cleared or unused reorder entry is dropped instead of released (added lines only).
+a=s.index('iwx_rx_pkt(struct');b=s.index("\nvoid ItlIwx::",a);assert hashlib.sha256(s[a:b].encode()).hexdigest()=='89fd1546f8cafd8676d6a05295b7adde8581291c2045a306fd12cf4db97625cf'
 a=s.index('iwx_rx_mpdu_mq(struct');b=s.index("\nvoid ItlIwx::",a);assert hashlib.sha256(s[a:b].encode()).hexdigest()=='761fc4d25edb443d274e376efdd0a7011f20cd0b2f408de292f0ed16a5f38470'
 # iwx_rx_frame: 0.6.0 adds only the phone's 5 GHz channel tracking from its TLV 18 sequence (PR #21). The AWDL
 # scheduler adds, each behind its own flag: frame counts while the follower runs (-itlschedsp); each peer's election v2
@@ -130,5 +131,8 @@ a=s.index('iwx_rx_mpdu_mq(struct');b=s.index("\nvoid ItlIwx::",a);assert hashlib
 # a peer's DELBA and data are matched to that peer's slot (ItlAWDL::addedSlotFor) instead of the one BA peer: the same
 # peer with one slot, the only change without -itlawdlmultipeer. Then an ADDBA answer to our request and a DELBA of our
 # send session are matched to the sending peer's slot and its own request count (slot 0's as before). Then a further
-# slot's peer's sync frames and data feed that slot's own schedule (added lines only).
-a=s.index('iwx_rx_frame(struct');b=s.index("\nvoid ItlIwx::",a);assert hashlib.sha256(s[a:b].encode()).hexdigest()=='8eb501a03bdb4cd553700527d90f2657f6c004d6b86abb498d8704c38e1b2e36'
+# slot's peer's sync frames and data feed that slot's own schedule (added lines only). Then every device's 5 GHz
+# AirDrop channel is noted for ITLAWDLPeerChannels (#45, diagnostics only; added lines only). Then a DELBA also finds
+# a slot whose station is being added (ownedSlotFor), and only unicast QoS data to us with TID 0-7 keeps a receive
+# session alive.
+a=s.index('iwx_rx_frame(struct');b=s.index("\nvoid ItlIwx::",a);assert hashlib.sha256(s[a:b].encode()).hexdigest()=='e9ceea89752db67babd878de8c561d7a98b4af45c5c90ef05010b5f2b86bf670'

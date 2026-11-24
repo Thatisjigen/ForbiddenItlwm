@@ -20,6 +20,7 @@ struct PeerSlot {
     int failedGen = -1;          // a firmware command failed for this slot's station in this generation
     uint8_t addr[6] = {};
     bool added = false;          // the station exists in the firmware
+    bool adding = false;         // its ADD_STA is in flight: addr already names the owner, so the slot isn't free
     bool accepted = false;       // the peer accepted our send agreement
     uint32_t epoch = 0;          // bumped on every add, so work for an older station is recognised
     uint32_t width = 0;          // 80 or 20, the width the station was added with (0 before the first)
@@ -47,6 +48,8 @@ struct PeerSlot {
     BaTxBulkState txBulk{};
     uint64_t txLastAskUS = 0, txRestUntilUS = 0, txLastAggUS = 0, txLastNotifUS = 0;
     bool queueAllocPending = false;
+    uint64_t txFailedUS = 0;     // when the send agreement failed before the firmware held a queue (retried later)
+    uint32_t aggFailStreak = 0;  // aggregate copies that failed in a row (a held frame waits for the next try)
     bool probeTried = false;
     uint64_t probeUntilUS = 0, lastRxPayloadUS = 0;
     // A further slot's own count of payload-sized frames to the peer (the bulk detector's input) and of our
@@ -112,23 +115,32 @@ inline PeerSlot *addedSlotFor(PeerSlot *slots, unsigned usable, const uint8_t *p
     return nullptr;
 }
 
+// The slot whose station exists for `peer` or is being added for it (a DELBA during the ADD_STA wait is kept).
+inline PeerSlot *ownedSlotFor(PeerSlot *slots, unsigned usable, const uint8_t *peer) {
+    for (unsigned i = 0; i < usable; ++i)
+        if ((slots[i].added || slots[i].adding) && samePeer(slots[i].addr, peer))
+            return &slots[i];
+    return nullptr;
+}
+
 // Where an ADDBA request from `peer` waits. With one slot, the rule from before several slots: the slot, unless
 // its station is another peer's (the slot's own queue then refuses a request while it holds another peer's).
-// With more: the peer's own slot (station added, or requests waiting), else the first free slot that hasn't
-// failed in this generation. Null when there is none.
+// With more: the peer's own slot (station added or being added, or requests waiting), else the first free slot that
+// hasn't failed in this generation. A slot whose station is being added belongs to that peer. Null when there is none.
 inline PeerSlot *slotForRequest(PeerSlot *slots, unsigned usable, const uint8_t *peer, int generation) {
     if (!usable)
         return nullptr;
     if (usable == 1)
-        return slots[0].added && !samePeer(slots[0].addr, peer) ? nullptr : &slots[0];
+        return (slots[0].added || slots[0].adding) && !samePeer(slots[0].addr, peer) ? nullptr : &slots[0];
     for (unsigned i = 0; i < usable; ++i) {
         const PeerSlot &s = slots[i];
-        if ((s.added && samePeer(s.addr, peer)) || (!s.added && samePeer(s.requests.peer(), peer)))
+        if (((s.added || s.adding) && samePeer(s.addr, peer)) ||
+            (!s.added && !s.adding && samePeer(s.requests.peer(), peer)))
             return &slots[i];
     }
     for (unsigned i = 0; i < usable; ++i) {
         PeerSlot &s = slots[i];
-        if (!s.added && s.requests.empty() && (i == 0 || s.failedGen != generation))
+        if (!s.added && !s.adding && s.requests.empty() && (i == 0 || s.failedGen != generation))
             return &s;
     }
     return nullptr;

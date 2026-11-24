@@ -122,5 +122,34 @@ int main() {
         }
         cases += 4;
     }
+    // A slot whose station is being added (ADD_STA waiting) belongs to its peer: another peer's request goes
+    // elsewhere, the same peer's comes back to it, and a DELBA finds it (ownedSlotFor), data doesn't (addedSlotFor).
+    {
+        PeerSlot slots[kMaxPeerSlots];
+        slots[0].addr[0] = 2;
+        slots[0].addr[5] = 10;
+        slots[0].adding = true;
+        assert(slotForRequest(slots, 3, request(10).peer, 1) == &slots[0]);
+        assert(slotForRequest(slots, 3, request(11).peer, 1) == &slots[1]);
+        assert(!slotForRequest(slots, 1, request(11).peer, 1));                // one slot: it isn't free
+        assert(slotForRequest(slots, 1, request(10).peer, 1) == &slots[0]);
+        assert(ownedSlotFor(slots, 3, request(10).peer) == &slots[0]);
+        assert(!addedSlotFor(slots, 3, request(10).peer));
+        assert(!ownedSlotFor(slots, 3, request(11).peer));
+        slots[0].adding = false;
+        assert(!ownedSlotFor(slots, 3, request(10).peer));                    // failed add: nothing owns it
+        slots[0].added = true;
+        assert(ownedSlotFor(slots, 3, request(10).peer) == &slots[0]);
+        cases += 9;
+    }
+    // The ADDBA answer: accepted (status 0) or declined (37) when the firmware has no room for the session.
+    {
+        uint8_t own[6] = {2, 9, 9, 9, 9, 9}, out[kAddbaResponseLength];
+        const AddbaRequest r = request(10, 3);
+        assert(buildAddbaResponse(out, sizeof(out), r, own, 5) == kAddbaResponseLength && !out[27] && !out[28]);
+        assert(buildAddbaResponse(out, sizeof(out), r, own, 5, kAddbaDeclined) == kAddbaResponseLength);
+        assert(out[27] == 37 && out[28] == 0 && out[24] == 3 && out[25] == 1 && ((out[29] >> 2) & 0xf) == 3);
+        cases += 3;
+    }
     printf("AWDL peer slots: %u cases passed (host only)\n", cases);
 }

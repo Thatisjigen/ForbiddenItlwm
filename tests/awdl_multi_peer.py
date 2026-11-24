@@ -58,6 +58,7 @@ program = r'''
 enum { IWX_ADD_STA = 0x18, IWX_REMOVE_STA = 0x19, IWX_STA_LINK = 0, IWX_STA_MODE_MODIFY = 1,
     IWX_STA_MODIFY_ADD_BA_TID = 0x8, IWX_STA_MODIFY_REMOVE_BA_TID = 0x10, IWX_ADD_STA_SUCCESS = 1,
     IWX_ADD_STA_STATUS_MASK = 0xff, IWX_ADD_STA_BAID_VALID_MASK = 0x8000, IWX_FW_CTXT_ACTION_MODIFY = 2,
+    IWX_ADD_STA_IMMEDIATE_BA_FAILURE = 0x4,
     IWX_STA_FLG_FAT_EN_20MHZ = 0, IWX_STA_FLG_FAT_EN_80MHZ = 1 << 26, IWX_STA_FLG_MIMO_EN_MIMO2 = 1 << 28,
     IWX_STA_FLG_MAX_AGG_SIZE_64K = 3 << 19, IWX_STA_FLG_MAX_AGG_SIZE_1024K = 6 << 19, IWX_STA_FLG_FAT_EN_MSK = 3 << 26,
     IWX_STA_FLG_MIMO_EN_MSK = 3 << 28, IWX_STA_FLG_MAX_AGG_SIZE_MSK = 15 << 19, IWX_STA_FLG_AGG_MPDU_DENS_MSK = 7 << 23,
@@ -99,7 +100,9 @@ static int awdlCoexBaFailedGen = -1, awdlCoexBaTxResetting = -1;
 static bool awdlCoexAdded = true, awdlCoexBaFilterOff, awdlCoexBaTxEnabled = true;
 static uint32_t awdlCoexToken = 5, awdlCoexBaStatus, awdlCoexBaSessions, awdlCoexBaAnswers, awdlCoexBaAnswerErrors,
     awdlCoexBaOtherPeer, awdlCoexBaRxIdleTeardowns, awdlCoexBaDelbasSent, awdlCoexDelbaForced, awdlCoexDelbaConfirmed,
-    awdlCoexDelbaRxTidRemoved, awdlCoexRateWindowOK, awdlCoexRateWindowFailed;
+    awdlCoexDelbaRxTidRemoved, awdlCoexRateWindowOK, awdlCoexRateWindowFailed, awdlCoexBaRxDeclined, awdlCoexBaRxCancelled,
+    awdlPeerTxRetries;
+constexpr uint64_t kAwdlPeerTxRetryUS = 30000000ULL;
 static unsigned awdlCoexRateStep;
 static uint16_t awdlCoexBaSequence, awdlCoexLastMgmtEnqueueId;
 static uint64_t awdlCoexTxPauseUntilUS;
@@ -117,6 +120,8 @@ static std::vector<Command> commands;
 static std::vector<std::vector<uint8_t>> sent;
 static int failAddFor = -1;     // ADD_STA (new station) fails for this station number
 static int nextQueue = 5, queueFail;
+static int declineBaFor = -1;   // ADD_BA_TID on this station answers "no room for another session"
+static void (*duringAdd)(int station) = nullptr;   // runs while ADD_STA (new station) waits, as the gate lets RX in
 static unsigned rateInits, rateStation;
 class ItlIwx {
 public:
@@ -141,8 +146,14 @@ public:
         memcpy(k.addr, c->addr, 6);
         k.flags = c->station_flags_msk == IWX_STA_FLG_DISABLE_TX ? 0x100 | c->station_flags : 0;
         commands.push_back(k);
+        if (!c->add_modify && duringAdd)
+            duringAdd(c->sta_id);
         if (!c->add_modify && c->sta_id == failAddFor) {
             *status = 0;
+            return 0;
+        }
+        if (c->modify_mask == IWX_STA_MODIFY_ADD_BA_TID && c->sta_id == declineBaFor) {
+            *status = IWX_ADD_STA_IMMEDIATE_BA_FAILURE;
             return 0;
         }
         *status = IWX_ADD_STA_SUCCESS | (c->modify_mask == IWX_STA_MODIFY_ADD_BA_TID ? IWX_ADD_STA_BAID_VALID_MASK : 0);
@@ -216,6 +227,8 @@ static void reset() {
     commands.clear();
     sent.clear();
     failAddFor = -1;
+    declineBaFor = -1;
+    duringAdd = nullptr;
     awdlCoexBaFailedGen = -1;
     awdlPeerSlotsUsable = 3;
     hardware = iwx_softc{};
@@ -423,6 +436,72 @@ int main() {
         assert(!awdlPeerGateClosed(d, clockUS));
         hardware.txq[6].queued = 0;
     }
+    ++cases;
+    // The firmware has no room for another receive session: that request is declined (status 37) and nothing is
+    // quarantined, for slot 0 as for the others; the next request is handled as usual.
+    reset();
+    declineBaFor = 5;
+    assert(deliver(request(10, 0, 1)) && deliver(request(11, 0, 2)));
+    settle();
+    assert(awdlPeers[0].rxTids == 1 && awdlPeers[1].added && !awdlPeers[1].rxTids);
+    assert(awdlCoexBaFailedGen == -1 && awdlPeers[1].failedGen != hardware.sc_generation && awdlCoexBaRxDeclined == 1);
+    {
+        unsigned declined = 0;
+        for (const auto &f : sent)
+            declined += ItlAWDL::sameAddress(f.data() + 4, request(11, 0, 0).peer) && f[27] == 37;
+        assert(declined == 1);
+    }
+    declineBaFor = 3;
+    assert(deliver(request(10, 2, 3)));
+    settle();
+    assert(awdlCoexBaFailedGen == -1 && awdlPeers[0].rxTids == 1 && awdlCoexBaRxDeclined == 2);
+    declineBaFor = -1;
+    assert(deliver(request(10, 2, 4)));
+    settle();
+    assert(awdlPeers[0].rxTids == 0x5);
+    ++cases;
+    // The peer cancels (DELBA) while its station is being added: the station stays, no session is set up and no
+    // answer goes. Before, the DELBA found no slot and the cancelled session was set up and answered.
+    reset();
+    duringAdd = [](int station) {
+        if (station != 5)
+            return;
+        ItlAWDL::PeerSlot *slot = ItlAWDL::ownedSlotFor(awdlPeers, awdlPeerSlotsUsable, request(11, 0, 0).peer);
+        assert(slot == &awdlPeers[1] && slot->adding);
+        slot->rxTidTeardown |= 1;                                           // as iwx_rx_frame's DELBA branch does
+    };
+    assert(deliver(request(10, 0, 1)) && deliver(request(11, 0, 2)));
+    settle();
+    assert(awdlPeers[1].added && !awdlPeers[1].rxTids && count(0x18, 5, 0x8) == 0 && awdlCoexBaRxCancelled == 1);
+    for (const auto &f : sent)
+        assert(!ItlAWDL::sameAddress(f.data() + 4, request(11, 0, 0).peer));
+    ++cases;
+    // Another peer's request during the add goes to a free slot: the slot being added is taken. Before, it went to
+    // that slot and was wiped once the add finished.
+    reset();
+    duringAdd = [](int station) {
+        if (station == 3)
+            assert(deliver(request(12, 0, 7)));
+    };
+    assert(deliver(request(10, 0, 1)));
+    settle();
+    assert(awdlPeers[0].added && ItlAWDL::sameAddress(awdlPeers[0].addr, request(10, 0, 0).peer));
+    assert(awdlPeers[1].added && ItlAWDL::sameAddress(awdlPeers[1].addr, request(12, 0, 0).peer) && awdlPeers[1].rxTids == 1);
+    ++cases;
+    // A send agreement that failed before the firmware held a queue is tried again after 30 s.
+    reset();
+    queueFail = 1;
+    assert(deliver(request(10, 0, 1)) && deliver(request(11, 0, 2)));
+    settle();
+    awdlPeers[1].txBulk.bulk = true;
+    (void)driver.awdlCoexBaTxPeer(&hardware, awdlPeers[1], hardware.sc_generation, awdlCoexToken, clockUS);
+    assert(awdlPeers[1].txState == kCoexBaTxFailed && awdlPeers[1].txQueue < 0);
+    queueFail = 0;
+    (void)driver.awdlCoexBaTxPeer(&hardware, awdlPeers[1], hardware.sc_generation, awdlCoexToken, clockUS + 1000000ULL);
+    assert(awdlPeers[1].txState == kCoexBaTxFailed);                        // not yet
+    const uint32_t retriesBefore = awdlPeerTxRetries;
+    (void)driver.awdlCoexBaTxPeer(&hardware, awdlPeers[1], hardware.sc_generation, awdlCoexToken, clockUS + 31000000ULL);
+    assert(awdlPeerTxRetries == retriesBefore + 1 && awdlPeers[1].txState != kCoexBaTxFailed);
     ++cases;
     printf("PASS %u multi-peer receive and send Block Ack scenarios on the real task steps (host mocks only)\n", cases);
 }
