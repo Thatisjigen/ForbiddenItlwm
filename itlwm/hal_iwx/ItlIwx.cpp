@@ -18494,8 +18494,8 @@ awdlSchedSpSend(struct iwx_softc *sc, uint32_t durationTU)
     struct iwx_node *in = (struct iwx_node *)ic->ic_bss;
     const int gen = sc->sc_generation;
     const uint64_t now = awdlUptimeUS();
-    if (awdlSchedSecond && (awdlSchedSpActive || awdlSchedSpAwaitStart || awdlCoexTxHalted ||
-                            awdlCoexStationTransitionGen == gen || awdlCoexPhyUncertainGen == gen))
+    if (awdlSchedSpActive || awdlSchedSpAwaitStart || awdlCoexTxHalted ||
+        awdlCoexStationTransitionGen == gen || (awdlSchedSecond && awdlCoexPhyUncertainGen == gen))
         return EBUSY;
     const uint32_t listenerMac = awdlSchedSpTargetMac == kAwdlSchedCh6MacId && awdlSchedCh6Added ? kAwdlSchedCh6MacId :
         awdlSchedHandle && awdlSchedHandleAdded ? kAwdlSchedHandleMacId : kAwdlCoexMacId;
@@ -18538,6 +18538,7 @@ int ItlIwx::
 awdlSchedSpCancel(struct iwx_softc *sc)
 {
     const int gen = sc->sc_generation;
+    awdlSchedFollowArmed = false;
     awdlSchedSecondDraining = false;
     if (!awdlSchedSp || !awdlSchedSpSent || awdlSchedSpGen != gen || !(awdlSchedSpActive || awdlSchedSpAwaitStart))
         return 0;
@@ -18557,10 +18558,9 @@ awdlSchedSpCancel(struct iwx_softc *sc)
         return ECANCELED;
     if (err) {
         awdlSchedLeaveCancelErr = err;
-        if (awdlSchedSecond) {
-            awdlSchedSpOff = true;
-            awdlCoexTxHalted = true;
-        }
+        awdlSchedSpOff = true;   // as for a failed ADD: the firmware may still run that session
+        if (awdlSchedSecond)
+            awdlCoexTxHalted = true;   // the listener's PHY may also be away from home
     }
     awdlSchedSpPublish();
     return err;
@@ -19199,8 +19199,6 @@ awdlSchedFollowPlan(struct iwx_softc *sc, uint64_t nowUS)
         return;
     }
     const bool requestPending = awdlSchedFollowArmed && awdlSchedFollowArmedGen == sc->sc_generation;
-    if (requestPending && !awdlSchedSecond)
-        return;   // a timed send is pending
     if (!requestPending)
         awdlSchedFollowArmed = false;
     awdlSchedSpTargetMac = kAwdlCoexMacId;   // the 149 handle unless channel 6's run comes first
@@ -19392,7 +19390,7 @@ awdlSchedFollowPlan(struct iwx_softc *sc, uint64_t nowUS)
             }
         }
     }
-    if (awdlSchedSecond && (awdlSchedSpActive || awdlSchedSpAwaitStart || requestPending))
+    if (awdlSchedSpActive || awdlSchedSpAwaitStart || requestPending)
         return;   // clocks above stay current even while the timer owns the next request
     // -itlschedsecond: the listener's PHY goes to the run's channel before its session is asked for (no session runs
     // now: one at a time), and home for anything else on the listener's handle. Channel 6's runs use their own PHY.
@@ -19486,13 +19484,13 @@ awdlSchedFollowTask(void *arg)
     ++awdlSchedFollowFired;
     const uint64_t now = awdlUptimeUS();
     uint32_t tu = ItlAWDL::followDurationTU(now, requestEndUS);
-    if (requestGen != sc->sc_generation ||
-        (awdlSchedSecond && (requestToken != awdlCoexToken || requestPlan != itlAWDLPlanVersion ||
-         requestClock.anchorEaw != awdlSchedPlanClockNow.anchorEaw ||
+    if (requestGen != sc->sc_generation || requestToken != awdlCoexToken ||
+        requestPlan != itlAWDLPlanVersion ||
+        (awdlSchedSecond && (requestClock.anchorEaw != awdlSchedPlanClockNow.anchorEaw ||
          requestClock.anchorEndUS != awdlSchedPlanClockNow.anchorEndUS ||
-         requestClock.eawUS != awdlSchedPlanClockNow.eawUS ||
-         awdlSchedPaused || awdlCoexTxHalted ||
-         sc->sc_ic.ic_state != IEEE80211_S_RUN || awdlCoexStationTransitionGen == sc->sc_generation)) ||
+         requestClock.eawUS != awdlSchedPlanClockNow.eawUS)) ||
+        awdlSchedPaused || awdlCoexTxHalted ||
+        sc->sc_ic.ic_state != IEEE80211_S_RUN || awdlCoexStationTransitionGen == sc->sc_generation ||
         awdlSchedSpOff || awdlSchedSpActive || awdlSchedSpAwaitStart ||
         awdlCoexMovePending || !awdlCoexMultiActive || !tu || awdlSchedAwdlOff() ||
         (sc->sc_flags & (IWX_FLAG_HW_ERR | IWX_FLAG_SHUTDOWN | IWX_FLAG_RFKILL))) {
@@ -19553,9 +19551,7 @@ awdlCoexRetarget(struct iwx_softc *sc)
     struct iwx_phy_ctxt *own = &sc->sc_phyctxt[kAwdlCoexPhyId];
     uint8_t width = IWX_PHY_VHT_CHANNEL_MODE20;
     const int want = awdlCoexPickOwn(sc, &width);
-    // -itlschedsecond: the PHY may be on the second channel for a run; the home choice is awdlCoexOwnChan.
-    struct ieee80211_channel *homeChan = awdlSchedSecond ? awdlCoexOwnChan : own->channel;
-    const int have = homeChan ? ieee80211_chan2ieee(ic, homeChan) : 0;
+    const int have = awdlCoexOwnChan ? ieee80211_chan2ieee(ic, awdlCoexOwnChan) : 0;
     const int haveWidth = awdlCoexOwnWidth;
     // The scheduler stopped (or isn't running in this generation) while the listener uses the overlap exception at
     // 80 MHz: going back to 20 MHz on the same channel is a safety step, so it skips the settle, quiet and cooldown
