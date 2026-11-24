@@ -483,6 +483,14 @@ inline size_t selectWPA2TransitionMode(uint8_t *ies, size_t length) {
 inline bool probeChannel(bool active, bool passiveOnly, bool dfs) {
     return active && !passiveOnly && !dfs;
 }
+// iwx (UMAC scan): an active scan selects its SSID on every channel entry, passive and radar channels included,
+// as iwlwifi (iwl_mvm_umac_scan_cfg_channels_v7) and OpenBSD's iwx do; the firmware itself keeps those channels
+// passive until it may transmit there. Leaving the SSID off them made AX210 firmware assert (UMAC 0x20002806,
+// last command SCAN_REQ_UMAC, a passive 5 GHz channel in the data word) during unassociated scans (#69,
+// runmain's finding). iwm and iwn keep probeChannel: their firmware is asked per channel by the driver.
+inline bool umacScanSelectsSsid(bool active) {
+    return active;
+}
 
 struct ScanRequest {
     uint32_t identifier;

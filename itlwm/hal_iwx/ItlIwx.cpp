@@ -15190,8 +15190,7 @@ iwx_umac_scan_fill_channels(struct iwx_softc *sc,
         }
         
 #ifdef AIRPORT_WCL
-        if (AirportWCL::probeChannel(n_ssids != 0,
-                c->ic_flags & IEEE80211_CHAN_PASSIVE, c->ic_flags & IEEE80211_CHAN_DFS))
+        if (AirportWCL::umacScanSelectsSsid(n_ssids != 0))
 #else
         if (n_ssids != 0 && !bgscan)
 #endif
