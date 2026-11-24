@@ -425,8 +425,11 @@ void AirportItlwmSkywalkInterface::publishWCLBeacon(const ieee80211_node *node, 
     metadata->capability = node->ni_capinfo;
     metadata->flags = AirportWCL::SSIDPresent | AirportWCL::RSSIValid;
     memcpy(metadata + 1, ies, length);
-    /* Keep real AKMs so macOS can select SAE; otherwise present PSK as plain WPA2. */
-    if (!ic->ic_wpa3)
+    /*
+     * Keep real AKMs so macOS can select SAE, but only where the AP offers hash-to-element: we
+     * don't do hunting-and-pecking, so a transition network without H2E keeps joining as WPA2.
+     */
+    if (!ic->ic_wpa3 || !AirportWCL::advertisesSAEH2E(reinterpret_cast<const uint8_t *>(metadata + 1), length))
         metadata->ieLength = uint32_t(AirportWCL::selectWPA2TransitionMode(
             reinterpret_cast<uint8_t *>(metadata + 1), length));
     size_t messageSize = sizeof(*metadata) + metadata->ieLength;

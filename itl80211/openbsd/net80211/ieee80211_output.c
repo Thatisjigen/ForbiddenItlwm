@@ -228,10 +228,14 @@ ieee80211_mgmt_output(struct _ifnet *ifp, struct ieee80211_node *ni,
         IEEE80211_ADDR_COPY(wh->i_addr3, ni->ni_bssid);
 
         /* check if protection is required for this mgmt frame */
+        u_int8_t category = 0;
         if ((ic->ic_caps & IEEE80211_C_MFP) &&
             (type == IEEE80211_FC0_SUBTYPE_DISASSOC ||
              type == IEEE80211_FC0_SUBTYPE_DEAUTH ||
-             type == IEEE80211_FC0_SUBTYPE_ACTION)) {
+             /* only robust action categories are protected */
+             (type == IEEE80211_FC0_SUBTYPE_ACTION &&
+              (mbuf_copydata(m, sizeof(*wh), 1, &category) != 0 ||
+               ieee80211_action_is_robust(category))))) {
             /*
              * Hack: we should not set the Protected bit in outgoing
              * group management frames, however it is used as an

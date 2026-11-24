@@ -6133,7 +6133,12 @@ iwx_ccmp_decap(struct iwx_softc *sc, mbuf_t m, struct ieee80211_node *ni,
 
    hasqos = ieee80211_has_qos(wh);
    tid = hasqos ? ieee80211_get_qos(wh) & IEEE80211_QOS_TID : 0;
-   prsc = &k->k_rsc[tid];
+   // Protected management frames (PMF, WPA3) have their own replay counter, as in
+   // ieee80211_ccmp_get_pn(); checking them against TID 0's could drop them as replays.
+   if ((wh->i_fc[0] & IEEE80211_FC0_TYPE_MASK) == IEEE80211_FC0_TYPE_MGT)
+       prsc = &k->k_mgmt_rsc;
+   else
+       prsc = &k->k_rsc[tid];
 
    /* Extract the 48-bit PN from the CCMP header. */
    pn = (uint64_t)ivp[0]       |
@@ -20121,12 +20126,18 @@ iwx_set_key(struct ieee80211com *ic, struct ieee80211_node *ni,
         cmd.common.key_flags |= htole16(IWX_STA_KEY_MULTICAST);
     } else
         cmd.common.key_offset = 0;
-    
+    // With management frame protection (WPA3, or PMF on WPA2 with -itlwmwpa3) the firmware must know
+    // the key also protects management frames, as iwlwifi marks every key of an MFP station
+    // (iwl_mvm_send_sta_key: STA_KEY_MFP when sta->mfp). Without it the firmware doesn't handle
+    // protected deauth, disassoc and robust action frames with this key.
+    if (ni && (ni->ni_flags & IEEE80211_NODE_MFP))
+        cmd.common.key_flags |= htole16(IWX_STA_KEY_MFP);
+
     memcpy(cmd.common.key, k->k_key, MIN(sizeof(cmd.common.key), k->k_len));
     cmd.common.sta_id = IWX_STATION_ID;
-    
+
     cmd.transmit_seq_cnt = htole64(k->k_tsc);
-    
+
     return that->iwx_send_cmd_pdu(sc, IWX_ADD_STA_KEY, IWX_CMD_ASYNC,
                             sizeof(cmd), &cmd);
 }

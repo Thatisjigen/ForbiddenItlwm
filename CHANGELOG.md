@@ -97,7 +97,7 @@ BTLEAdvFixup is unchanged (0.9.3).
 ## Unreleased
 
 **Wi-Fi**
-- **WPA3-Personal (SAE), opt-in with `-itlwmwpa3` ([#80](https://github.com/retropineaple/ForbiddenItlwm/issues/80)).** SAE/H2E with PMF on iwx. Flag off: WPA2 behaviour. Flag on: WPA3-only and mixed networks join with SAE. Tested on macOS 26.7.3 / AX201; HnP-only APs unsupported.
+- **WPA3-Personal (SAE), opt-in with `-itlwmwpa3` ([#80](https://github.com/retropineaple/ForbiddenItlwm/issues/80)).** SAE/H2E with PMF on iwx. Flag off: WPA2 behaviour. Flag on: WPA3-only and mixed networks join with SAE when the AP offers hash-to-element (H2E); mixed networks without it still join as WPA2, and WPA2 networks that offer protected management frames use them. Tested on macOS 26.7.3 / AX201; WPA3-only APs without H2E are unsupported.
 
 ## 0.6.0-beta.2
 

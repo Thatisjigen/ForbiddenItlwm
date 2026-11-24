@@ -139,5 +139,34 @@ int main() {
         assert(j.keyLength == keyLength);
         assert(memcmp(j.key, p.data() + 0x50, keyLength) == 0);
     }
+
+    // Only an RSNXE (244) with the H2E bit lets -itlwmwpa3 show macOS the SAE AKM.
+    {
+        const uint8_t ssid[] = {0, 3, 'n', 'e', 't'};
+        std::vector<uint8_t> ies(ssid, ssid + sizeof(ssid));
+        assert(!AirportWCL::advertisesSAEH2E(ies.data(), ies.size()));       // no RSNXE: WPA2 fallback
+        std::vector<uint8_t> hnp = ies;
+        hnp.insert(hnp.end(), {244, 1, 0x00});                              // RSNXE without H2E (HnP only)
+        assert(!AirportWCL::advertisesSAEH2E(hnp.data(), hnp.size()));
+        std::vector<uint8_t> h2e = ies;
+        h2e.insert(h2e.end(), {244, 1, 0x20});
+        assert(AirportWCL::advertisesSAEH2E(h2e.data(), h2e.size()));
+        std::vector<uint8_t> empty = ies;
+        empty.insert(empty.end(), {244, 0});                                // zero-length RSNXE
+        assert(!AirportWCL::advertisesSAEH2E(empty.data(), empty.size()));
+        std::vector<uint8_t> cut = ies;
+        cut.insert(cut.end(), {244, 2, 0x20});                              // truncated: invalid IEs
+        assert(!AirportWCL::advertisesSAEH2E(cut.data(), cut.size()));
+        // A transition beacon without H2E is still rewritten to plain WPA2 (PSK only).
+        std::vector<uint8_t> mixed = {48, 20, 1, 0, 0, 0x0f, 0xac, 4, 1, 0, 0, 0x0f, 0xac, 4,
+                                      2, 0, 0, 0x0f, 0xac, 2, 0, 0x0f, 0xac, 8, 0x80, 0x00};
+        mixed[1] = uint8_t(mixed.size() - 2);
+        mixed.insert(mixed.end(), {244, 1, 0x00});
+        assert(!AirportWCL::advertisesSAEH2E(mixed.data(), mixed.size()));
+        const size_t before = mixed.size();
+        const size_t after = AirportWCL::selectWPA2TransitionMode(mixed.data(), mixed.size());
+        assert(after == before - 4 - 3);                                    // SAE suite and RSNXE gone
+        assert(mixed[14] == 1 && mixed[19] == 2);                              // one AKM: PSK
+    }
     puts("WCL WPA3-SAE classification: passed (host only)");
 }

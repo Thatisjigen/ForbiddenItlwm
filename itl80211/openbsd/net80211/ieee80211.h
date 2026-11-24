@@ -823,6 +823,30 @@ ieee80211_rsnxe_matches(const u_int8_t *expected, size_t expected_len,
 }
 
 /*
+ * Robust action frame categories (802.11-2020 Table 9-51): the ones
+ * management frame protection covers.  The others are always sent in
+ * the clear, also on a PMF association, and must not be dropped or
+ * protected.  Same list as Linux mac80211.
+ */
+static inline int
+ieee80211_action_is_robust(u_int8_t category)
+{
+	switch (category) {
+	case IEEE80211_CATEG_PUB:
+	case IEEE80211_CATEG_HT:
+	case IEEE80211_CATEG_UNPROT_WNM:
+	case IEEE80211_CATEG_SELF_PROT:
+	case 20:	/* Unprotected DMG */
+	case 21:	/* VHT */
+	case 22:	/* Unprotected S1G */
+	case IEEE80211_CATEG_VENDOR:
+		return 0;
+	default:
+		return 1;
+	}
+}
+
+/*
  * HT Capabilities Info (see 802.11-2012 8.4.2.58.2).
  */
 #define IEEE80211_HTCAP_LDPC		0x00000001

@@ -658,17 +658,38 @@ ieee80211_inputm(struct _ifnet *ifp, mbuf_t m, struct ieee80211_node *ni,
             }
             
             if (ni->ni_flags & IEEE80211_NODE_RXMGMTPROT) {
-                /* MMPDU protection is on for Rx */
-                if (subtype == IEEE80211_FC0_SUBTYPE_DISASSOC ||
-                    subtype == IEEE80211_FC0_SUBTYPE_DEAUTH ||
-                    subtype == IEEE80211_FC0_SUBTYPE_ACTION) {
+                /*
+                 * MMPDU protection is on for Rx.  Only robust frames are
+                 * protected: an unprotected action frame of a non-robust
+                 * category (public, HT, VHT, vendor ...) is taken as is.
+                 * A protected frame's category is encrypted, so it counts
+                 * as robust.
+                 */
+                int robust = subtype == IEEE80211_FC0_SUBTYPE_DISASSOC ||
+                    subtype == IEEE80211_FC0_SUBTYPE_DEAUTH;
+                if (subtype == IEEE80211_FC0_SUBTYPE_ACTION) {
+                    u_int8_t category;
+                    robust = (wh->i_fc[1] & IEEE80211_FC1_PROTECTED) ||
+                        mbuf_copydata(m, sizeof(*wh), 1, &category) != 0 ||
+                        ieee80211_action_is_robust(category);
+                }
+                if (robust) {
                     if (!IEEE80211_IS_MULTICAST(wh->i_addr1) &&
                         !(wh->i_fc[1] & IEEE80211_FC1_PROTECTED)) {
                         /* unicast mgmt not encrypted */
                         goto out;
                     }
-                    /* do software decryption */
-                    m = ieee80211_decrypt(ic, m, ni);
+                    /*
+                     * The driver decrypted it with the pairwise key, which
+                     * lives in hardware only: check the replay counter and
+                     * strip the CCMP header as for data frames.  Software
+                     * decryption would drop it (the key has no software
+                     * copy).  Group frames use BIP in software.
+                     */
+                    if (rxi->rxi_flags & IEEE80211_RXI_HWDEC)
+                        m = ieee80211_input_hwdecrypt(ic, ni, m, rxi);
+                    else
+                        m = ieee80211_decrypt(ic, m, ni);
                     if (m == NULL) {
                         /* XXX stats */
                         goto out;
@@ -676,7 +697,8 @@ ieee80211_inputm(struct _ifnet *ifp, mbuf_t m, struct ieee80211_node *ni,
                     wh = mtod(m, struct ieee80211_frame *);
                 }
             } else if ((ic->ic_flags & IEEE80211_F_RSNON) &&
-                       (wh->i_fc[1] & IEEE80211_FC1_PROTECTED)) {
+                       ((wh->i_fc[1] & IEEE80211_FC1_PROTECTED) ||
+                        (rxi->rxi_flags & IEEE80211_RXI_HWDEC))) {
                 /* encrypted but MMPDU Rx protection off for TA */
                 goto out;
             }

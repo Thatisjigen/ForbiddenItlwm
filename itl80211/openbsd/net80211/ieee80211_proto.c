@@ -1274,12 +1274,17 @@ ieee80211_auth_sae_failure(struct ieee80211com *ic,
 	explicit_bzero(ni->ni_pmkid, sizeof(ni->ni_pmkid));
 	explicit_bzero(&ni->ni_ptk, sizeof(ni->ni_ptk));
 	ic->ic_mgt_timer = 0;
-	if (ni != ic->ic_bss)
-		ni->ni_fails++;
-	else
-		ieee80211_try_another_bss(ic);
 	ic->ic_stats.is_rx_auth_fail++;
-	ieee80211_new_state(ic, IEEE80211_S_SCAN, -1);
+	/*
+	 * ni is always ic_bss here.  Try another AP of the same network; only
+	 * if none was picked (ic_bss still names the failed AP) scan again, so
+	 * the scan doesn't cancel the join ieee80211_try_another_bss started.
+	 */
+	u_int8_t failed[IEEE80211_ADDR_LEN];
+	IEEE80211_ADDR_COPY(failed, ic->ic_bss->ni_macaddr);
+	ieee80211_try_another_bss(ic);
+	if (IEEE80211_ADDR_EQ(failed, ic->ic_bss->ni_macaddr))
+		ieee80211_new_state(ic, IEEE80211_S_SCAN, -1);
 }
 
 /*

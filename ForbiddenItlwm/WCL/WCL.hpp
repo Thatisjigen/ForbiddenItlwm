@@ -386,6 +386,18 @@ inline bool scanUsesProbes(bool requested, bool activeRequest) {
 // This operates on the scan-message copy, never the received beacon or the
 // net80211 RSN IE used to validate the four-way handshake. SAE-only, mandatory
 // PMF and other AKM combinations must not be converted into WPA2 networks.
+// True if the IEs carry an RSN Extension element (244) with SAE hash-to-element (bit 5).
+// The driver only does H2E, so -itlwmwpa3 shows macOS the SAE AKM only when this holds.
+inline bool advertisesSAEH2E(const uint8_t *ies, size_t length) {
+    if (!validIEs(ies, length))
+        return false;
+    for (size_t offset = 0; offset < length; offset += size_t(ies[offset + 1]) + 2) {
+        if (ies[offset] == 244 && ies[offset + 1] >= 1 && (ies[offset + 2] & 0x20))
+            return true;
+    }
+    return false;
+}
+
 inline size_t selectWPA2TransitionMode(uint8_t *ies, size_t length) {
     if (!validIEs(ies, length))
         return length;
