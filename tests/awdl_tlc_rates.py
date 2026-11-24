@@ -43,6 +43,7 @@ struct ieee80211_channel { int two_ghz; };
 #define IEEE80211_IS_CHAN_2GHZ(c) ((c)->two_ghz)
 struct iwx_softc {};
 static const uint8_t kAwdlBaStationId = 3;
+static uint8_t awdlBaTlcStation = kAwdlBaStationId;
 static ieee80211_channel *awdlCoexOwnChan;
 static bool awdlBaTx80Active;
 static unsigned awdlBaTxMinMcs = 4;

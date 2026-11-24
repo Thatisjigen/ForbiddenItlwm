@@ -100,5 +100,27 @@ int main() {
         assert(!samePeer(nullptr, request(6).peer) && !samePeer(request(6).peer, nullptr));
         cases += 5;
     }
+    // Peer stations: 3 and 5-15; never 0-2 or channel 6's 4.
+    for (unsigned st = 0; st < 20; ++st)
+        assert(isPeerStation(st) == (st == 3 || (st >= 5 && st <= 15)));
+    ++cases;
+    // The hold for a further slot's frames: first in, first out, bounded, nothing lost or reordered.
+    {
+        BoundedFifo<int, 4> q;
+        int v = 0;
+        assert(q.empty() && !q.pop(v) && q.size() == 0);
+        for (int i = 1; i <= 4; ++i)
+            assert(q.push(i));
+        assert(q.full() && !q.push(5) && q.front() == 1);
+        assert(q.pop(v) && v == 1 && q.push(5));                          // wraps around
+        for (int want = 2; want <= 5; ++want)
+            assert(q.pop(v) && v == want);
+        assert(q.empty() && !q.pop(v) && v == 5);
+        for (int round = 0; round < 50; ++round) {                         // interleaved, across many wraps
+            assert(q.push(round) && q.push(round + 1000));
+            assert(q.pop(v) && v == round && q.pop(v) && v == round + 1000);
+        }
+        cases += 4;
+    }
     printf("AWDL peer slots: %u cases passed (host only)\n", cases);
 }

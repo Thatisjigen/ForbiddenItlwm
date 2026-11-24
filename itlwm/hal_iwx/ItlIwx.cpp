@@ -170,6 +170,42 @@ static bool awdlPeerAnyReceiveSession()
             return true;
     return false;
 }
+// Sending to the further slots' peers (-itlawdlmultipeer): each gets its own aggregation queue, ADDBA request,
+// agreement, sequence and firmware rate control once bulk data goes to it. Once agreed, all its unicast data goes
+// through that queue in order; while the queue is full its frames wait here (freed with its station). Unlike slot 0
+// there is no pause or send gate for them yet: those need each peer's own schedule.
+constexpr unsigned kAwdlPeerHoldMax = 128;
+static ItlAWDL::BoundedFifo<mbuf_t, kAwdlPeerHoldMax> awdlPeerHold[ItlAWDL::kMaxPeerSlots];
+static uint32_t awdlPeerTxQueues, awdlPeerTxAgreements, awdlPeerTxAggFrames, awdlPeerTxHeld, awdlPeerTxHoldDrops,
+    awdlPeerTxSingles, awdlPeerTxCandidates;
+// The slot (index into awdlPeers) of the management frame being sent, kept with its descriptor so its completion
+// is credited to that peer.
+static uint8_t awdlCoexSendingPeer;
+// A peer without a station that we send bulk data to while slot 0 belongs to another peer: it gets a further slot.
+static uint8_t awdlTxCand[6];
+static uint32_t awdlTxCandFrames;
+static ItlAWDL::BaTxBulkState awdlTxCandBulk;
+static ItlAWDL::PeerSlot *awdlPeerForTxQueue(int qid)
+{
+    if (qid < 0)
+        return nullptr;
+    for (unsigned i = 0; i < awdlPeerSlotsUsable; ++i)
+        if (awdlPeers[i].txQueue == qid)
+            return &awdlPeers[i];
+    return nullptr;
+}
+static void awdlPeerHoldFree(unsigned slot)
+{
+    mbuf_t m = nullptr;
+    while (slot < ItlAWDL::kMaxPeerSlots && awdlPeerHold[slot].pop(m))
+        mbuf_freem(m);
+}
+static uint8_t awdlPeerIndex(const ItlAWDL::PeerSlot &slot) { return uint8_t(&slot - awdlPeers); }
+// While a slot's management frames are being sent (RAII).
+struct AwdlSendingPeer {
+    explicit AwdlSendingPeer(const ItlAWDL::PeerSlot &slot) { awdlCoexSendingPeer = awdlPeerIndex(slot); }
+    ~AwdlSendingPeer() { awdlCoexSendingPeer = 0; }
+};
 // -itlawdlcoextx: the second context's own station (the monitor's number, unused in station mode)
 // and queue, for AWDL frames sent beside Wi-Fi.
 static bool awdlCoexTx;
@@ -735,7 +771,7 @@ static uint32_t awdlCoexTxSettingUpOwner, awdlCoexTxSettingUpNext;
 static int awdlCoexStationReadyGen = -1, awdlCoexStationTransitionGen = -1;
 static uint32_t awdlCoexStationTransitionOwner, awdlCoexStationTransitionNext;
 static bool awdlCoexSetupCurrent(int generation);
-static bool awdlCoexBaQueueCurrent(int generation, uint32_t listener, uint32_t peer);
+static bool awdlCoexBaQueueCurrent(int generation, uint32_t listener, uint32_t peer, uint8_t slot = 0);
 // Where its last queue allocation stopped, and the number the firmware gave.
 static const char *awdlCoexQueueStage = "none";
 static int awdlCoexQueueAssigned = -1;
@@ -3421,7 +3457,7 @@ iwx_reset_tx_ring(struct iwx_softc *sc, struct iwx_tx_ring *ring)
         if (data->m != NULL && data->in &&
             ((awdlCoexQueue >= 0 && ring->qid == awdlCoexQueue) || (awdlCoexOrphanQueue >= 0 && ring->qid == awdlCoexOrphanQueue) ||
              (awdlCh6TxQueue >= 0 && ring->qid == awdlCh6TxQueue) ||
-             (awdlPeer.txQueue >= 0 && ring->qid == awdlPeer.txQueue) ||
+             awdlPeerForTxQueue(ring->qid) ||
              (awdlCoexBaTxResetting >= 0 && ring->qid == awdlCoexBaTxResetting))) {
             ieee80211_release_node(&sc->sc_ic, &data->in->in_ni);
             data->in = nullptr;
@@ -4233,12 +4269,12 @@ iwx_tvqm_enable_txq(struct iwx_softc *sc, int tid, int ssn, uint32_t size, int s
         return -EINVAL;
     uint64_t epoch = dmaEpoch;
 #endif
-    if (stationId != IWX_STATION_ID && stationId != IWX_MONITOR_STA_ID && stationId != kAwdlBaStationId &&
+    if (stationId != IWX_STATION_ID && stationId != IWX_MONITOR_STA_ID && !ItlAWDL::isPeerStation(unsigned(stationId)) &&
         stationId != kAwdlCh6TxStaId)
         return -EINVAL;
     const auto ownerCurrent = [&]() {
         return !owner || (owner->generation == sc->sc_generation &&
-            awdlCoexBaQueueCurrent(owner->generation, owner->listener, owner->peer));
+            awdlCoexBaQueueCurrent(owner->generation, owner->listener, owner->peer, owner->slot));
     };
     if (!ownerCurrent())
         return -ECANCELED;
@@ -4429,10 +4465,11 @@ iwx_tvqm_enable_txq(struct iwx_softc *sc, int tid, int ssn, uint32_t size, int s
         else if (wr_idx >= getTxQueueSize())
             failureStage = "write-pointer";
     }
-    if (awdlCoexData && stationId == kAwdlBaStationId && sc->sc_ic.ic_opmode == IEEE80211_M_STA) {
-        // The listener peer's queue: a number no host queue uses, like the listener's own.
+    if (awdlCoexData && ItlAWDL::isPeerStation(unsigned(stationId)) && sc->sc_ic.ic_opmode == IEEE80211_M_STA) {
+        // A listener peer's queue: a number no host queue uses, like the listener's own, nor another peer's.
         bool used = fwqid <= 0 || fwqid == IWX_DQA_CMD_QUEUE || fwqid == sc->first_data_qid ||
-            fwqid == awdlCoexOrphanQueue || fwqid == awdlCoexQueue || (awdlCh6TxQueue >= 0 && fwqid == awdlCh6TxQueue);
+            fwqid == awdlCoexOrphanQueue || fwqid == awdlCoexQueue || (awdlCh6TxQueue >= 0 && fwqid == awdlCh6TxQueue) ||
+            awdlPeerForTxQueue(fwqid);
         for (int t = 0; t < int(nitems(sc->sc_tid_data)); ++t)
             used |= sc->sc_tid_data[t].qid == fwqid;
         spareBaSlot = !used;
@@ -4445,7 +4482,7 @@ iwx_tvqm_enable_txq(struct iwx_softc *sc, int tid, int ssn, uint32_t size, int s
         // channel 6's queue, a number no host queue uses, like the listener's.
         bool used = sc->sc_ic.ic_opmode != IEEE80211_M_STA || fwqid <= 0 || fwqid == IWX_DQA_CMD_QUEUE ||
             fwqid == sc->first_data_qid || fwqid == awdlCoexOrphanQueue || fwqid == awdlCoexQueue ||
-            fwqid == awdlPeer.txQueue || fwqid == awdlMonitorQueue;   // station mode only, so no monitor-mode BA queue
+            awdlPeerForTxQueue(fwqid) || fwqid == awdlMonitorQueue;   // station mode only, so no monitor-mode BA queue
         for (int t = 0; t < int(nitems(sc->sc_tid_data)); ++t)
             used |= sc->sc_tid_data[t].qid == fwqid;
         spareBaSlot = !used;
@@ -6700,8 +6737,9 @@ static const uint8_t kAwdlCoexRateMcs[6] = {0, 4, 5, 7, 4, 7};
 // Our management frames (ADDBA answers and requests) are tagged so they never count toward the data rate.
 enum { kCoexSlotBaAnswer = 3, kCoexSlotBaAsk, kCoexSlotDelba };
 static uint8_t awdlCoexSendingMgmt, awdlCoexSendingMgmtToken;
-static bool awdlCoexBaQueueCurrent(int generation, uint32_t listener, uint32_t peer)
+static bool awdlCoexBaQueueCurrent(int generation, uint32_t listener, uint32_t peer, uint8_t slot)
 {
+    const ItlAWDL::PeerSlot &awdlPeer = awdlPeers[slot < ItlAWDL::kMaxPeerSlots ? slot : 0];
     return awdlCoexAdded && awdlPeer.added &&
         awdlCoexGeneration == generation && awdlCoexToken == listener && awdlPeer.epoch == peer;
 }
@@ -6813,6 +6851,15 @@ static uint32_t awdlCoexBaTxSmallWindows, awdlCoexBaTxPolicyRefusals, awdlCoexBa
 static uint32_t awdlCoexBaTxQueuedCap()
 {
     return awdlPeer.txWindow && awdlPeer.txWindow < 64 ? awdlPeer.txWindow : kAwdlCoexBaTxQueuedMax;
+}
+// A further slot's peer can take aggregated frames, and how many may wait on its queue.
+static bool awdlPeerTxReady(const ItlAWDL::PeerSlot &p, const struct iwx_softc *sc)
+{
+    return p.added && p.txState == kCoexBaTxAgreed && p.txQueue >= 0 && p.txQueue < int(nitems(sc->txq));
+}
+static uint32_t awdlPeerTxCap(const ItlAWDL::PeerSlot &p)
+{
+    return p.txWindow && p.txWindow < 64 ? p.txWindow : kAwdlCoexBaTxQueuedMax;
 }
 // iface160: one path, in order, for everything to the Block Ack peer while its aggregate queue is paused,
 // full or still holds frames. On iface157 to iface159 frames under 1,200 bytes skipped the hold and went out
@@ -6941,6 +6988,7 @@ static bool awdlCoexScheduleCalibrated;
 static uint8_t awdlCoexSlotKind[IWX_MIN_256_BA_QUEUE_SIZE_GEN3];
 static uint32_t awdlCoexSlotBaPeerEpoch[nitems(awdlCoexSlotKind)];
 static uint8_t awdlCoexSlotToken[nitems(awdlCoexSlotKind)]; // Dialog token (ADDBA) or TID (DELBA) per slot.
+static uint8_t awdlCoexSlotPeer[nitems(awdlCoexSlotKind)];  // Which peer slot a management frame is for.
 static uint16_t awdlCoexSlotEnqueueId[nitems(awdlCoexSlotKind)];
 static uint32_t awdlCoexUcastOK, awdlCoexUcastFailed, awdlCoexGroupOK, awdlCoexGroupFailed;
 static uint32_t awdlCoexDataRxUcast, awdlCoexDataRxGroup, awdlCoexPromiscDropped;
@@ -7106,18 +7154,25 @@ static void awdlCoexPublish()
             root->setProperty("ITLAWDLCoexBaBroken", awdlCoexBaFailedGen >= 0 && awdlCoexBaFailedGen == awdlCoexGeneration);
             root->setProperty("ITLAWDLCoexPeerHandoffEnabled", awdlPeerHandoffEnabled());
             if (awdlCoexMultiPeer) {
-                // Each slot's state, no addresses: station, added, receive TIDs (hex), seconds since data.
-                char t[512];
+                // Each slot's state, no addresses: station, added, receive TIDs (hex), send state (o off, a asking,
+                // e enabling, A agreed, f failed), frames held, seconds since data. Then the send counters.
+                char t[768];
                 const uint64_t nowUS = awdlUptimeUS();
-                size_t u = size_t(snprintf(t, sizeof(t), "slots %u: adds %u removes %u failures %u full %u;",
-                                           awdlPeerSlotsUsable, awdlPeerSlotAdds, awdlPeerSlotRemoves,
-                                           awdlPeerSlotFailures, awdlPeerSlotFull));
+                size_t u = size_t(snprintf(t, sizeof(t), "slots %u: adds %u removes %u failures %u full %u; send "
+                                           "queues %u agreements %u aggregated %u held %u dropped %u single %u "
+                                           "promoted %u;", awdlPeerSlotsUsable, awdlPeerSlotAdds, awdlPeerSlotRemoves,
+                                           awdlPeerSlotFailures, awdlPeerSlotFull, awdlPeerTxQueues,
+                                           awdlPeerTxAgreements, awdlPeerTxAggFrames, awdlPeerTxHeld,
+                                           awdlPeerTxHoldDrops, awdlPeerTxSingles, awdlPeerTxCandidates));
+                static const char kTxStates[] = "oaAfe";   // kCoexBaTxOff, Asking, Agreed, Failed, Enabling
                 for (unsigned i = 0; i < awdlPeerSlotsUsable && u < sizeof(t); ++i) {
                     const ItlAWDL::PeerSlot &ps = awdlPeers[i];
                     const bool failed = i && ps.failedGen >= 0 && ps.failedGen == awdlCoexGeneration;
-                    u += size_t(snprintf(t + u, sizeof(t) - u, " %u:%u %s %02x %llus", i, ps.station,
+                    u += size_t(snprintf(t + u, sizeof(t) - u, " %u:%u %s %02x %c%u %llus", i, ps.station,
                                          failed ? "failed" : ps.added ? "up" : ps.requests.empty() ? "-" : "asking",
                                          ps.rxTids,
+                                         ps.txState >= 0 && ps.txState < 5 ? kTxStates[ps.txState] : '?',
+                                         awdlPeerHold[i].size(),
                                          ps.added && ps.lastUS && nowUS >= ps.lastUS ?
                                          (unsigned long long)((nowUS - ps.lastUS) / 1000000ULL) : 0ULL));
                 }
@@ -7502,6 +7557,7 @@ static int awdlBaTxFixedMcs = -1;
 static uint32_t awdlBaTxMinMcs = 4;
 static uint32_t awdlBaTxFixedFrames;
 static bool awdlBaTx, awdlBaTlc;
+static uint8_t awdlBaTlcStation = kAwdlBaStationId;   // the station awdlBaTlc's rate control is for
 static int awdlBaTxQueue = -1;
 static uint32_t awdlBaTxState, awdlBaTxAsks, awdlBaTxAnswerStatus = 0xffffffffU, awdlBaTxQueueResult;
 static uint32_t awdlBaTxFrames, awdlBaTxNotifs, awdlBaTxSentAir, awdlBaTxAcked, awdlBaTxDelba, awdlBaTxRefused, awdlBaTxSingles;
@@ -8726,6 +8782,12 @@ awdlCoexDataPump(struct iwx_softc *sc, unsigned budget)
         awdlMcastHeld = kept;
     }
     while (budget && ring.queued < 64 && awdlCoexAdded && awdlCoexGeneration == sc->sc_generation && !awdlStopping) {
+        // The further slots' held frames go first, in order, as their queues drain (-itlawdlmultipeer).
+        if (awdlPeerSlotsUsable > 1) {
+            awdlCoexPeerHoldDrain(sc, budget);
+            if (!budget || !awdlCoexAdded || awdlCoexGeneration != sc->sc_generation)
+                break;
+        }
         // Leave output queued while the paused aggregate ring is full. Sending it on
         // the listener's single-frame ring would defeat the peer-away pause.
         if (aggregateEligible && awdlPeer.pause.paused &&
@@ -8752,7 +8814,23 @@ awdlCoexDataPump(struct iwx_softc *sc, unsigned budget)
         --budget;
         const uint8_t *nextBytes = static_cast<const uint8_t *>(mbuf_data(next));
         const bool unicast = mbuf_len(next) >= 24 && !(nextBytes[4] & 1);
-        if (unicast) {
+        // A further slot's peer (-itlawdlmultipeer) keeps its own count; slot 0's and the rest as before.
+        ItlAWDL::PeerSlot *own = unicast && awdlPeerSlotsUsable > 1 ?
+            ItlAWDL::addedSlotFor(awdlPeers + 1, awdlPeerSlotsUsable - 1, nextBytes + 4) : nullptr;
+        if (own) {
+            if (mbuf_len(next) >= 1200)
+                ++own->txFrames;
+            own->lastUS = awdlUptimeUS();
+        } else if (unicast && awdlPeerSlotsUsable > 1 && awdlPeer.added &&
+                   !ItlAWDL::sameAddress(nextBytes + 4, awdlPeer.addr)) {
+            // Bulk to a peer without a station while slot 0 is another's: a candidate for a further slot.
+            if (!ItlAWDL::sameAddress(nextBytes + 4, awdlTxCand)) {
+                memcpy(awdlTxCand, nextBytes + 4, sizeof(awdlTxCand));
+                awdlTxCandBulk = ItlAWDL::BaTxBulkState{};
+            }
+            if (mbuf_len(next) >= 1200)
+                ++awdlTxCandFrames;
+        } else if (unicast) {
             if (!ItlAWDL::sameAddress(nextBytes + 4, awdlCoexTxDest)) {
                 memcpy(awdlCoexTxDest, nextBytes + 4, sizeof(awdlCoexTxDest));
                 awdlPeer.txBulk = ItlAWDL::BaTxBulkState{};
@@ -8762,6 +8840,23 @@ awdlCoexDataPump(struct iwx_softc *sc, unsigned budget)
                 ++awdlCoexTxDestFrames;
             if (awdlPeer.added && ItlAWDL::sameAddress(nextBytes + 4, awdlPeer.addr))
                 awdlPeer.lastUS = awdlUptimeUS();
+        }
+        // Once a further slot's peer has agreed, all its unicast data takes its aggregation queue, in order:
+        // while the queue is full (or earlier frames still wait) it waits here too.
+        if (own && !mbuf_next(next) && nextBytes[0] == 0x08 && awdlPeerTxReady(*own, sc)) {
+            const unsigned slotIndex = awdlPeerIndex(*own);
+            if (!awdlPeerHold[slotIndex].empty() || uint32_t(sc->txq[own->txQueue].queued) >= awdlPeerTxCap(*own)) {
+                if (awdlPeerHold[slotIndex].push(next)) {
+                    ++awdlPeerTxHeld;
+                } else {
+                    mbuf_freem(next);
+                    ++awdlPeerTxHoldDrops;
+                }
+                continue;
+            }
+            if (awdlCoexPeerSendAgg(sc, *own, next))
+                continue;
+            // Couldn't aggregate it: it goes the single-frame way below.
         }
         const bool earlyPayload = aggregateEligible && !aggregate && mbuf_len(next) >= 1200;
         // A short frame follows the peer's payload onto the aggregate queue while that queue still holds
@@ -8889,6 +8984,7 @@ awdlCoexBaRemovePeer(struct iwx_softc *sc, ItlAWDL::PeerSlot &awdlPeer)
 {
     awdlPeer.requests.clear();
     awdlPeer.answerLength = 0;
+    awdlPeerHoldFree(awdlPeerIndex(awdlPeer));
     if (!awdlPeer.added)
         return 0;
     const int gen = sc->sc_generation;
@@ -9070,6 +9166,7 @@ awdlCoexBaAddPeer(struct iwx_softc *sc, ItlAWDL::PeerSlot &awdlPeer, const uint8
     }
     awdlPeer.added = true;
     ++awdlPeerSlotAdds;
+    awdlPeer.txAsks = 0;
     awdlPeer.width = uint32_t(width);
     awdlPeer.accepted = false;
     awdlPeer.queueAllocPending = false;
@@ -9228,6 +9325,7 @@ awdlCoexBaRxPeer(struct iwx_softc *sc, ItlAWDL::PeerSlot &awdlPeer, int gen, uin
         awdlPeer.requests.clear();
         return true;
     }
+    const AwdlSendingPeer sending(awdlPeer);
     // Keep the station and TX agreement while the peer is still known and
     // has exchanged data in the last ten minutes. A further slot's station (receive only) goes after 60 s
     // without data once its receive sessions have gone, so idle peers give their station back.
@@ -9435,6 +9533,195 @@ awdlCoexBaRxPeer(struct iwx_softc *sc, ItlAWDL::PeerSlot &awdlPeer, int gen, uin
     return true;
 }
 
+// A further slot's send agreement for the task: once bulk data goes to its peer, an aggregation queue on the
+// peer's station with firmware rate control, our ADDBA request (in rounds, as for slot 0), and aggregation turned on
+// once the peer agrees. Returns false when the task's pass should end here.
+bool ItlIwx::
+awdlCoexBaTxPeer(struct iwx_softc *sc, ItlAWDL::PeerSlot &awdlPeer, int gen, uint32_t tok, uint64_t now)
+{
+    auto stillOurs = [&]() { return gen == sc->sc_generation && tok == awdlCoexToken && awdlCoexAdded &&
+                                    awdlCoexBaFailedGen != gen; };
+    if (!awdlPeer.added || awdlPeer.failedGen == gen)
+        return true;
+    const AwdlSendingPeer sending(awdlPeer);
+    const uint8_t index = awdlPeerIndex(awdlPeer);
+    (void)ItlAWDL::noteBaTxTraffic(awdlPeer.txBulk, now, awdlPeer.txFrames, awdlPeer.txState == kCoexBaTxAgreed);
+    if (awdlPeer.txState == kCoexBaTxOff) {
+        if (!awdlPeer.txBulk.bulk || awdlPeer.queueAllocPending)
+            return true;
+        awdlPeer.queueAllocPending = true;
+        const CoexBaQueueOwner owner{gen, tok, awdlPeer.epoch, index};
+        const int queue = iwx_tvqm_enable_txq(sc, kAwdlBaTxTid, 0, IWX_DEFAULT_QUEUE_SIZE, awdlPeer.station, &owner);
+        if (!stillOurs() || !awdlCoexBaQueueCurrent(gen, tok, owner.peer, index))
+            return false;
+        if (queue < 0) {
+            awdlPeer.queueAllocPending = false;
+            awdlPeer.txState = kCoexBaTxFailed;
+            return false;
+        }
+        awdlPeer.txQueue = queue;
+        awdlPeer.txSeq = uint16_t(sc->txq[queue].cur) & 0xfff;
+        ++awdlPeerTxQueues;
+        // Firmware rate control for this peer's station, by the same high-rates-only rule as slot 0's.
+        const bool before80 = awdlBaTx80Active;
+        awdlBaTx80Active = awdlPeer.width == 80;
+        awdlBaTlcStation = awdlPeer.station;
+        awdlBaTlc = true;
+        const int err = iwx_rs_init(sc, reinterpret_cast<struct iwx_node *>(sc->sc_ic.ic_bss), true);
+        awdlBaTlc = false;
+        awdlBaTlcStation = kAwdlBaStationId;
+        awdlBaTx80Active = before80;
+        if (!stillOurs() || !awdlCoexBaQueueCurrent(gen, tok, owner.peer, index))
+            return false;
+        awdlPeer.queueAllocPending = false;
+        if (err) {
+            awdlPeer.txState = kCoexBaTxFailed;
+            return false;
+        }
+        awdlPeer.txState = kCoexBaTxAsking;
+        awdlPeer.txAsks = 0;
+        awdlPeer.txLastAskUS = 0;
+        return false;
+    }
+    if (awdlPeer.txState == kCoexBaTxEnabling) {
+        if (now < awdlCoexTxPauseUntilUS)
+            return true;
+        const uint8_t dialog = awdlPeer.txToken;
+        struct iwx_add_sta_cmd cmd;
+        memset(&cmd, 0, sizeof(cmd));
+        cmd.sta_id = awdlPeer.station;
+        cmd.mac_id_n_color = htole32(IWX_FW_CMD_ID_AND_COLOR(kAwdlCoexMacId, 0));
+        cmd.add_modify = IWX_STA_MODE_MODIFY;
+        cmd.tid_disable_tx = htole16(uint16_t(0xffff & ~(1U << kAwdlBaTxTid)));
+        cmd.modify_mask = IWX_STA_MODIFY_TID_DISABLE_TX;
+        uint32_t status = IWX_ADD_STA_SUCCESS;
+        const int err = iwx_send_cmd_pdu_status(sc, IWX_ADD_STA, sizeof(cmd), &cmd, &status);
+        if (!stillOurs())
+            return false;
+        if (awdlPeer.added && awdlPeer.txState == kCoexBaTxEnabling && dialog == awdlPeer.txToken)
+            awdlPeer.txState = !err && (status & IWX_ADD_STA_STATUS_MASK) == IWX_ADD_STA_SUCCESS ?
+                kCoexBaTxAgreed : kCoexBaTxFailed;
+        return false;
+    }
+    if (awdlPeer.txState != kCoexBaTxAsking)
+        return true;
+    // Idle peer, no bulk send: hold, and let the next data start a fresh round.
+    if (!awdlPeer.txBulk.bulk && now - awdlPeer.lastUS > kAwdlCoexBaIdleAskUS) {
+        awdlPeer.txAsks = 0;
+        awdlPeer.txRestUntilUS = 0;
+        return true;
+    }
+    if (awdlPeer.txRestUntilUS && now < awdlPeer.txRestUntilUS)
+        return true;
+    awdlPeer.txRestUntilUS = 0;
+    if (awdlPeer.txLastAskUS && now - awdlPeer.txLastAskUS < 200000ULL)
+        return true;
+    if (awdlPeer.txAsks >= kAwdlBaTxAsksMax) {
+        awdlPeer.txAsks = 0;
+        ++awdlPeer.txToken;
+        awdlPeer.txRestUntilUS = now + kAwdlBaTxRestUS;
+        return true;
+    }
+    if (now < awdlCoexTxPauseUntilUS)
+        return true;
+    static const uint8_t kBssid[6] = {0x00, 0x25, 0x00, 0xff, 0x94, 0x73};
+    uint8_t ask[ItlAWDL::kAddbaResponseLength];
+    const size_t askLength = ItlAWDL::buildAddbaRequest(ask, sizeof(ask), awdlPeer.addr, awdlCoexAddr, kBssid,
+        awdlPeer.txToken, kAwdlBaTxTid, ItlAWDL::kBaWindowMax, awdlPeer.txSeq, ++awdlCoexBaSequence);
+    if (askLength && awdlCoexSendMgmt(sc, ask, askLength, kCoexSlotBaAsk)) {
+        awdlPeer.txLastAskUS = now;
+        ++awdlPeer.txAsks;
+    }
+    return true;
+}
+
+// One frame for a further slot's peer as QoS data on TID 0 with its sequence, on its aggregation queue. On success
+// the frame is consumed; otherwise the caller still owns it.
+bool ItlIwx::
+awdlCoexPeerSendAgg(struct iwx_softc *sc, ItlAWDL::PeerSlot &awdlPeer, mbuf_t next)
+{
+    struct ieee80211com *ic = &sc->sc_ic;
+    mbuf_t qos = nullptr;
+    if (mbuf_getpacket(MBUF_DONTWAIT, &qos) || !qos)
+        return false;
+    const size_t qosLength = ItlAWDL::buildQosData(static_cast<const uint8_t *>(mbuf_data(next)), mbuf_len(next),
+                                                   kAwdlBaTxTid, awdlPeer.txSeq, static_cast<uint8_t *>(mbuf_data(qos)),
+                                                   mbuf_maxlen(qos));
+    if (!qosLength) {
+        mbuf_freem(qos);
+        return false;
+    }
+    mbuf_setlen(qos, qosLength);
+    mbuf_pkthdr_setlen(qos, qosLength);
+    auto *node = ieee80211_ref_node(ic->ic_bss);
+    awdlCoexBaSendingAgg = true;
+    const int err = iwx_tx(sc, qos, node, EDCA_AC_BE, awdlPeer.txQueue);
+    awdlCoexBaSendingAgg = false;
+    if (err) {
+        ieee80211_release_node(ic, node);
+        ++awdlCoexBaTxSubmitErrors;
+        return false;
+    }
+    awdlPeer.txSeq = (awdlPeer.txSeq + 1) & 0xfff;
+    awdlPeer.txLastAggUS = awdlUptimeUS();
+    ++awdlPeerTxAggFrames;
+    ++awdlCoexDataTx;
+    awdlCoexLastDataUS = awdlPeer.txLastAggUS;
+    mbuf_freem(next);
+    return true;
+}
+
+// One frame on the listener's single-frame queue (consumed either way).
+bool ItlIwx::
+awdlCoexPeerSendSingle(struct iwx_softc *sc, mbuf_t next)
+{
+    struct ieee80211com *ic = &sc->sc_ic;
+    auto *node = ieee80211_ref_node(ic->ic_bss);
+    awdlCoexSending = true;
+    awdlCoexSendingData = true;
+    const int err = iwx_tx(sc, next, node, EDCA_AC_BE, awdlCoexQueue);
+    awdlCoexSendingData = false;
+    awdlCoexSending = false;
+    if (err) {
+        ieee80211_release_node(ic, node);
+        ++awdlCoexDataTxErrors;
+        return false;
+    }
+    ++awdlCoexDataTx;
+    awdlCoexLastDataUS = awdlUptimeUS();
+    return true;
+}
+
+// The further slots' held frames, oldest first, as their queues make room. A slot that lost its agreement sends
+// what it held on the single-frame queue, still in order.
+void ItlIwx::
+awdlCoexPeerHoldDrain(struct iwx_softc *sc, unsigned &budget)
+{
+    for (unsigned i = 1; i < awdlPeerSlotsUsable && budget; ++i) {
+        ItlAWDL::PeerSlot &p = awdlPeers[i];
+        mbuf_t m = nullptr;
+        while (budget && !awdlPeerHold[i].empty()) {
+            if (awdlPeerTxReady(p, sc)) {
+                if (uint32_t(sc->txq[p.txQueue].queued) >= awdlPeerTxCap(p))
+                    break;
+                (void)awdlPeerHold[i].pop(m);
+                --budget;
+                if (!awdlCoexPeerSendAgg(sc, p, m) && awdlCoexPeerSendSingle(sc, m))
+                    ++awdlPeerTxSingles;
+            } else {
+                if (sc->txq[awdlCoexQueue].queued >= 64)
+                    return;
+                (void)awdlPeerHold[i].pop(m);
+                --budget;
+                if (awdlCoexPeerSendSingle(sc, m))
+                    ++awdlPeerTxSingles;
+            }
+            if (!awdlCoexAdded || awdlCoexGeneration != sc->sc_generation)
+                return;
+        }
+    }
+}
+
 void ItlIwx::
 awdlCoexBaHandle(struct iwx_softc *sc)
 {
@@ -9446,6 +9733,7 @@ awdlCoexBaHandle(struct iwx_softc *sc)
         for (unsigned i = 0; i < ItlAWDL::kMaxPeerSlots; ++i) {
             ItlAWDL::PeerSlot &awdlPeer = awdlPeers[i];
             awdlPeer.station = ItlAWDL::stationForSlot(i);
+            awdlPeerHoldFree(i);
             awdlPeer.requests.clear();
             awdlPeer.added = false;
             awdlPeer.accepted = false;
@@ -9574,9 +9862,41 @@ awdlCoexBaHandle(struct iwx_softc *sc)
         if (!stillOurs())
             return;
     }
-    // ---- Send BA (only with -itlawdlcoexbatx), to slot 0's peer.
+    // ---- Send BA (only with -itlawdlcoexbatx). The further slots first (-itlawdlmultipeer), then slot 0's peer.
     if (!awdlCoexBaTxEnabled)
         return;
+    if (awdlPeerSlotsUsable > 1) {
+        // A peer we send bulk to while slot 0 is someone else's, without a slot of its own, gets the first free one.
+        (void)ItlAWDL::noteBaTxTraffic(awdlTxCandBulk, now, awdlTxCandFrames);
+        if (awdlTxCandBulk.bulk && ItlAWDL::knownAddress(awdlTxCand) && awdlCoexPeerKnown(awdlTxCand, now) &&
+            !ItlAWDL::addedSlotFor(awdlPeers, awdlPeerSlotsUsable, awdlTxCand)) {
+            ItlAWDL::PeerSlot *free = nullptr;
+            for (unsigned i = 1; i < awdlPeerSlotsUsable && !free; ++i)
+                if (!awdlPeers[i].added && awdlPeers[i].requests.empty() && awdlPeers[i].failedGen != gen)
+                    free = &awdlPeers[i];
+            if (free) {
+                uint8_t peer[6];
+                memcpy(peer, awdlTxCand, sizeof(peer));
+                const ItlAWDL::BaTxBulkState bulk = awdlTxCandBulk;
+                memset(awdlTxCand, 0, sizeof(awdlTxCand));
+                awdlTxCandBulk = ItlAWDL::BaTxBulkState{};
+                ++awdlPeerTxCandidates;
+                if (awdlCoexBaAddPeer(sc, *free, peer))
+                    return;
+                if (!stillOurs()) {
+                    (void)awdlCoexBaRemovePeer(sc, *free);
+                    return;
+                }
+                free->txBulk = bulk;
+                free->txFrames = 0;
+                free->txBulk.lastFrames = 0;
+                return;
+            }
+        }
+        for (unsigned i = 1; i < awdlPeerSlotsUsable; ++i)
+            if (!awdlCoexBaTxPeer(sc, awdlPeers[i], gen, tok, now))
+                return;
+    }
     struct iwx_add_sta_cmd cmd;
     uint32_t status;
     int err;
@@ -9615,7 +9935,7 @@ awdlCoexBaHandle(struct iwx_softc *sc)
         if (awdlPeer.queueAllocPending)
             return;
         awdlPeer.queueAllocPending = true;
-        const CoexBaQueueOwner owner{gen, tok, awdlPeer.epoch};
+        const CoexBaQueueOwner owner{gen, tok, awdlPeer.epoch, 0};
         const int queue = iwx_tvqm_enable_txq(sc, kAwdlBaTxTid, 0, IWX_DEFAULT_QUEUE_SIZE, kAwdlBaStationId, &owner);
         if (!stillOurs() || !awdlCoexBaQueueCurrent(gen, tok, owner.peer))
             return;
@@ -10638,13 +10958,17 @@ iwx_rx_frame(struct iwx_softc *sc, mbuf_t m, int chanidx,
                             ++awdlPeer.txToken;
                             awdlPeer.probeTried = false;
                             awdlPeer.probeUntilUS = 0;
-                            awdlCoexBaTxAsks = 0;
+                            (&awdlPeer == &awdlPeers[0] ? awdlCoexBaTxAsks : awdlPeer.txAsks) = 0;
                             awdlPeer.txLastAskUS = 0;
                         }
                     } else {
                         ItlAWDL::AddbaAnswer answer;
                         const bool parsed = ItlAWDL::parseAddbaAnswer(cf, coexLen, awdlCoexAddr, &answer);
-                        const bool matches = parsed && awdlPeer.txState == kCoexBaTxAsking && awdlCoexBaTxAsks &&
+                        // The answering peer's slot (slot 0 when it has none), and its own count of our requests.
+                        ItlAWDL::PeerSlot *answerSlot = ItlAWDL::addedSlotFor(awdlPeers, awdlPeerSlotsUsable, cf + 10);
+                        ItlAWDL::PeerSlot &awdlPeer = answerSlot ? *answerSlot : awdlPeers[0];
+                        uint32_t &askCount = &awdlPeer == &awdlPeers[0] ? awdlCoexBaTxAsks : awdlPeer.txAsks;
+                        const bool matches = parsed && awdlPeer.txState == kCoexBaTxAsking && askCount &&
                             awdlPeer.added && ItlAWDL::sameAddress(cf + 10, awdlPeer.addr) &&
                             answer.token == awdlPeer.txToken && answer.tid == kAwdlBaTxTid;
                         if (parsed)
@@ -10662,11 +10986,13 @@ iwx_rx_frame(struct iwx_softc *sc, mbuf_t m, int chanidx,
                                 ++awdlPeer.txToken;
                                 awdlPeer.probeTried = false;
                                 awdlPeer.probeUntilUS = 0;
-                                awdlCoexBaTxAsks = 0;
+                                askCount = 0;
                             } else {
                                 if (!awdlFrame)
                                     ++awdlCoexBaNonAwdlBssidApplied;
                                 ++awdlCoexBaTxAgreements;
+                                if (&awdlPeer != &awdlPeers[0])
+                                    ++awdlPeerTxAgreements;
                                 // A window of 0 isn't valid in an answer; it's taken as our requested 64.
                                 awdlPeer.txWindow = answer.window && answer.window < 64 ? answer.window : 64;
                                 if (awdlPeer.txWindow < 64)
@@ -11742,11 +12068,14 @@ iwx_rx_tx_ba_notif(struct iwx_softc *sc, struct iwx_rx_packet *pkt, struct iwx_r
             continue;
         ring = &sc->txq[qid];
         const bool awdlBaQueue = int(qid) == awdlBaTxQueue;
+        ItlAWDL::PeerSlot *notifSlot = awdlPeerForTxQueue(int(qid));
         const bool coexQueue = (awdlCoexQueue >= 0 && int(qid) == awdlCoexQueue) ||
-            (awdlCoexOrphanQueue >= 0 && int(qid) == awdlCoexOrphanQueue) ||
-            (awdlPeer.txQueue >= 0 && int(qid) == awdlPeer.txQueue) ||
+            (awdlCoexOrphanQueue >= 0 && int(qid) == awdlCoexOrphanQueue) || notifSlot ||
             (awdlCh6TxQueue >= 0 && int(qid) == awdlCh6TxQueue);
-        const bool coexBaQueue = awdlPeer.txQueue >= 0 && int(qid) == awdlPeer.txQueue;
+        // Slot 0's queue as before; a further slot's notifications only note its queue draining.
+        const bool coexBaQueue = notifSlot == &awdlPeers[0];
+        if (notifSlot && !coexBaQueue)
+            notifSlot->txLastNotifUS = awdlUptimeUS();
         if (coexBaQueue) {
             coexNotified = true;
             ++awdlCoexBaTxNotifs;
@@ -11911,9 +12240,10 @@ iwx_rx_tx_cmd(struct iwx_softc *sc, struct iwx_rx_packet *pkt,
     const bool coexQueue = (awdlCoexQueue >= 0 && qid == awdlCoexQueue) ||
         (awdlCoexOrphanQueue >= 0 && qid == awdlCoexOrphanQueue) ||
         (awdlCh6TxQueue >= 0 && qid == awdlCh6TxQueue);
-    if (!coexQueue && !(awdlPeer.txQueue >= 0 && qid == awdlPeer.txQueue))
+    const bool peerAggQueue = awdlPeerForTxQueue(qid) != nullptr;
+    if (!coexQueue && !peerAggQueue)
         sc->sc_tx_timer = 0;
-    if (awdlPeer.txQueue >= 0 && qid == awdlPeer.txQueue) {
+    if (peerAggQueue) {
         ++awdlCoexBaTxResponses;
         awdlCoexBaTxResponseFrames += tx_resp->frame_count;
         if (tx_resp->frame_count > 1)
@@ -11951,8 +12281,7 @@ iwx_rx_tx_cmd(struct iwx_softc *sc, struct iwx_rx_packet *pkt,
         txd = &ring->data[idx];
         // laobamac d695c97: on the station's own queues the SSN is the next frame to send, so the
         // completed frame is the one before it. The AWDL queues keep their own accounting below.
-        if (!coexQueue && qid != awdlBaTxQueue && qid != awdlMonitorQueue &&
-            !(awdlPeer.txQueue >= 0 && qid == awdlPeer.txQueue)) {
+        if (!coexQueue && qid != awdlBaTxQueue && qid != awdlMonitorQueue && !peerAggQueue) {
             if (!itlTxCompletionValid(ring->tail, ring->queued, idx, ring->ring_count))
                 return;
             if (idx == ring->tail) {
@@ -12051,6 +12380,8 @@ iwx_rx_tx_cmd(struct iwx_softc *sc, struct iwx_rx_packet *pkt,
                     continue;
                 const uint8_t kind = awdlCoexSlotKind[slot];
                 awdlCoexSlotKind[slot] = 0;
+                ItlAWDL::PeerSlot &awdlPeer = awdlPeers[awdlCoexSlotPeer[slot] < ItlAWDL::kMaxPeerSlots ?
+                                                        awdlCoexSlotPeer[slot] : 0];
                 const bool sameEpoch = awdlPeer.added && awdlCoexSlotBaPeerEpoch[slot] == awdlPeer.epoch;
                 const bool delbaAttempt = kind == kCoexSlotDelba && sameEpoch &&
                     awdlPeer.delbaWaitGen == sc->sc_generation && awdlPeer.delbaWaitEpoch == awdlPeer.epoch &&
@@ -13526,8 +13857,10 @@ iwx_tx(struct iwx_softc *sc, mbuf_t m, struct ieee80211_node *ni, int ac, int mo
 {
     // Receive/queue-allocation experiments must not submit even incidental
     // network traffic to a newly allocated firmware queue.
-    if (!awdlRx && awdlCoexData && monitorQueue >= 0 && monitorQueue == awdlPeer.txQueue) {
-        // The listener peer's aggregation queue: only AWDL data the pump converted, while the session is up.
+    ItlAWDL::PeerSlot *aggSlot = awdlCoexData && !awdlRx ? awdlPeerForTxQueue(monitorQueue) : nullptr;
+    if (aggSlot) {
+        // A listener peer's aggregation queue: only AWDL data the pump converted, while the session is up.
+        ItlAWDL::PeerSlot &awdlPeer = *aggSlot;
         if (!awdlCoexBaSendingAgg || awdlPeer.txState != kCoexBaTxAgreed || !awdlPeer.added ||
             !awdlCoexAdded || awdlCoexGeneration != sc->sc_generation || !getMainWorkLoop()->inGate() ||
             sc->sc_ic.ic_opmode != IEEE80211_M_STA || sc->sc_ic.ic_state != IEEE80211_S_RUN || mbuf_next(m) ||
@@ -13788,7 +14121,8 @@ iwx_tx(struct iwx_softc *sc, mbuf_t m, struct ieee80211_node *ni, int ac, int mo
     if (monitorQueue >= 0 && monitorQueue == awdlCoexQueue && idx >= 0 && idx < int(nitems(awdlCoexSlotKind))) {
         awdlCoexSlotKind[idx] = awdlCoexSendingMgmt ? awdlCoexSendingMgmt :
             awdlCoexSendingData ? (IEEE80211_IS_MULTICAST(wh->i_addr1) ? 1 : 2) : 0;
-        awdlCoexSlotBaPeerEpoch[idx] = awdlPeer.epoch;
+        awdlCoexSlotPeer[idx] = awdlCoexSendingPeer < ItlAWDL::kMaxPeerSlots ? awdlCoexSendingPeer : 0;
+        awdlCoexSlotBaPeerEpoch[idx] = awdlPeers[awdlCoexSlotPeer[idx]].epoch;
         awdlCoexSlotToken[idx] = awdlCoexSendingMgmtToken;
         awdlCoexSlotEnqueueId[idx] = 0;
         if (awdlCoexSendingMgmt) {
@@ -16225,7 +16559,7 @@ iwx_rs_init(struct iwx_softc *sc, struct iwx_node *in, bool update)
         cfg_cmd.mode = IWX_TLC_MNG_MODE_HT;
         cfg_cmd.ht_rates[IWX_TLC_NSS_1][IWX_TLC_MCS_PER_BW_80] = htole16(0xf0);
         cfg_cmd.ht_rates[IWX_TLC_NSS_2][IWX_TLC_MCS_PER_BW_80] = htole16(0xf0);
-        cfg_cmd.sta_id = kAwdlBaStationId;
+        cfg_cmd.sta_id = awdlBaTlcStation;
         cfg_cmd.max_ch_width = IWX_TLC_MNG_CH_WIDTH_20MHZ;
         // The listener's peer: legacy fallback rates from the listener's band, not the BSS's.
         if (awdlCoexOwnChan)
@@ -18644,6 +18978,7 @@ awdlCoexListener(struct iwx_softc *sc, bool add)
         for (unsigned i = 0; i < ItlAWDL::kMaxPeerSlots; ++i) {
             ItlAWDL::PeerSlot &awdlPeer = awdlPeers[i];
             awdlPeer.station = ItlAWDL::stationForSlot(i);
+            awdlPeerHoldFree(i);   // the firmware dropped their queues
             awdlPeer.added = false;
             awdlPeer.accepted = false;
             awdlPeer.requests.clear();

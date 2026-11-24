@@ -49,6 +49,9 @@ struct PeerSlot {
     bool queueAllocPending = false;
     bool probeTried = false;
     uint64_t probeUntilUS = 0, lastRxPayloadUS = 0;
+    // A further slot's own count of payload-sized frames to the peer (the bulk detector's input) and of our
+    // ADDBA requests in the current round. Slot 0 uses the listener-wide awdlCoexTxDestFrames and BaTxAsks.
+    uint32_t txFrames = 0, txAsks = 0;
     // Pausing the aggregate queue while the peer is away, and its confirmed resume.
     PeerPauseState pause{};
     PeerBulkState bulk{};
@@ -58,6 +61,39 @@ struct PeerSlot {
 };
 
 inline bool samePeer(const uint8_t *a, const uint8_t *b) { return a && b && !memcmp(a, b, 6); }
+
+// Whether a firmware station number is one stationForSlot hands out.
+inline bool isPeerStation(unsigned station) {
+    return station == kFirstPeerStation ||
+        (station > kChannel6Station && station <= stationForSlot(kMaxPeerSlots - 1));
+}
+
+// A first-in, first-out list of at most N items, for a further slot's frames held while its aggregation queue is
+// full, so none overtakes an earlier one. No allocation.
+template <typename T, unsigned N> struct BoundedFifo {
+    bool empty() const { return !count; }
+    bool full() const { return count == N; }
+    unsigned size() const { return count; }
+    bool push(const T &item) {
+        if (count == N)
+            return false;
+        items[(head + count++) % N] = item;
+        return true;
+    }
+    bool pop(T &item) {
+        if (!count)
+            return false;
+        item = items[head];
+        head = (head + 1) % N;
+        --count;
+        return true;
+    }
+    const T &front() const { return items[head]; }
+
+private:
+    T items[N]{};
+    unsigned head = 0, count = 0;
+};
 
 // The slot whose station exists for `peer`, among the first `usable`.
 inline PeerSlot *addedSlotFor(PeerSlot *slots, unsigned usable, const uint8_t *peer) {

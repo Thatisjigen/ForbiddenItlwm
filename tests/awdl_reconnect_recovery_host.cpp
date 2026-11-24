@@ -15,6 +15,7 @@
 #include <libkern/OSByteOrder.h>
 #include "AWDLPeerHandoff.hpp"
 // PEER_SLOT
+static void awdlPeerHoldFree(unsigned) {}   // held further-slot frames (none in these tests)
 #define htole32 OSSwapHostToLittleInt32
 #define htole16 OSSwapHostToLittleInt16
 #define IEEE80211_ADDR_COPY(dst, src) memcpy(dst, src, 6)

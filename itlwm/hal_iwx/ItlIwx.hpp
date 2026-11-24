@@ -278,7 +278,7 @@ public:
     int    iwx_nic_init(struct iwx_softc *);
     int    iwx_enable_txq(struct iwx_softc *, int, int, int, int);
     int     iwx_tvqm_alloc_txq(struct iwx_softc *, int, int);
-    struct CoexBaQueueOwner { int generation; uint32_t listener, peer; };
+    struct CoexBaQueueOwner { int generation; uint32_t listener, peer; uint8_t slot; };
     int     iwx_tvqm_enable_txq(struct iwx_softc *, int, int, uint32_t, int = IWX_STATION_ID,
                                const CoexBaQueueOwner * = nullptr);
     void    iwx_post_alive(struct iwx_softc *);
@@ -484,6 +484,10 @@ public:
     int    awdlCoexBaRemoveAllPeers(struct iwx_softc *);
     int    awdlCoexBaAddPeer(struct iwx_softc *, ItlAWDL::PeerSlot &, const uint8_t *);
     bool   awdlCoexBaRxPeer(struct iwx_softc *, ItlAWDL::PeerSlot &, int, uint32_t, uint64_t);
+    bool   awdlCoexBaTxPeer(struct iwx_softc *, ItlAWDL::PeerSlot &, int, uint32_t, uint64_t);
+    bool   awdlCoexPeerSendAgg(struct iwx_softc *, ItlAWDL::PeerSlot &, mbuf_t);
+    bool   awdlCoexPeerSendSingle(struct iwx_softc *, mbuf_t);
+    void   awdlCoexPeerHoldDrain(struct iwx_softc *, unsigned &);
     void   awdlCoexStationTest(struct iwx_softc *);
     void   awdlCoexBaPauseStep(struct iwx_softc *);
     bool   awdlCoexSendMgmt(struct iwx_softc *, const uint8_t *, size_t, uint8_t kind);
