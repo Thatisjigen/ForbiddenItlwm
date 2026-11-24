@@ -880,6 +880,7 @@ ieee80211_input_ba(struct ieee80211com *ic, mbuf_t m,
                 else
                     ba->ba_winmiss = 0;
                 ba->ba_missedsn = sn;
+                ic->ic_stats.is_ht_rx_ba_winmiss++;
                 ifp->netStat->inputErrors++;
                 mbuf_freem(m);	/* discard the MPDU */
                 return;
@@ -905,6 +906,7 @@ ieee80211_input_ba(struct ieee80211com *ic, mbuf_t m,
     idx = (ba->ba_head + idx) % IEEE80211_BA_MAX_WINSZ;
     /* store the received MPDU in the buffer */
     if (ba->ba_buf[idx].m != NULL) {
+        ic->ic_stats.is_ht_rx_ba_dup++;
         ifp->netStat->inputErrors++;
         ic->ic_stats.is_ht_rx_ba_no_buf++;
         mbuf_freem(m);
@@ -3111,10 +3113,17 @@ ieee80211_recv_addba_req(struct ieee80211com *ic, mbuf_t m,
     u_int8_t token, tid;
     int err = 0;
     
-    /* Ignore if we are not ready to receive data frames. */
-    if (ic->ic_state != IEEE80211_S_RUN ||
-        ((ic->ic_flags & IEEE80211_F_RSNON) && !ni->ni_port_valid))
+    /*
+     * Ignore if we are not associated.  A request that comes before the RSN
+     * port is valid is answered too, as Linux mac80211 does: with 802.1X the
+     * EAP exchange takes seconds, and an AP whose early ADDBA went unanswered
+     * may never aggregate to us (#69).  Data frames other than EAPOL stay
+     * dropped until the port is valid, whatever the agreement.
+     */
+    if (ic->ic_state != IEEE80211_S_RUN)
         return;
+    if ((ic->ic_flags & IEEE80211_F_RSNON) && !ni->ni_port_valid)
+        ic->ic_stats.is_ht_rx_ba_unauth++;
     
     if (!(ni->ni_flags & IEEE80211_NODE_HT)) {
         DPRINTF(("received ADDBA req from non-HT STA %s\n",

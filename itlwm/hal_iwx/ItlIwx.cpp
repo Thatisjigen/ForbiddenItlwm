@@ -6124,12 +6124,16 @@ iwx_ccmp_decap(struct iwx_softc *sc, mbuf_t m, struct ieee80211_node *ni,
     
    /* find key for decryption */
    k = ieee80211_get_rxkey(ic, m, ni);
-   if (k == NULL || k->k_cipher != IEEE80211_CIPHER_CCMP)
+   if (k == NULL || k->k_cipher != IEEE80211_CIPHER_CCMP) {
+       ic->ic_stats.is_ccmp_decap_fail++;
        return 1;
+   }
 
    /* Check that ExtIV bit is be set. */
-   if (!(ivp[3] & IEEE80211_WEP_EXTIV))
+   if (!(ivp[3] & IEEE80211_WEP_EXTIV)) {
+       ic->ic_stats.is_ccmp_decap_fail++;
        return 1;
+   }
 
    hasqos = ieee80211_has_qos(wh);
    tid = hasqos ? ieee80211_get_qos(wh) & IEEE80211_QOS_TID : 0;
@@ -6197,6 +6201,7 @@ iwx_rx_hwdecrypt(struct iwx_softc *sc, mbuf_t m, uint32_t rx_pkt_status,
         if ((rx_pkt_status & IWX_RX_MPDU_RES_STATUS_SEC_ENC_MSK) !=
             IWX_RX_MPDU_RES_STATUS_SEC_CCM_ENC) {
             ic->ic_stats.is_ccmp_dec_errs++;
+            ic->ic_stats.is_ccmp_hw_notccm++;
             ret = 1;
             goto out;
         }
@@ -6207,6 +6212,7 @@ iwx_rx_hwdecrypt(struct iwx_softc *sc, mbuf_t m, uint32_t rx_pkt_status,
             (IWX_RX_MPDU_RES_STATUS_DEC_DONE |
              IWX_RX_MPDU_RES_STATUS_MIC_OK)) {
             ic->ic_stats.is_ccmp_dec_errs++;
+            ic->ic_stats.is_ccmp_hw_micfail++;
             ret = 1;
             goto out;
         }

@@ -125,6 +125,13 @@ struct ieee80211_stats {
 	u_int32_t	is_ht_tx_ba_timeout;
     u_int32_t   is_vht_nego_no_mandatory_mcs;
     u_int32_t   is_vht_nego_bad_crypto;
+    /* receive-error causes, published as ItlwmRxErrors */
+    u_int32_t   is_ccmp_hw_notccm;	/* protected frame not CCM-decrypted by firmware */
+    u_int32_t   is_ccmp_hw_micfail;	/* firmware decryption or MIC check failed */
+    u_int32_t   is_ccmp_decap_fail;	/* hardware-decrypted frame without key/ExtIV */
+    u_int32_t   is_ht_rx_ba_winmiss;	/* MPDU far outside the Block Ack window */
+    u_int32_t   is_ht_rx_ba_dup;	/* MPDU already in the reorder buffer */
+    u_int32_t   is_ht_rx_ba_unauth;	/* ADDBA accepted before the RSN port was valid */
 };
 
 #define	SIOCG80211STATS		_IOWR('i', 242, struct ifreq)

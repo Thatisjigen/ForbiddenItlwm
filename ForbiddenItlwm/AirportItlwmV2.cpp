@@ -2197,6 +2197,37 @@ void AirportItlwm::reportInfraTraffic()
     }
 }
 
+// ItlwmRxErrors: why received frames were dropped, so a report of en0 input errors (netstat -i)
+// can tell decryption, replay, Block Ack reordering and association problems apart (#69).
+// Every 5 s, only when something changed.
+void AirportItlwm::publishRxErrors()
+{
+    if (++rxErrorsTick % 5)
+        return;
+    struct ieee80211com *ic = fHalService->get80211Controller();
+    const struct ieee80211_stats &s = ic->ic_stats;
+    const uint32_t inputErrors = ic->ic_ac.ac_if.netStat ? ic->ic_ac.ac_if.netStat->inputErrors : 0;
+    const uint32_t sum = inputErrors + s.is_ccmp_hw_notccm + s.is_ccmp_hw_micfail + s.is_ccmp_replays +
+        s.is_ccmp_decap_fail + s.is_rx_wepfail + s.is_rx_unencrypted + s.is_rx_unauth + s.is_rx_wrongbss +
+        s.is_rx_notassoc + s.is_rx_tooshort + s.is_ht_rx_ba_winmiss + s.is_ht_rx_ba_dup +
+        s.is_ht_rx_frame_below_ba_winstart + s.is_ht_rx_ba_unauth + s.is_ht_rx_ba_agreements;
+    if (rxErrorsPublished && sum == rxErrorsLastSum)
+        return;
+    rxErrorsPublished = true;
+    rxErrorsLastSum = sum;
+    char text[480];
+    snprintf(text, sizeof(text),
+             "input errors %u; firmware not CCM %u, decrypt/MIC failed %u; CCMP replay %u, no key/ExtIV %u; "
+             "software decrypt failed %u; unencrypted %u; port not valid %u; wrong BSS %u; not associated %u; "
+             "too short %u; Block Ack window miss %u, duplicate %u, below window %u; "
+             "Block Ack agreements %u, before port valid %u",
+             inputErrors, s.is_ccmp_hw_notccm, s.is_ccmp_hw_micfail, s.is_ccmp_replays, s.is_ccmp_decap_fail,
+             s.is_rx_wepfail, s.is_rx_unencrypted, s.is_rx_unauth, s.is_rx_wrongbss, s.is_rx_notassoc,
+             s.is_rx_tooshort, s.is_ht_rx_ba_winmiss, s.is_ht_rx_ba_dup, s.is_ht_rx_frame_below_ba_winstart,
+             s.is_ht_rx_ba_agreements, s.is_ht_rx_ba_unauth);
+    setProperty("ItlwmRxErrors", text);
+}
+
 void AirportItlwm::watchdogAction(IOTimerEventSource *timer)
 {
     if (!fHalService)
@@ -2228,6 +2259,7 @@ void AirportItlwm::watchdogAction(IOTimerEventSource *timer)
                  itlAwdlStatsNoPath, itlAwdlStatsWrongPm, itlAWDLBuildVerified() ? "" : " (-itlawdlanybuild)");
         setProperty("ITLAWDLDataStats", st);
     }
+    publishRxErrors();
 #ifdef AIRPORT_WCL
     if (fNetIf)
         static_cast<AirportItlwmSkywalkInterface *>(fNetIf)->wclPostLinkQuality();

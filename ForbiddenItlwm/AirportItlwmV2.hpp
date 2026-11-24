@@ -182,6 +182,10 @@ public:
     bool createMediumTables(const IONetworkMedium **primary);
     void releaseAll();
     void watchdogAction(IOTimerEventSource *timer);
+    void publishRxErrors();
+    uint32_t rxErrorsTick = 0;
+    uint32_t rxErrorsLastSum = 0;
+    bool rxErrorsPublished = false;
     void reportInfraTraffic();   // (-itlinfrastats), non-virtual
     
     virtual SInt32 enableFeature(IO80211FeatureCode, void*) override;
