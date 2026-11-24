@@ -129,5 +129,6 @@ a=s.index('iwx_rx_mpdu_mq(struct');b=s.index("\nvoid ItlIwx::",a);assert hashlib
 # count of received frames by reported channel while the listener is added (ITLAWDLListenerRxChan), read-only. Then
 # a peer's DELBA and data are matched to that peer's slot (ItlAWDL::addedSlotFor) instead of the one BA peer: the same
 # peer with one slot, the only change without -itlawdlmultipeer. Then an ADDBA answer to our request and a DELBA of our
-# send session are matched to the sending peer's slot and its own request count (slot 0's as before).
-a=s.index('iwx_rx_frame(struct');b=s.index("\nvoid ItlIwx::",a);assert hashlib.sha256(s[a:b].encode()).hexdigest()=='0d678c36c16512b84ffc58b98503f21c58acad98246672731acb966f24370405'
+# send session are matched to the sending peer's slot and its own request count (slot 0's as before). Then a further
+# slot's peer's sync frames and data feed that slot's own schedule (added lines only).
+a=s.index('iwx_rx_frame(struct');b=s.index("\nvoid ItlIwx::",a);assert hashlib.sha256(s[a:b].encode()).hexdigest()=='8eb501a03bdb4cd553700527d90f2657f6c004d6b86abb498d8704c38e1b2e36'

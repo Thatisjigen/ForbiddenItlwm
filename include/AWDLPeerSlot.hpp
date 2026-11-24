@@ -52,6 +52,15 @@ struct PeerSlot {
     // A further slot's own count of payload-sized frames to the peer (the bulk detector's input) and of our
     // ADDBA requests in the current round. Slot 0 uses the listener-wide awdlCoexTxDestFrames and BaTxAsks.
     uint32_t txFrames = 0, txAsks = 0;
+    // A further slot's own view of its peer's schedule, from the peer's sync frames and data (slot 0 uses the
+    // listener-wide awdlCoexPeerSchedule): its aggregate queue pauses while the peer is away, and frames sent singly
+    // wait for the peer's availability window, as for slot 0.
+    PeerSchedule schedule{};
+    uint32_t scheduleToken = 0;      // the listener the schedule was taken under
+    uint64_t scheduleRxUS = 0;       // last data from the peer: awake if recent
+    uint32_t txAggFrames = 0;        // aggregated frames sent, the pause's bulk input
+    uint64_t gateSinceUS = 0, gateLimitUS = 0;
+    uint8_t gateKind = 0;
     // Pausing the aggregate queue while the peer is away, and its confirmed resume.
     PeerPauseState pause{};
     PeerBulkState bulk{};

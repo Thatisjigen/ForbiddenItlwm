@@ -34,6 +34,9 @@ bodies = "\n".join([
     method("bool ItlIwx::\nawdlCoexBaRxPeer("),
     static("static bool awdlCoexBaQueueCurrent(int generation, uint32_t listener, uint32_t peer, uint8_t slot)\n"),
     method("bool ItlIwx::\nawdlCoexBaTxPeer("),
+    static("static bool awdlPeerScheduleCurrent(const ItlAWDL::PeerSlot &p)"),
+    static("static bool awdlPeerGateClosed(ItlAWDL::PeerSlot &p, uint64_t now)"),
+    method("void ItlIwx::\nawdlCoexPeerPauseStep("),
 ])
 
 program = r'''
@@ -59,7 +62,8 @@ enum { IWX_ADD_STA = 0x18, IWX_REMOVE_STA = 0x19, IWX_STA_LINK = 0, IWX_STA_MODE
     IWX_STA_FLG_MAX_AGG_SIZE_64K = 3 << 19, IWX_STA_FLG_MAX_AGG_SIZE_1024K = 6 << 19, IWX_STA_FLG_FAT_EN_MSK = 3 << 26,
     IWX_STA_FLG_MIMO_EN_MSK = 3 << 28, IWX_STA_FLG_MAX_AGG_SIZE_MSK = 15 << 19, IWX_STA_FLG_AGG_MPDU_DENS_MSK = 7 << 23,
     kAwdlCoexMacId = 2, kCoexSlotBaAnswer = 3, kCoexSlotBaAsk, kCoexSlotDelba,
-    IWX_STA_MODIFY_TID_DISABLE_TX = 0x2, IWX_DEFAULT_QUEUE_SIZE = 256 };
+    IWX_STA_MODIFY_TID_DISABLE_TX = 0x2, IWX_DEFAULT_QUEUE_SIZE = 256, IWX_STA_FLG_DISABLE_TX = 1 << 4,
+    IWX_CMD_ASYNC = 1 };
 enum { kCoexBaTxOff, kCoexBaTxAsking, kCoexBaTxAgreed, kCoexBaTxFailed, kCoexBaTxEnabling };
 constexpr uint8_t kAwdlBaStationId = 3, kAwdlBaTxTid = 0;
 constexpr uint32_t kAwdlBaTxAsksMax = 40;
@@ -85,7 +89,12 @@ static ItlAWDL::BoundedFifo<mbuf_t, 128> awdlPeerHold[ItlAWDL::kMaxPeerSlots];
 static uint8_t awdlCoexSendingPeer;
 static uint8_t sentFor[64];   // the slot each sent management frame was credited to
 static uint32_t awdlPeerSlotAdds, awdlPeerSlotRemoves, awdlPeerSlotFailures;
-static uint32_t awdlPeerTxQueues;
+static uint32_t awdlPeerTxQueues, awdlPeerGateHolds, awdlPeerGateForced, awdlPeerPauses, awdlCoexPauseResumeFailures,
+    awdlCoexResumeRetirements;
+static bool awdlCoexBaPeerPauseEnabled = true, awdlCoexMovePending, awdlCoexTxHalted, awdlCoexGate = true;
+static int awdlCoexBaGen = 7;
+static unsigned awdlCoexChannel = 149;
+constexpr uint64_t kAwdlGateAwWindowUS = 4000, kAwdlGateAwakeUS = 100000;
 static int awdlCoexBaFailedGen = -1, awdlCoexBaTxResetting = -1;
 static bool awdlCoexAdded = true, awdlCoexBaFilterOff, awdlCoexBaTxEnabled = true;
 static uint32_t awdlCoexToken = 5, awdlCoexBaStatus, awdlCoexBaSessions, awdlCoexBaAnswers, awdlCoexBaAnswerErrors,
@@ -103,7 +112,7 @@ static bool known = true;
 static bool awdlCoexPeerKnown(const uint8_t *, uint64_t, bool = false) { return known; }
 static void awdlCoexBaEvent(char, unsigned, unsigned, unsigned, unsigned = 0, unsigned = 0) {}
 static int awdlCoexBaWidth(ieee80211com *) { return 80; }
-struct Command { int id; uint8_t sta, mask, tid; uint8_t addr[6]; };
+struct Command { int id; uint8_t sta, mask, tid; uint8_t addr[6]; uint32_t flags; };
 static std::vector<Command> commands;
 static std::vector<std::vector<uint8_t>> sent;
 static int failAddFor = -1;     // ADD_STA (new station) fails for this station number
@@ -130,6 +139,7 @@ public:
                   c->modify_mask == IWX_STA_MODIFY_TID_DISABLE_TX ? uint8_t(c->tid_disable_tx & 1) :
                   c->remove_immediate_ba_tid, {}};
         memcpy(k.addr, c->addr, 6);
+        k.flags = c->station_flags_msk == IWX_STA_FLG_DISABLE_TX ? 0x100 | c->station_flags : 0;
         commands.push_back(k);
         if (!c->add_modify && c->sta_id == failAddFor) {
             *status = 0;
@@ -139,8 +149,13 @@ public:
         return 0;
     }
     int iwx_send_cmd_pdu(iwx_softc *, int id, int, size_t, const void *data) {
+        if (id == IWX_ADD_STA) {   // the asynchronous pause
+            const auto *c = static_cast<const iwx_add_sta_cmd *>(data);
+            commands.push_back(Command{id, c->sta_id, 0xfe, 0, {}, c->station_flags});
+            return 0;
+        }
         const auto *c = static_cast<const iwx_rm_sta_cmd *>(data);
-        commands.push_back(Command{id, c->sta_id, 0, 0, {}});
+        commands.push_back(Command{id, c->sta_id, 0, 0, {}, 0});
         return 0;
     }
     int iwx_flush_sta_tids(iwx_softc *, int, int) { return 0; }
@@ -156,6 +171,7 @@ public:
     int awdlCoexBaAddPeer(iwx_softc *, ItlAWDL::PeerSlot &, const uint8_t *);
     bool awdlCoexBaRxPeer(iwx_softc *, ItlAWDL::PeerSlot &, int, uint32_t, uint64_t);
     bool awdlCoexBaTxPeer(iwx_softc *, ItlAWDL::PeerSlot &, int, uint32_t, uint64_t);
+    void awdlCoexPeerPauseStep(iwx_softc *, ItlAWDL::PeerSlot &);
 };
 ''' + bodies + r'''
 static ItlIwx driver;
@@ -350,6 +366,63 @@ int main() {
     const size_t before = sent.size();
     (void)driver.awdlCoexBaTxPeer(&hardware, c, hardware.sc_generation, awdlCoexToken, clockUS + 1);
     assert(sent.size() == before);
+    ++cases;
+    // A further slot's own schedule: while it says the peer is away, the slot's aggregate queue pauses (its station
+    // only) and resumes after, and a single frame for it waits behind its send gate, at most the gate's limit.
+    reset();
+    assert(deliver(request(10, 0, 1)) && deliver(request(11, 0, 2)));
+    settle();
+    {
+        ItlAWDL::PeerSlot &d = awdlPeers[1];
+        d.txState = kCoexBaTxAgreed;
+        d.txQueue = 6;
+        hardware.txq[6].queued = 3;                                         // frames waiting on its queue
+        d.schedule.assumeZero = true;
+        ItlAWDL::PeerSyncInfo info{};
+        info.awCounter = 400;                                               // extended AW 100: entry 4
+        info.downCounterTU = 20;
+        info.awPeriodTU = 16;
+        for (unsigned k = 0; k < 16; ++k)
+            info.channels[k] = k < 4 ? 149 : 6;                             // on our channel in entries 0-3 only
+        const uint64_t t0 = clockUS;
+        d.schedule.note(info, t0, 149);
+        d.scheduleToken = awdlCoexToken;
+        assert(awdlPeerScheduleCurrent(d) && !awdlPeerScheduleCurrent(awdlPeers[2]));
+        uint64_t away = 0;
+        for (uint64_t t = t0; t < t0 + 2000000 && !away; t += 1000)
+            if (d.schedule.shouldPause(t)) away = t;
+        assert(away);
+        clockUS = away;
+        d.schedule.heardUS = away;
+        commands.clear();
+        driver.awdlCoexPeerPauseStep(&hardware, d);
+        assert(d.pause.paused && commands.size() == 1 && commands[0].sta == 5 && commands[0].mask == 0xfe &&
+               commands[0].flags == (1 << 4));                             // asynchronous DISABLE_TX
+        assert(!awdlPeers[0].pause.paused);
+        // Back on our channel: resumed (confirmed on station 5).
+        uint64_t back = 0;
+        for (uint64_t t = away; t < away + 2000000 && !back; t += 1000)
+            if (!d.schedule.shouldPause(t)) back = t;
+        clockUS = back + 2000;
+        d.schedule.heardUS = clockUS;
+        commands.clear();
+        driver.awdlCoexPeerPauseStep(&hardware, d);
+        assert(!d.pause.paused && commands.size() == 1 && commands[0].sta == 5 && commands[0].flags == 0x100);
+        // The send gate (for frames sent singly): closed while away, open at the limit or when back.
+        d.txState = kCoexBaTxAsking;
+        clockUS = away + 16 * 65536;                                        // the same entry, one sequence later
+        d.schedule.heardUS = clockUS;
+        assert(d.schedule.shouldPause(clockUS));
+        assert(awdlPeerGateClosed(d, clockUS));
+        assert(!awdlPeerGateClosed(d, clockUS + 600000));                   // past the 450 ms ceiling: opens
+        assert(awdlPeerGateForced == 1);
+        awdlCoexGate = false;
+        assert(!awdlPeerGateClosed(d, clockUS));                            // -itlawdlcoexnogate
+        awdlCoexGate = true;
+        d.scheduleToken = awdlCoexToken + 1;                                // a schedule from another listener
+        assert(!awdlPeerGateClosed(d, clockUS));
+        hardware.txq[6].queued = 0;
+    }
     ++cases;
     printf("PASS %u multi-peer receive and send Block Ack scenarios on the real task steps (host mocks only)\n", cases);
 }

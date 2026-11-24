@@ -490,6 +490,7 @@ public:
     void   awdlCoexPeerHoldDrain(struct iwx_softc *, unsigned &);
     void   awdlCoexStationTest(struct iwx_softc *);
     void   awdlCoexBaPauseStep(struct iwx_softc *);
+    void   awdlCoexPeerPauseStep(struct iwx_softc *, ItlAWDL::PeerSlot &);
     bool   awdlCoexSendMgmt(struct iwx_softc *, const uint8_t *, size_t, uint8_t kind);
     int    iwx_auth(struct iwx_softc *);
     int    iwx_deauth(struct iwx_softc *);

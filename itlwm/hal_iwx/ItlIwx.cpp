@@ -6907,6 +6907,46 @@ static uint32_t awdlCoexGateQueuedPauses;
 // Last data frame from the schedule peer: a peer that sent data in the last 100 ms is awake.
 static uint64_t awdlCoexSchedPeerRxUS;
 constexpr uint64_t kAwdlGateAwWindowUS = 4000, kAwdlGateAwakeUS = 100000;
+// A further slot's schedule is usable: taken under this listener, on our channel.
+static bool awdlPeerScheduleCurrent(const ItlAWDL::PeerSlot &p)
+{
+    return awdlCoexAdded && p.added && p.scheduleToken == awdlCoexToken && p.schedule.ourChannel == awdlCoexChannel;
+}
+static uint32_t awdlPeerGateHolds, awdlPeerGateForced, awdlPeerPauses;
+// The send gate for a further slot's peer, by slot 0's rule (awdlCoexGate): closed while its schedule says it is away
+// (at most the away run, 450 ms), or dozing outside the start of its AW; past that limit it opens rather than starve.
+static bool awdlPeerGateClosed(ItlAWDL::PeerSlot &p, uint64_t now)
+{
+    if (!awdlCoexGate || !awdlPeerScheduleCurrent(p)) {
+        p.gateSinceUS = 0;
+        p.gateKind = 0;
+        return false;
+    }
+    const bool dozing = p.schedule.presentEntries() <= ItlAWDL::kPeerDozeMaxEntries &&
+        (!p.scheduleRxUS || now - p.scheduleRxUS > kAwdlGateAwakeUS);
+    const auto gate = p.schedule.sendGate(now, dozing, kAwdlGateAwWindowUS);
+    if (gate == ItlAWDL::PeerSchedule::SendGate::Open) {
+        p.gateSinceUS = 0;
+        p.gateKind = 0;
+        return false;
+    }
+    const uint8_t kind = uint8_t(gate);
+    if (!p.gateSinceUS || kind != p.gateKind) {
+        if (!p.gateSinceUS)
+            ++awdlPeerGateHolds;
+        p.gateSinceUS = now;
+        p.gateKind = kind;
+        p.gateLimitUS = gate == ItlAWDL::PeerSchedule::SendGate::Away ? p.schedule.pauseLimitUS(now) :
+            p.schedule.awUS() + 2000;
+    }
+    if (now - p.gateSinceUS < p.gateLimitUS)
+        return true;
+    if (p.gateLimitUS) {
+        ++awdlPeerGateForced;
+        p.gateLimitUS = 0;
+    }
+    return false;
+}
 // iface161 (on unless -itlawdlcoexcalwait): the coex schedule assumes offset 0 until refuted
 // (PeerSchedule::assumeZero), so pauses and the gate work from the first sync frame after each anchor.
 static bool awdlCoexAssumeZero = true;
@@ -7160,18 +7200,20 @@ static void awdlCoexPublish()
                 const uint64_t nowUS = awdlUptimeUS();
                 size_t u = size_t(snprintf(t, sizeof(t), "slots %u: adds %u removes %u failures %u full %u; send "
                                            "queues %u agreements %u aggregated %u held %u dropped %u single %u "
-                                           "promoted %u;", awdlPeerSlotsUsable, awdlPeerSlotAdds, awdlPeerSlotRemoves,
-                                           awdlPeerSlotFailures, awdlPeerSlotFull, awdlPeerTxQueues,
-                                           awdlPeerTxAgreements, awdlPeerTxAggFrames, awdlPeerTxHeld,
-                                           awdlPeerTxHoldDrops, awdlPeerTxSingles, awdlPeerTxCandidates));
+                                           "promoted %u; pauses %u gate holds %u forced %u;", awdlPeerSlotsUsable,
+                                           awdlPeerSlotAdds, awdlPeerSlotRemoves, awdlPeerSlotFailures, awdlPeerSlotFull,
+                                           awdlPeerTxQueues, awdlPeerTxAgreements, awdlPeerTxAggFrames, awdlPeerTxHeld,
+                                           awdlPeerTxHoldDrops, awdlPeerTxSingles, awdlPeerTxCandidates, awdlPeerPauses,
+                                           awdlPeerGateHolds, awdlPeerGateForced));
                 static const char kTxStates[] = "oaAfe";   // kCoexBaTxOff, Asking, Agreed, Failed, Enabling
                 for (unsigned i = 0; i < awdlPeerSlotsUsable && u < sizeof(t); ++i) {
                     const ItlAWDL::PeerSlot &ps = awdlPeers[i];
                     const bool failed = i && ps.failedGen >= 0 && ps.failedGen == awdlCoexGeneration;
-                    u += size_t(snprintf(t + u, sizeof(t) - u, " %u:%u %s %02x %c%u %llus", i, ps.station,
+                    u += size_t(snprintf(t + u, sizeof(t) - u, " %u:%u %s %02x %c%s%u %llus", i, ps.station,
                                          failed ? "failed" : ps.added ? "up" : ps.requests.empty() ? "-" : "asking",
                                          ps.rxTids,
                                          ps.txState >= 0 && ps.txState < 5 ? kTxStates[ps.txState] : '?',
+                                         ps.pause.paused ? "p" : i && awdlPeerScheduleCurrent(ps) ? "s" : "",
                                          awdlPeerHold[i].size(),
                                          ps.added && ps.lastUS && nowUS >= ps.lastUS ?
                                          (unsigned long long)((nowUS - ps.lastUS) / 1000000ULL) : 0ULL));
@@ -8515,6 +8557,8 @@ awdlCoexTxTask(void *arg)
         if (awdlCoexData && !awdlStopping && awdlCoexAdded) {
             that->awdlCoexBaHandle(sc);
             that->awdlCoexBaPauseStep(sc);
+            for (unsigned i = 1; i < awdlPeerSlotsUsable; ++i)
+                that->awdlCoexPeerPauseStep(sc, awdlPeers[i]);
             that->awdlCoexDataPump(sc);
         }
         if (awdlCoexBaTraceEnabled && !awdlStopping && awdlCoexAdded && awdlCoexGeneration == sc->sc_generation) {
@@ -8845,7 +8889,8 @@ awdlCoexDataPump(struct iwx_softc *sc, unsigned budget)
         // while the queue is full (or earlier frames still wait) it waits here too.
         if (own && !mbuf_next(next) && nextBytes[0] == 0x08 && awdlPeerTxReady(*own, sc)) {
             const unsigned slotIndex = awdlPeerIndex(*own);
-            if (!awdlPeerHold[slotIndex].empty() || uint32_t(sc->txq[own->txQueue].queued) >= awdlPeerTxCap(*own)) {
+            if (!awdlPeerHold[slotIndex].empty() || own->pause.paused ||
+                uint32_t(sc->txq[own->txQueue].queued) >= awdlPeerTxCap(*own)) {
                 if (awdlPeerHold[slotIndex].push(next)) {
                     ++awdlPeerTxHeld;
                 } else {
@@ -8857,6 +8902,25 @@ awdlCoexDataPump(struct iwx_softc *sc, unsigned budget)
             if (awdlCoexPeerSendAgg(sc, *own, next))
                 continue;
             // Couldn't aggregate it: it goes the single-frame way below.
+        } else if (own && awdlPeerGateClosed(*own, awdlUptimeUS())) {
+            // Not aggregated: a single frame for a further slot's peer waits for its availability window, as slot 0's
+            // do behind the send gate. Frames behind it for that peer wait with it.
+            if (awdlPeerHold[awdlPeerIndex(*own)].push(next)) {
+                ++awdlPeerTxHeld;
+            } else {
+                mbuf_freem(next);
+                ++awdlPeerTxHoldDrops;
+            }
+            continue;
+        } else if (own && !awdlPeerHold[awdlPeerIndex(*own)].empty()) {
+            // Earlier frames for this peer still wait: this one goes behind them.
+            if (awdlPeerHold[awdlPeerIndex(*own)].push(next)) {
+                ++awdlPeerTxHeld;
+            } else {
+                mbuf_freem(next);
+                ++awdlPeerTxHoldDrops;
+            }
+            continue;
         }
         const bool earlyPayload = aggregateEligible && !aggregate && mbuf_len(next) >= 1200;
         // A short frame follows the peer's payload onto the aggregate queue while that queue still holds
@@ -9167,6 +9231,13 @@ awdlCoexBaAddPeer(struct iwx_softc *sc, ItlAWDL::PeerSlot &awdlPeer, const uint8
     awdlPeer.added = true;
     ++awdlPeerSlotAdds;
     awdlPeer.txAsks = 0;
+    if (&awdlPeer != &awdlPeers[0]) {
+        awdlPeer.schedule.reset();
+        awdlPeer.scheduleToken = 0;
+        awdlPeer.scheduleRxUS = 0;
+        awdlPeer.gateSinceUS = awdlPeer.gateLimitUS = 0;
+        awdlPeer.gateKind = 0;
+    }
     awdlPeer.width = uint32_t(width);
     awdlPeer.accepted = false;
     awdlPeer.queueAllocPending = false;
@@ -9286,6 +9357,78 @@ awdlCoexBaPauseStep(struct iwx_softc *sc)
     if (gen != sc->sc_generation || tok != awdlCoexToken || !awdlPeer.added || epoch != awdlPeer.epoch ||
         !ItlAWDL::sameAddress(peer, awdlPeer.addr))
         return; // A newer owner's state stands; removal or replacement already cleared the pause.
+    awdlPeer.resumePending = false;
+    if (err || (status & IWX_ADD_STA_STATUS_MASK) != IWX_ADD_STA_SUCCESS) {
+        ++awdlPeer.pause.commandErrors;
+        ++awdlCoexPauseResumeFailures;
+        awdlPeer.resumeRetryUS = awdlUptimeUS() + 50000ULL;
+        if (++awdlPeer.resumeFailStreak >= 5) {
+            awdlPeer.resumeFailStreak = 0;
+            ++awdlCoexResumeRetirements;
+            (void)awdlCoexBaRemovePeer(sc, awdlPeer);
+        }
+        return;
+    }
+    awdlPeer.pause = resumed;
+    awdlPeer.resumeFailStreak = 0;
+}
+
+// A further slot's aggregate queue, paused while its peer is away by its own schedule, as slot 0's is
+// (awdlCoexBaPauseStep): only the peer's station is paused, a resume is confirmed and retried, and after five
+// failed resumes the station is retired.
+void ItlIwx::
+awdlCoexPeerPauseStep(struct iwx_softc *sc, ItlAWDL::PeerSlot &awdlPeer)
+{
+    if (!awdlCoexBaPeerPauseEnabled || !awdlPeer.added || !awdlCoexAdded || awdlPeer.resumePending ||
+        awdlCoexBaGen != sc->sc_generation || awdlCoexGeneration != sc->sc_generation ||
+        awdlPeer.failedGen == sc->sc_generation)
+        return;
+    const uint64_t now = awdlUptimeUS();
+    const bool bulk = awdlPeer.bulk.note(now, awdlPeer.txAggFrames);
+    const bool aggActive = bulk || awdlPeer.txBulk.bulk ||
+        (awdlPeer.txLastAggUS && now - awdlPeer.txLastAggUS < 300000ULL);
+    const bool queuedForPeer = awdlCoexGate && awdlPeer.txQueue >= 0 && awdlPeer.txQueue < int(nitems(sc->txq)) &&
+        sc->txq[awdlPeer.txQueue].queued > 0;
+    const bool scheduled = awdlPeerScheduleCurrent(awdlPeer);
+    const bool want = (aggActive || queuedForPeer) && awdlPeer.txState == kCoexBaTxAgreed &&
+        !awdlCoexMovePending && !awdlCoexTxHalted && scheduled && awdlPeer.schedule.shouldPause(now);
+    const auto before = awdlPeer.pause;
+    const int change = awdlPeer.pause.step(want, now, scheduled ? awdlPeer.schedule.pauseLimitUS(now) :
+                                           ItlAWDL::kPeerPauseMaxUS);
+    if (!change)
+        return;
+    struct iwx_add_sta_cmd cmd = {};
+    cmd.sta_id = awdlPeer.station;
+    cmd.mac_id_n_color = htole32(IWX_FW_CMD_ID_AND_COLOR(kAwdlCoexMacId, 0));
+    cmd.add_modify = IWX_STA_MODE_MODIFY;
+    cmd.station_flags = htole32(change > 0 ? IWX_STA_FLG_DISABLE_TX : 0);
+    cmd.station_flags_msk = htole32(IWX_STA_FLG_DISABLE_TX);
+    if (change > 0) {
+        if (iwx_send_cmd_pdu(sc, IWX_ADD_STA, IWX_CMD_ASYNC, sizeof(cmd), &cmd)) {
+            awdlPeer.pause = before;
+            ++awdlPeer.pause.commandErrors;
+        } else {
+            ++awdlPeerPauses;
+        }
+        return;
+    }
+    if (now < awdlPeer.resumeRetryUS) {
+        awdlPeer.pause = before;
+        return;
+    }
+    const int gen = sc->sc_generation;
+    const uint32_t tok = awdlCoexToken;
+    const uint32_t epoch = awdlPeer.epoch;
+    uint8_t peer[6];
+    memcpy(peer, awdlPeer.addr, sizeof(peer));
+    const auto resumed = awdlPeer.pause;
+    awdlPeer.pause = before;
+    awdlPeer.resumePending = true;
+    uint32_t status = IWX_ADD_STA_SUCCESS;
+    const int err = iwx_send_cmd_pdu_status(sc, IWX_ADD_STA, sizeof(cmd), &cmd, &status);
+    if (gen != sc->sc_generation || tok != awdlCoexToken || !awdlPeer.added || epoch != awdlPeer.epoch ||
+        !ItlAWDL::sameAddress(peer, awdlPeer.addr))
+        return;
     awdlPeer.resumePending = false;
     if (err || (status & IWX_ADD_STA_STATUS_MASK) != IWX_ADD_STA_SUCCESS) {
         ++awdlPeer.pause.commandErrors;
@@ -9664,6 +9807,7 @@ awdlCoexPeerSendAgg(struct iwx_softc *sc, ItlAWDL::PeerSlot &awdlPeer, mbuf_t ne
     }
     awdlPeer.txSeq = (awdlPeer.txSeq + 1) & 0xfff;
     awdlPeer.txLastAggUS = awdlUptimeUS();
+    ++awdlPeer.txAggFrames;
     ++awdlPeerTxAggFrames;
     ++awdlCoexDataTx;
     awdlCoexLastDataUS = awdlPeer.txLastAggUS;
@@ -9702,13 +9846,15 @@ awdlCoexPeerHoldDrain(struct iwx_softc *sc, unsigned &budget)
         mbuf_t m = nullptr;
         while (budget && !awdlPeerHold[i].empty()) {
             if (awdlPeerTxReady(p, sc)) {
-                if (uint32_t(sc->txq[p.txQueue].queued) >= awdlPeerTxCap(p))
+                if (p.pause.paused || uint32_t(sc->txq[p.txQueue].queued) >= awdlPeerTxCap(p))
                     break;
                 (void)awdlPeerHold[i].pop(m);
                 --budget;
                 if (!awdlCoexPeerSendAgg(sc, p, m) && awdlCoexPeerSendSingle(sc, m))
                     ++awdlPeerTxSingles;
             } else {
+                if (awdlPeerGateClosed(p, awdlUptimeUS()))
+                    break;   // until the peer's window, or the gate's limit
                 if (sc->txq[awdlCoexQueue].queued >= 64)
                     return;
                 (void)awdlPeerHold[i].pop(m);
@@ -10851,6 +10997,26 @@ iwx_rx_frame(struct iwx_softc *sc, mbuf_t m, int chanidx,
                             }
                         }
                     }
+                    // A further slot's peer keeps its own schedule (-itlawdlmultipeer).
+                    ItlAWDL::PeerSlot *schedSlot = awdlPeerSlotsUsable > 1 ?
+                        ItlAWDL::addedSlotFor(awdlPeers + 1, awdlPeerSlotsUsable - 1, cf + 10) : nullptr;
+                    if (schedSlot) {
+                        ItlAWDL::PeerSyncInfo slotSync{};
+                        bool slotBadSequence = false;
+                        if (ItlAWDL::peerSyncFromAction(cf, coexLen, &slotSync, &slotBadSequence)) {
+                            if (!awdlPeerScheduleCurrent(*schedSlot)) {
+                                schedSlot->schedule.reset();
+                                schedSlot->scheduleToken = awdlCoexToken;
+                            }
+                            schedSlot->schedule.notePeerFrame(heardUS);
+                            schedSlot->schedule.note(slotSync, heardUS, uint8_t(awdlCoexChannel));
+                        } else if (awdlPeerScheduleCurrent(*schedSlot)) {
+                            if (slotBadSequence)
+                                schedSlot->schedule.invalidate();
+                            else
+                                schedSlot->schedule.notePeerFrame(heardUS);
+                        }
+                    }
                 }
                 // -itlawdlsvcmerge: the peer's other service records added, if any are missing (iface81).
                 bool handed = false;
@@ -11045,6 +11211,11 @@ iwx_rx_frame(struct iwx_softc *sc, mbuf_t m, int chanidx,
                             awdlPeer.lastRxPayloadUS = awdlPeer.lastUS;
                         if ((cf[0] & 0xf0) == 0x80 && dataLen >= 26) // QoS data: TID in the QoS control field.
                             awdlPeer.rxTidLastUS[cf[24] & 7] = awdlPeer.lastUS;
+                        if (&awdlPeer != &awdlPeers[0] && !ch6Group) {
+                            awdlPeer.scheduleRxUS = awdlPeer.lastUS;
+                            if (awdlPeerScheduleCurrent(awdlPeer))
+                                awdlPeer.schedule.notePeerFrame(awdlPeer.scheduleRxUS);
+                        }
                     }
                     itlAWDLObserveData(getController(), awdlCoexDataBuf, dataLen + 4);
                     if (ch6Group)
@@ -24023,6 +24194,8 @@ iwx_attach(struct iwx_softc *sc, struct pci_attach_args *pa)
         awdlMcastRepeat = awdlMcastAw && itlResFlag("-itlawdlmcastrepeat", kItlResWork);
         awdlCoexAssumeZero = !PE_parse_boot_argn("-itlawdlcoexcalwait", &dummy, sizeof(dummy));
         awdlCoexPeerSchedule.assumeZero = awdlCoexAssumeZero;
+        for (unsigned i = 0; i < ItlAWDL::kMaxPeerSlots; ++i)
+            awdlPeers[i].schedule.assumeZero = awdlCoexAssumeZero;
         if (awdlCoexData) {
             // What made dedicated mode fast and quick to connect, for the listener beside Wi-Fi too:
             // the service-record merge (iface81), AW-timed idle sync frames (iface106), and shorter
