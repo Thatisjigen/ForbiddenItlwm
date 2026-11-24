@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <libkern/OSByteOrder.h>
 #include "AWDLPeerHandoff.hpp"
+// PEER_SLOT
 #define htole32 OSSwapHostToLittleInt32
 #define htole16 OSSwapHostToLittleInt16
 #define IEEE80211_ADDR_COPY(dst, src) memcpy(dst, src, 6)
@@ -74,7 +75,7 @@ static uint64_t awdlCoexLastCompletionUS, awdlCoexTxPauseUntilUS;
 static const char *awdlCoexQueueStage;
 static bool awdlCoexAdded, awdlCoexTxStaAdded, awdlCoexInFlight, awdlCoexAddrApplied,
     awdlCoexMulti, awdlCoexMultiActive, awdlCoexMovePending, awdlCoexPromiscLive,
-    awdlCoexPromiscUncertain, awdlCoexBaPeerAdded, awdlCoexBaPeerAccepted,
+    awdlCoexPromiscUncertain,
     awdlCoexBaFilterOff, awdlCoexRemoveRequested, awdlStopping, awdlCoexLowLatency,
     awdlCoexAddrKnown, awdlCoexTx, awdlCoexTxHalted;
 // PR #47's same-channel window, which the listener teardown resets (merged after this harness was written).
@@ -85,8 +86,7 @@ static struct {
 static int awdlCoexGeneration = 7, awdlCoexAddingGen = -1, awdlCoexRemovingGen = -1,
     awdlCoexBrokenGeneration = -1, awdlCoexPhyUncertainGen = -1,
     awdlCoexWide80FailedGen = -1, awdlCoexPendingSlot = -1, awdlCoexBaGen,
-    awdlCoexBaTids, awdlCoexBaAnswerLength, awdlCoexBaTxState, awdlCoexBaTxQueue,
-    awdlCoexBaTidTeardown, awdlCoexBaRxIdleTids, awdlCoexQueue = -1,
+    awdlCoexQueue = -1,
     awdlCoexTxSetupTried, awdlCoexPhyWidth, awdlCoexOwnWidth,
     awdlCoexPhyResult, awdlCoexMultiBindResult, awdlCoexMacResult, awdlCoexBindStatus,
     awdlCoexBindResult, awdlCoexLowLatencyResult, awdlCoexTeardownErrors,
@@ -98,7 +98,6 @@ static bool awdlCoexLostToRestart;
 static uint64_t awdlCoexLastMoveUS;
 static ieee80211_channel *awdlCoexOwnChan;
 static const char *awdlCoexMultiState;
-static Pending awdlCoexBaRequestsPending;
 static ItlAWDL::PeerHandoff awdlCoexPeerHandoff;
 static ItlAWDL::BaFilterState awdlCoexBaFilter;
 static uint8_t awdlCoexAddr[6], awdlCoexAddrInFirmware[6];

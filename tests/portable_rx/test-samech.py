@@ -1,6 +1,8 @@
 from pathlib import Path
-import subprocess,tempfile
-T=Path(__file__).resolve().parent;R=T.parents[1];s=(R/'itlwm/hal_iwx/ItlIwx.cpp').read_text();base=(T/'fixtures/same-channel-before.cpp').read_text()
+import subprocess,sys,tempfile
+T=Path(__file__).resolve().parent;R=T.parents[1];sys.path.insert(0,str(R/'tests'))
+from peer_slot_names import SLOT,rename,unrename
+s=(R/'itlwm/hal_iwx/ItlIwx.cpp').read_text();base=(T/'fixtures/same-channel-before.cpp').read_text()
 def body(text,name,end):
  a=text.index(name);b=text.index(end,a);return text[a:b]
 a=s.index('static bool awdlCoexSameChannelProbeWanted(');b=s.index('{',a)+1;depth=1
@@ -16,6 +18,7 @@ restoreBody='    // Restore expired windows even if opening failed with an uncer
 caller='struct { bool off=false; } awdlCoexBaFilter; static unsigned awdlCoexBaFilterChanges;\nvoid ItlIwx::runFilterChange(iwx_softc *sc,bool wanted,bool force){const bool filterWasOff=awdlCoexBaFilterOff;bool filterChange=force||wanted!=filterWasOff;awdlCoexBaFilter.off=wanted;const int gen=sc->sc_generation;auto stillOurs=[&](){return gen==sc->sc_generation;};\n'+restoreBody+'\n}\n'
 p=r'''
 #include <AWDLSameChannelProbe.hpp>
+'''+SLOT+r'''
 #include <cassert>
 #include <cstdint>
 #include <cstring>
@@ -35,12 +38,12 @@ static unsigned ieee80211_chan2ieee(ieee80211com*,const ieee80211_channel *p){re
 struct iwx_mac_ctx_cmd { uint32_t id_and_color,action,mac_type,tsf_id; uint8_t node_addr[6],bssid_addr[6];uint32_t cck_rates,ofdm_rates,filter_flags; struct { uint32_t is_assoc,bi,bi_reciprocal,dtim_interval,dtim_reciprocal,listen_interval,assoc_id; } sta; };
 enum { IWX_FW_CTXT_ACTION_ADD=1,IWX_FW_CTXT_ACTION_MODIFY=2,IWX_FW_CTXT_ACTION_REMOVE=3,IWX_FW_MAC_TYPE_LISTENER=4,IWX_FW_MAC_TYPE_P2P_DEVICE=6,IWX_FW_MAC_TYPE_P2P_STA=7,IWX_TSF_ID_B=1,IWX_MAC_CONTEXT_CMD=77,kAwdlCoexMacId=1,kCoexBaTxAsking=1,kCoexBaTxAgreed=2 };
 enum { IWX_MAC_FILTER_IN_PROMISC=1,IWX_MAC_FILTER_IN_CONTROL_AND_MGMT=2,IWX_MAC_FILTER_ACCEPT_GRP=4,IWX_MAC_FILTER_IN_BEACON=64,IWX_MAC_FILTER_IN_PROBE_REQUEST=4096 };
-static bool awdlCoexAddrKnown=true,awdlCoexBaFilterOff=false,awdlCoexBaTxEnabled=true,awdlCoexPromiscLive=false,awdlCoexPromiscUncertain=false,awdlCoexBaPeerAdded=true;
-static uint32_t awdlCoexToken=1;static unsigned awdlCoexFilter=3;static uint8_t awdlCoexBaTids=1;static int awdlCoexBaTxState=kCoexBaTxAsking;
+static bool awdlCoexAddrKnown=true,awdlCoexBaFilterOff=false,awdlCoexBaTxEnabled=true,awdlCoexPromiscLive=false,awdlCoexPromiscUncertain=false;
+static uint32_t awdlCoexToken=1;static unsigned awdlCoexFilter=3;
 static uint8_t awdlCoexAddr[6]={2,1,2,3,4,6},etherbroadcastaddr[6]={255,255,255,255,255,255};
 static ieee80211_channel own;static ieee80211_channel *awdlCoexOwnChan=&own;
 static ItlAWDL::SameChannelProbe awdlCoexSameChannelProbe;
-static uint64_t nowUS=1000000,awdlCoexBaProbeUntilUS=1250000;
+static uint64_t nowUS=1000000;
 static uint64_t awdlUptimeUS(){return nowUS;}
 static void iwx_ack_rates(iwx_softc*,iwx_node*,int *cck,int *ofdm){*cck=15;*ofdm=21;}
 static int injected; static iwx_mac_ctx_cmd submitted;
@@ -53,6 +56,7 @@ static bool awdlControlReceiveProbeWanted(iwx_softc*,uint64_t now){return contro
 class ItlIwx {public:int awdlCoexMacSend(iwx_softc*,uint32_t);int baselineMacSend(iwx_softc*,uint32_t);void runFilterChange(iwx_softc*,bool,bool);int iwx_send_cmd_pdu(iwx_softc *s,int id,int flags,unsigned size,void *cmd){assert(id==IWX_MAC_CONTEXT_CMD && !flags && size==sizeof(iwx_mac_ctx_cmd));submitted=*static_cast<iwx_mac_ctx_cmd*>(cmd);if(injected==2)++s->sc_generation;if(injected==3)++awdlCoexToken;return injected==1?5:0;}};
 '''+helper+method+oldmethod+caller+r'''
 int main(){
+ awdlCoexBaPeerAdded=true;awdlCoexBaTids=1;awdlCoexBaTxState=kCoexBaTxAsking;awdlCoexBaProbeUntilUS=1250000;
  unsigned cases=0;iwx_softc sc;ItlIwx driver;Phy phy;ieee80211_node node;ieee80211_channel station;phy.channel=&station;node.in_phyctxt=&phy;sc.sc_ic.ic_bss=&node;
  // The actual baseline and candidate command builders must emit identical bytes
  // with the flag off, on every combination of original inputs.
@@ -89,7 +93,7 @@ int main(){
  printf("PASS %u actual baseline/candidate command comparisons, country-independent channels, bounded windows, all restore paths, real restore-caller rollback, restore retry and generation/token failures\n",cases);
 }
 '''
-(T/'test-samech.cpp').write_text(p)
+(T/'test-samech.cpp').write_text(rename(p))
 with tempfile.TemporaryDirectory(prefix='forbidden-samech-') as d:
  exe=Path(d)/'test';subprocess.run(['xcrun','clang++','-std=c++14','-fsanitize=address,undefined','-I'+str(R/'include'),str(T/'test-samech.cpp'),'-o',str(exe)],check=True);subprocess.run([str(exe)],check=True)
 
@@ -104,7 +108,9 @@ oldstart=fixture.index('                        if (request.immediate) {')
 oldend=fixture.index('                    } else if (ItlAWDL::parseDelba',oldstart)
 s=s[:start]+fixture[oldstart:oldend]+s[end:]
 
-# RX parsing/address/reorder guards must be byte-identical to beta.2.
+# RX parsing/address/reorder guards must be byte-identical to beta.2. The per-peer state's move into
+# awdlPeer (peer_slot_names.py) is a rename only, so it's undone before hashing.
+s=unrename(s)
 import hashlib
 # iwx_rx_pkt: the security fixes add only length checks to fixed-size notifications (audit HL05). The AWDL scheduler
 # adds a session-protection tap for the follower's own sessions (-itlschedsp): their starts and ends, a failed start

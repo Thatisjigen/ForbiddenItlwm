@@ -1,7 +1,9 @@
 """Exercise the production state helper and extracted task with mocked firmware."""
 from pathlib import Path
-import subprocess,tempfile
+import subprocess,sys,tempfile
 T=Path(__file__).resolve().parent;R=T.parents[1]
+sys.path.insert(0,str(R/'tests'))
+from peer_slot_names import SLOT,rename
 s=(R/'itlwm/hal_iwx/ItlIwx.cpp').read_text()
 assert 'static bool awdlCoexPeerHandoffEnabled;' in s
 assert 'awdlCoexData && PE_parse_boot_argn("-itlawdlpeerhandoff"' in s
@@ -14,17 +16,17 @@ h=r'''
 #include <cassert>
 #include <cstdio>
 #include "AWDLPeerHandoff.hpp"
+#include <cstring>
+'''+SLOT+r'''
 #define nitems(x) (sizeof(x)/sizeof((x)[0]))
 struct Ring{int queued=0;};struct SC{Ring txq[4];int gen=7;};
 static SC hardware;
 static ItlAWDL::PeerHandoff awdlCoexPeerHandoff;
-static ItlAWDL::PendingAddbaRequests awdlCoexBaRequestsPending;
-static uint32_t awdlCoexToken=8,awdlCoexBaPeerEpoch=9,awdlCoexPeerHandoffErrors,awdlCoexPeerHandoffRetired;
-static bool enabled=true,awdlCoexBaPeerAdded=true,known=true;
-static int awdlCoexBaTxQueue=2,awdlCoexQueue=1,softwareQueued,awdlCoexBaAnswerLength;
-static bool awdlCoexResumePending,awdlCoexBaQueueAllocPending;
-static int awdlCoexDelbaWaitTid=-1,removeBehavior,removeCalls;
-static uint64_t clockUS=10000000,awdlCoexBaPeerLastUS=6000000;
+static uint32_t awdlCoexToken=8,awdlCoexPeerHandoffErrors,awdlCoexPeerHandoffRetired;
+static bool enabled=true,known=true;
+static int awdlCoexQueue=1,softwareQueued;
+static int removeBehavior,removeCalls;
+static uint64_t clockUS=10000000;
 static bool awdlPeerHandoffEnabled(){return enabled;}
 static unsigned itlAWDLTransmitQueued(void*){return softwareQueued;}
 static void*getController(){return nullptr;}
@@ -94,7 +96,7 @@ int main(){unsigned cases=0;
 }
 '''
 # std::initializer_list is needed for bounded range-for fixture lists.
-h='#include <initializer_list>\n'+h
+h='#include <initializer_list>\n'+rename(h)
 (T/'test-handoff.cpp').write_text(h)
 with tempfile.TemporaryDirectory() as d:
  exe=Path(d)/'test'

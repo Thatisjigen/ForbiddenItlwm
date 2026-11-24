@@ -4,10 +4,13 @@ Tests bookkeeping and ordering, not firmware or radio behavior.
 """
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 
 root = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(root / "tests"))
+from peer_slot_names import SLOT, rename  # noqa: E402
 
 
 class AWDLReconnectRecoveryTests(unittest.TestCase):
@@ -22,7 +25,8 @@ class AWDLReconnectRecoveryTests(unittest.TestCase):
             end = source.index("\n}\n", start) + 3
             bodies.append(source[start:end])
         harness = (root / "tests/awdl_reconnect_recovery_host.cpp").read_text()
-        program = harness.replace("// DRIVER_IMPLEMENTATIONS", "\n".join(bodies))
+        harness = harness.replace("// PEER_SLOT", SLOT)
+        program = rename(harness.replace("// DRIVER_IMPLEMENTATIONS", "\n".join(bodies)))
         with tempfile.TemporaryDirectory(prefix="forbiddenitlwm-reconnect-") as directory:
             src = Path(directory) / "test.cpp"
             src.write_text(program)

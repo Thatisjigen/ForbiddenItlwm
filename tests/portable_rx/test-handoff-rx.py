@@ -1,7 +1,9 @@
 """Compare actual old/new ADDBA dispatch with feature off, and bounded staging on."""
 from pathlib import Path
-import subprocess,tempfile
+import subprocess,sys,tempfile
 T=Path(__file__).resolve().parent;R=T.parents[1]
+sys.path.insert(0,str(R/'tests'))
+from peer_slot_names import rename
 old=(T/'fixtures/handoff-before.cpp').read_text()
 new=(R/'itlwm/hal_iwx/ItlIwx.cpp').read_text()
 def body(s):
@@ -12,7 +14,6 @@ prefix=(T/'test-handoff.cpp').read_text().split('int main(){')[0]
 prefix=prefix.replace('int gen=7;','int gen=7;int sc_generation=7;')
 prefix+='''
 namespace ItlAWDL { static bool sameAddress(const uint8_t*a,const uint8_t*b){return !memcmp(a,b,6);} }
-static uint8_t awdlCoexBaPeer[6]={2,0,0,0,0,3},awdlCoexBaAnswer[33],awdlCoexBaAnswerTid;
 static unsigned awdlCoexBaOtherPeer;
 '''
 for name,s in [('baseline',old),('candidate',new)]:
@@ -21,7 +22,7 @@ h=prefix+r'''
 struct Result{unsigned other;int answer;bool pending;ItlAWDL::AddbaRequest request;};
 static Result result(){Result s{};s.other=awdlCoexBaOtherPeer;s.answer=awdlCoexBaAnswerLength;
  s.pending=awdlCoexBaRequestsPending.take(0,s.request);return s;}
-static void setup(bool owner,int pending,bool answer){reset();enabled=false;awdlCoexPeerHandoff.clear();awdlCoexBaPeerAdded=owner;
+static void setup(bool owner,int pending,bool answer){reset();{const uint8_t a[6]={2,0,0,0,0,3};memcpy(awdlCoexBaPeer,a,6);}enabled=false;awdlCoexPeerHandoff.clear();awdlCoexBaPeerAdded=owner;
  awdlCoexBaOtherPeer=0;awdlCoexBaAnswerLength=answer?33:0;awdlCoexBaAnswerTid=0;awdlCoexBaAnswer[26]=7;
  if(pending){auto p=request();if(pending==2)p.peer[5]=9;assert(awdlCoexBaRequestsPending.note(p));}}
 int main(){unsigned cases=0;
@@ -41,7 +42,7 @@ int main(){unsigned cases=0;
  printf("PASS %u actual baseline/candidate ADDBA dispatch comparisons; no firmware call in RX\n",cases);
 }
 '''
-(T/'test-handoff-rx.cpp').write_text(h)
+(T/'test-handoff-rx.cpp').write_text(rename(h))
 with tempfile.TemporaryDirectory() as d:
  exe=Path(d)/'test'
  subprocess.run(['xcrun','clang++','-std=c++14','-fsanitize=address,undefined','-I'+str(R/'include'),str(T/'test-handoff-rx.cpp'),'-o',str(exe)],check=True)
