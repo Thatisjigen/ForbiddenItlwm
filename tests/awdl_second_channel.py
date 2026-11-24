@@ -68,6 +68,7 @@ static int awdlCoexGeneration, awdlCoexPhyUncertainGen, awdlCoexStationTransitio
 static int awdlSchedSecondOffGen, awdlSchedSecondLastErr, awdlCoexOwnWidth, awdlCoexPhyWidth;
 static ieee80211_channel *awdlCoexOwnChan, *awdlSchedSecondTuned;
 static uint32_t awdlCoexToken, awdlSchedSecondRefused, awdlSchedSecondBusy, awdlSchedSecondStale;
+static uint32_t awdlSchedSecondRefusedCh, awdlSchedSecondRefusedWhy, awdlSchedSecondRefusedFlags;
 static uint32_t awdlSchedSecondErrors, awdlSchedSecondHome, awdlSchedSecondAway;
 static uint64_t awdlSchedSecondTookSumUS, awdlSchedSecondTookMaxUS, nowUS;
 static ItlAWDL::PeerSlot awdlPeers[ItlAWDL::kMaxPeerSlots];
@@ -208,10 +209,14 @@ int main() {
         reset(sc);
         sc.sc_ic.ic_channels[44].ic_flags = flags;
         assert(!driver.awdlSchedSecondRetune(&sc, 44) && !commands && awdlSchedSecondOffGen == 7);
+        assert(awdlSchedSecondRefusedCh == 44 && awdlSchedSecondRefusedFlags == flags);
+        assert(awdlSchedSecondRefusedWhy == (flags == IEEE80211_CHAN_DFS ? 32u : 64u));
+        // the next try in the same generation says it was already off
+        assert(!driver.awdlSchedSecondRetune(&sc, 44) && (awdlSchedSecondRefusedWhy & 1u));
     }
     // PASSIVE without an allowed no-IR exception is refused; existing permission makes the same channel usable.
     reset(sc); sc.sc_ic.ic_channels[44].ic_flags = IEEE80211_CHAN_PASSIVE;
-    assert(!driver.awdlSchedSecondRetune(&sc, 44) && !commands);
+    assert(!driver.awdlSchedSecondRetune(&sc, 44) && !commands && awdlSchedSecondRefusedWhy == 16u);
     reset(sc); sc.sc_ic.ic_channels[44].ic_flags = IEEE80211_CHAN_PASSIVE;
     awdlCoexIrConcurrent[44] = 1;
     assert(driver.awdlSchedSecondRetune(&sc, 44) && commands == 1);

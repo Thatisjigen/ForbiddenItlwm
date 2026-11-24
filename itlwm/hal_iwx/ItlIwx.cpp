@@ -573,6 +573,7 @@ static unsigned awdlSchedSecondNow;                      // the second channel o
 static int awdlSchedSecondOffGen = -1, awdlSchedSecondLastErr;
 static uint32_t awdlSchedSecondRuns, awdlSchedSecondAway, awdlSchedSecondHome, awdlSchedSecondErrors,
     awdlSchedSecondRefused, awdlSchedSecondTxHeld;
+static uint32_t awdlSchedSecondRefusedCh, awdlSchedSecondRefusedWhy, awdlSchedSecondRefusedFlags;
 static uint64_t awdlSchedSecondTookSumUS, awdlSchedSecondTookMaxUS;
 // A PHY command can sleep with the gate released. Stop every listener submission while draining/switching.
 static bool awdlSchedSecondSwitching, awdlSchedSecondDraining;
@@ -18469,16 +18470,19 @@ static void awdlSchedSpPublish()
         if (awdlSchedSecond) {
             // -itlschedsecond: the second channel's runs and what retuning the listener's PHY cost.
             const uint32_t retunes = awdlSchedSecondAway + awdlSchedSecondHome;
-            char sec[420];
+            char sec[480];
             snprintf(sec, sizeof(sec),
-                     "%s%s second %u%s; runs %u, retunes away %u home %u (mean %llu us, max %llu us), refused %u, "
+                     "%s%s second %u%s; runs %u, retunes away %u home %u (mean %llu us, max %llu us), refused %u "
+                     "(last ch %u why 0x%x flags 0x%x), "
                      "errors %u (last %d); our frames held while away %u; drain waits %u, stale %u, second RX %u",
                      awdlSchedSecondOffGen >= 0 && awdlSchedSecondOffGen == awdlSchedSpGen ? "off for this generation, " : "",
                      awdlSimSecondChan ? "[SIMULATION]" : "on", awdlSchedSecondNow,
                      awdlSchedSecondTuned ? " (retuned now)" : "", awdlSchedSecondRuns, awdlSchedSecondAway,
                      awdlSchedSecondHome,
                      (unsigned long long)(retunes ? awdlSchedSecondTookSumUS / retunes : 0),
-                     (unsigned long long)awdlSchedSecondTookMaxUS, awdlSchedSecondRefused, awdlSchedSecondErrors,
+                     (unsigned long long)awdlSchedSecondTookMaxUS, awdlSchedSecondRefused,
+                     awdlSchedSecondRefusedCh, awdlSchedSecondRefusedWhy, awdlSchedSecondRefusedFlags,
+                     awdlSchedSecondErrors,
                      awdlSchedSecondLastErr, awdlSchedSecondTxHeld, awdlSchedSecondBusy, awdlSchedSecondStale,
                      awdlSchedSecondRx);
             IORegistryEntry::getRegistryRoot()->setProperty("ITLAWDLSchedSecond", sec);
@@ -19124,6 +19128,15 @@ awdlSchedSecondRetune(struct iwx_softc *sc, unsigned channel)
     // when a beacon hint or the firmware's IR-concurrent permission and current association allow this channel.
     if (!home && (awdlSchedSecondOffGen == gen || !IEEE80211_IS_CHAN_5GHZ(target) ||
                   !awdlCoexChannelUsable(ic, channel))) {
+        // why, for ITLAWDLSchedSecond: 1 already off this generation, 2 not 5 GHz, 4 not in the channel map,
+        // 8 inactive, 16 no IR (no beacon hint or firmware permission), 32 DFS, 64 no ad hoc.
+        awdlSchedSecondRefusedCh = channel;
+        awdlSchedSecondRefusedWhy = (awdlSchedSecondOffGen == gen ? 1U : 0U) |
+            (!IEEE80211_IS_CHAN_5GHZ(target) ? 2U : 0U) | (!target->ic_freq ? 4U : 0U) |
+            (!isset(ic->ic_chan_active, channel) ? 8U : 0U) | (awdlCoexNoIr(ic, channel) ? 16U : 0U) |
+            ((target->ic_flags & IEEE80211_CHAN_DFS) ? 32U : 0U) |
+            ((target->ic_flags & IEEE80211_CHAN_NOADHOC) ? 64U : 0U);
+        awdlSchedSecondRefusedFlags = target->ic_flags;
         ++awdlSchedSecondRefused;
         awdlSchedSecondOffGen = gen;
         awdlSchedSecondDraining = false;
