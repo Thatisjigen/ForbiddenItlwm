@@ -102,7 +102,7 @@ Please report what you find, working or not, in a [GitHub issue](https://github.
   - **Internet Sharing over Wi-Fi:** the card can't act as an access point ([#28](https://github.com/retropineaple/ForbiddenItlwm/issues/28)). Sharing over Bluetooth or USB works.
 - **One Apple device at a time for fast transfers.** The driver keeps block ack with one device, as long as that device has exchanged data in the last ten minutes. A second Apple device nearby (another Mac, an iPad) can then keep an iPhone waiting ([#81](https://github.com/retropineaple/ForbiddenItlwm/issues/81)). From 0.7.0-alpha.2 the opt-in `-itlawdlpeerhandoff` hands it over once that device is idle, and the experimental `-itlawdlmultipeer` keeps block ack with each device instead, as a real Mac does (untested with more than one Apple device). See TROUBLESHOOTING.
 - **AirDrop needs the Mac to be connected to a Wi-Fi network.** The AirDrop listener runs beside your Wi-Fi connection: with Wi-Fi on but no network joined, transfers stay on "Waiting". A real Mac doesn't need a network for this.
-- **WPA3:** on a WPA2/WPA3 transition network the Mac joins with WPA2 and without protected management frames, as AirportItlwm does. WPA3-only networks can't be joined.
+- **WPA3:** opt-in with `-itlwmwpa3` (SAE/H2E, PMF). Without it WPA3-only networks are refused.
 - **The Sonoma kext's Wi-Fi code** takes paths of its own (join, scan, keys, teardown) that the Tahoe and Sequoia kexts don't use. They had their first security review for 0.6.0; one user runs it on 14.8.9 (#77), and it hasn't been tested here.
 
 What's planned: [ROADMAP](docs/ROADMAP.md).

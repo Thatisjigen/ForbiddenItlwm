@@ -74,6 +74,7 @@ What each one does:
 
 | Flag | Effect |
 | --- | --- |
+| `-itlwmwpa3` | Opt-in WPA3-Personal (SAE/H2E, PMF) on iwx. Without it WPA2 behaviour. Mixed WPA2/WPA3 networks whose AP doesn't offer H2E still join as WPA2; WPA3-only APs without H2E (hunting-and-pecking only) can't be joined. With the flag, WPA2 networks that offer protected management frames use them too |
 | `itlawdltxpool=N` | Size of the `awdl0` transmit packet pool, 896 to 8192. Default 2048. Below that, long Mac → iPhone transfers can stall |
 | `-itlawdlpeerhandoff` | From 0.7.0-alpha.2 ([PR #50](https://github.com/retropineaple/ForbiddenItlwm/pull/50)): when another Apple device asks for a Block Ack session while the device that holds the driver's one receive session has gone idle, the driver hands the session over once the idle device's queues have drained. Helps when a nearby Mac or iPad keeps an iPhone waiting ([#81](https://github.com/retropineaple/ForbiddenItlwm/issues/81)). Off by default; `ITLAWDLCoexPeerHandoff*` show what it did. Please report your result |
 | `-itlawdloff` | From 0.7.0-alpha.2: turns AirDrop off, whatever other flags are set; normal Wi-Fi works as with AirportItlwm. `ItlwmAWDLBuildCheck` reads "off: -itlawdloff". Useful to tell a Wi-Fi problem from an AirDrop one |
