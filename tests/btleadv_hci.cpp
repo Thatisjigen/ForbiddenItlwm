@@ -2,6 +2,7 @@
 #include <cassert>
 #include <cstring>
 #include <cstdio>
+#include <initializer_list>
 using namespace BTLEAdv;
 static const uint8_t addr[6]={1,2,3,4,5,0xc6};
 static void params(uint8_t *c,uint8_t handle,uint8_t own){memset(c,0,28);c[0]=0x36;c[1]=0x20;c[2]=25;c[3]=handle;c[13]=own;}
@@ -72,18 +73,58 @@ int main(){
         // Reset forgets per-set addresses too.
         uint8_t rst[3]={3,0xc,0};onCommand(r,rst,3,true);assert(!r.knownSetAddresses);
     }
-    // Audit P-R07: with no general address, the fallback came from a set. Removing that set (or
-    // clearing all sets) forgets it, so a re-created set isn't given the removed set's address.
+    // Audit P-R07 and #102: a set's own address is never the fallback for another set, with or without a
+    // general address, so a set made later with another handle is never given it.
     {
         uint8_t p[28];const uint8_t x[6]={0x40,0,0,0,0,0x99};
         State f{};uint8_t m[10]={0x35,0x20,7,5};memcpy(m+4,x,6);onCommand(f,m,10,true);
-        assert(f.haveAddress&&!f.haveGeneralAddress);
+        assert(!f.haveAddress&&!f.haveGeneralAddress);
+        params(p,9,1);assert(!onCommand(f,p,28,true).sendSetAddress);   // another set: nothing to give it
         uint8_t rm[4]={0x3c,0x20,1,5};onCommand(f,rm,4,true);assert(!f.haveAddress);
         params(p,6,1);assert(!onCommand(f,p,28,true).sendSetAddress);
         State g{};onCommand(g,m,10,true);uint8_t clr[3]={0x3d,0x20,0};onCommand(g,clr,3,true);assert(!g.haveAddress);
         // With a general address the fallback stays: it belongs to bluetoothd, not to a set.
         State h{};uint8_t ga[9]={5,0x20,6};memcpy(ga+3,addr,6);onCommand(h,ga,9,true);onCommand(h,m,10,true);
         onCommand(h,rm,4,true);assert(h.haveAddress);
+    }
+    // #102: an address only this kext sent goes again once, right before the set's first enable, in the
+    // enable's order; bluetoothd's own address for an existing set needs nothing more.
+    {
+        uint8_t p[28];const uint8_t own[6]={0x50,0,0,0,0,0x11};
+        auto enable=[](State &st,std::initializer_list<uint8_t> handles,uint8_t on=1){
+            uint8_t e[32]={0x39,0x20,0,on,uint8_t(handles.size())};size_t n=5;
+            for(uint8_t h:handles){e[n]=h;e[n+1]=0;e[n+2]=0;e[n+3]=0;n+=4;}
+            e[2]=uint8_t(n-3);return onCommand(st,e,n,true);};
+        State t{};uint8_t ga[9]={5,0x20,6};memcpy(ga+3,addr,6);onCommand(t,ga,9,true);
+        uint8_t early[10]={0x35,0x20,7,1};memcpy(early+4,own,6);onCommand(t,early,10,true);   // before set 1 exists
+        params(p,1,1);auto o=onCommand(t,p,28,true);assert(o.sendSetAddress&&!memcmp(o.output+4,own,6));
+        assert(t.checkAtEnable&(1U<<1));
+        o=enable(t,{1});assert(o.beforeCount==1&&o.beforeHandle[0]==1);
+        const uint8_t again[10]={0x35,0x20,7,1,0x50,0,0,0,0,0x11};assert(!memcmp(o.before[0],again,10));
+        o=enable(t,{1});assert(o.beforeCount==0);                       // once per set
+        // General address for a set without its own; two sets in one enable; a disable sends nothing.
+        params(p,2,1);onCommand(t,p,28,true);params(p,3,1);onCommand(t,p,28,true);
+        o=enable(t,{2,3},0);assert(o.beforeCount==0);
+        o=enable(t,{2,3});assert(o.beforeCount==2&&o.beforeHandle[0]==2&&o.beforeHandle[1]==3);
+        assert(!memcmp(o.before[0]+4,addr,6)&&!memcmp(o.before[1]+4,addr,6));
+        // bluetoothd's own address to an existing set: installed by bluetoothd, nothing at enable.
+        params(p,4,1);onCommand(t,p,28,true);
+        uint8_t mine[10]={0x35,0x20,7,4};memcpy(mine+4,own,6);onCommand(t,mine,10,true);
+        assert(!(t.checkAtEnable&(1U<<4)));o=enable(t,{4});assert(o.beforeCount==0);
+        // A public own address, an unknown set, a removed set: nothing at enable.
+        params(p,5,0);onCommand(t,p,28,true);o=enable(t,{5,9});assert(o.beforeCount==0);
+        params(p,6,1);onCommand(t,p,28,true);uint8_t rm6[4]={0x3c,0x20,1,6};onCommand(t,rm6,4,true);
+        o=enable(t,{6});assert(o.beforeCount==0);
+        // Clear and reset forget pending checks; a truncated enable reads only what's there.
+        params(p,7,1);onCommand(t,p,28,true);uint8_t clr[3]={0x3d,0x20,0};onCommand(t,clr,3,true);
+        assert(!t.checkAtEnable&&!t.existingSets);
+        params(p,8,1);onCommand(t,p,28,true);uint8_t cut[6]={0x39,0x20,3,1,2,8};o=onCommand(t,cut,6,true);
+        assert(o.beforeCount==1&&o.beforeHandle[0]==8);
+        // More sets than fit: at most kMaxBefore, the rest keep their check for the next enable.
+        State u{};onCommand(u,ga,9,true);for(uint8_t h=10;h<16;++h){params(p,h,1);onCommand(u,p,28,true);}
+        o=enable(u,{10,11,12,13,14,15});assert(o.beforeCount==kMaxBefore);
+        assert((u.checkAtEnable&(1U<<14))&&(u.checkAtEnable&(1U<<15)));
+        o=enable(u,{14,15});assert(o.beforeCount==2);
     }
     // LE Data Length Change (OpenIntelWireless#514): two extra copies of LE Read Remote
     // Features, and the two duplicate completions become PHY Update, then Data Length Change.

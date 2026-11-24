@@ -114,7 +114,7 @@ static IOReturn patched_device_request(void *that, IOService *provider, Standard
                                        IOUSBHostCompletion *completion, uint32_t timeout);
 
 // Evidence for tests, in the I/O Registry root. Set only on rare events, in thread context.
-static uint32_t extraCommands {}, setAddresses {}, extraFailures {};
+static uint32_t extraCommands {}, setAddresses {}, extraFailures {}, enableAddresses {};
 static BTLEAdv::PrivacyStats privacyStats {};   // under hciLock
 static bool privacyChanged {};
 static void noteHook(const char *key, uint32_t value) {
@@ -271,7 +271,8 @@ static IOReturn patched_device_request(void *that, IOService *provider, Standard
             IOSimpleLockUnlock(lengthLock);
         }
     }
-    if (completion && (remoteReads || legacyScanAddress || action.sendSetAddress || action.sendEventMask))
+    if (completion && (remoteReads || legacyScanAddress || action.sendSetAddress || action.sendEventMask ||
+                       action.beforeCount))
         noteHook("BTLEAdvAsyncSeen", bumpCounter(asyncSeen));
     for (unsigned i = 0; i < remoteReads; ++i) {
         // Sent before the real command, as IntelBTPatcher does: the three completions carry the
@@ -289,6 +290,21 @@ static IOReturn patched_device_request(void *that, IOService *provider, Standard
         uint8_t fixed[9] = {0x05, 0x20, 0x06};
         lilu_os_memcpy(fixed + 3, BTLEAdv::kFixedPatcherAddress, 6);
         sendExtra(that, provider, request, fixed, sizeof(fixed), timeout);
+    }
+    // A set's address again right before its first enable (#102), in order with the enable: sent from this thread
+    // before the enable itself. One that doesn't go out is put back, so the next enable tries again.
+    for (unsigned i = 0; i < action.beforeCount; ++i) {
+        const IOReturn sent = sendExtra(that, provider, request, action.before[i], sizeof(action.before[i]), timeout);
+        if (sent == kIOReturnSuccess) {
+            noteHook("BTLEAdvExtraCommands", ++extraCommands);
+            noteHook("BTLEAdvEnableAddresses", ++enableAddresses);
+        } else {
+            IOLockLock(hciLock);
+            if (hciOwner == that)
+                hciState.checkAtEnable |= 1U << action.beforeHandle[i];
+            IOLockUnlock(hciLock);
+            noteHook("BTLEAdvExtraFailures", ++extraFailures);
+        }
     }
     static bool sawCommand {};
     if (hciLength >= 3 && !sawCommand) {
