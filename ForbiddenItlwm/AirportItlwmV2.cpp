@@ -28,6 +28,9 @@ uint8_t itlAWDLPlanChannels[16];
 // can end, counted (they were silent before, apart from delivered and refused by the queue).
 volatile uint32_t itlAWDLRxParseBad, itlAWDLRxNotOurs, itlAWDLRxSelf, itlAWDLRxAllocFail, itlAWDLRxPrepFail,
     itlAWDLRxCopyFail, itlAWDLRxQueueFail, itlAWDLRxDelivered, itlAWDLRxDisabled;
+// Frames whose two per-frame AWDL bytes weren't macOS's defaults (3, 4), and the last such pair. They used to be
+// dropped as unparseable.
+volatile uint32_t itlAWDLRxMetaOther, itlAWDLRxMetaLast;
 // ItlIwx.cpp: itlawdlsched=<bits>; 0x1 scheduler set (experimental, off by default), 0x2 diagnostics.
 extern bool itlResFlag(const char *name, uint32_t bit);
 volatile uint32_t itlAWDLPlanVersion;
@@ -884,6 +887,10 @@ void ItlAWDLInterface::observeDataFrame(const uint8_t *frame, size_t length)
     if (!memcmp(view.source, localFrameAddress, 6)) {
         ++itlAWDLRxSelf;
         return;
+    }
+    if (view.ip.minExtension != 3 || view.ip.presence != 4) {
+        ++itlAWDLRxMetaOther;
+        itlAWDLRxMetaLast = uint32_t(view.ip.minExtension) << 8 | view.ip.presence;
     }
     ++dataCopyAttempts;
     auto *pool = reinterpret_cast<ItlSkywalkPoolView *>(rxPool);

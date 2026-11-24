@@ -568,6 +568,7 @@ static uint64_t awdlSchedSyncOnSinceUS, awdlSchedSettledAtUS;   // with the exis
 // no radio losses on the iPhone's side.
 extern volatile uint32_t itlAWDLRxParseBad, itlAWDLRxNotOurs, itlAWDLRxSelf, itlAWDLRxAllocFail, itlAWDLRxPrepFail,
     itlAWDLRxCopyFail, itlAWDLRxQueueFail, itlAWDLRxDelivered, itlAWDLRxDisabled;
+extern volatile uint32_t itlAWDLRxMetaOther, itlAWDLRxMetaLast;
 static bool awdlRxLoss;
 static uint32_t awdlCoexDataRxNotCopied;
 struct AwdlRxSecond { uint32_t upS, heard, handed, refused, ok, notOurs, fails; };
@@ -8507,9 +8508,10 @@ awdlCoexTxTask(void *arg)
                     awdlRxSeconds[awdlRxSecondsNext++ % 30] = sec;
                     char t[1200];
                     size_t u = size_t(snprintf(t, sizeof(t), "totals: handed %u refused %u (not copied %u); awdl0 ok %u "
-                        "not ours %u fails %u (alloc %u prep %u copy %u queue %u) parse %u self %u off %u; last s "
-                        "[up s: heard/handed/refused -> ok/notours/fails]:", now[1], now[2], now[9], now[3], now[4], now[5],
-                        itlAWDLRxAllocFail, itlAWDLRxPrepFail, itlAWDLRxCopyFail, itlAWDLRxQueueFail, now[6], now[7], now[8]));
+                        "not ours %u fails %u (alloc %u prep %u copy %u queue %u) parse %u self %u off %u; other ext/presence %u "
+                        "(last %u/%u); last s [up s: heard/handed/refused -> ok/notours/fails]:", now[1], now[2], now[9],
+                        now[3], now[4], now[5], itlAWDLRxAllocFail, itlAWDLRxPrepFail, itlAWDLRxCopyFail, itlAWDLRxQueueFail,
+                        now[6], now[7], now[8], itlAWDLRxMetaOther, itlAWDLRxMetaLast >> 8, itlAWDLRxMetaLast & 255));
                     const uint32_t count = awdlRxSecondsNext < 30 ? awdlRxSecondsNext : 30;
                     for (uint32_t k = 0; k < count && u < sizeof(t); ++k) {
                         const AwdlRxSecond &e = awdlRxSeconds[(awdlRxSecondsNext - count + k) % 30];
