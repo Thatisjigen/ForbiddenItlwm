@@ -77,6 +77,10 @@ static uint64_t awdlSchedSpEndedUS;
 static constexpr uint64_t kAwdlSchedSecondSettleUS = 30000;
 static unsigned peerRemoves, macSends, lastWidth;
 static int peerRemoveError;
+// The listener's width rule for a channel beside the station (awdlCoexWidthFor), stubbed: tests set what it allows.
+static bool widthFits = true; static uint8_t widthAllowed = 2;
+struct iwx_softc;
+static bool awdlCoexWidthFor(iwx_softc *, unsigned, bool, uint8_t *w, uint8_t *) { *w = widthAllowed; return widthFits; }
 static ItlAWDL::PeerSlot awdlPeers[ItlAWDL::kMaxPeerSlots];
 static uint64_t awdlUptimeUS() { return nowUS; }
 static void awdlSchedSpPublish() {}
@@ -178,6 +182,7 @@ static void reset(iwx_softc &sc) {
     awdlSchedSecondVariant = awdlSchedSecondSettleWaits = awdlSchedSecondPeerRemovals = awdlSchedSecondMacErrors = 0;
     awdlSchedSecondBootOff = false; awdlSchedSpEndedUS = 0; awdlSchedSpOff = false;
     peerRemoves = macSends = lastWidth = 0; peerRemoveError = 0;
+    widthFits = true; widthAllowed = IWX_PHY_VHT_CHANNEL_MODE80;
 }
 static int awdlCoexQueue = 2;
 int main() {
@@ -268,10 +273,25 @@ int main() {
     // a restart during the MODIFY also turns it off for the boot
     reset(sc); mutation = 1;
     assert(!driver.awdlSchedSecondRetune(&sc, 44) && awdlSchedSecondBootOff);
-    // variant 0: away at 20 MHz, no peer removal or MAC command
+    // default: away at the home width (80), no peer removal or MAC command
     reset(sc);
-    assert(driver.awdlSchedSecondRetune(&sc, 44) && lastWidth == IWX_PHY_VHT_CHANNEL_MODE20 && !peerRemoves && !macSends);
+    assert(driver.awdlSchedSecondRetune(&sc, 44) && lastWidth == IWX_PHY_VHT_CHANNEL_MODE80 && !peerRemoves && !macSends);
     assert(driver.awdlSchedSecondRetune(&sc, 149) && lastWidth == IWX_PHY_VHT_CHANNEL_MODE80);
+    // only 20 MHz allowed there while home is at 80: skipped (it asserted the firmware), not off for the generation
+    reset(sc); widthAllowed = IWX_PHY_VHT_CHANNEL_MODE20;
+    assert(!driver.awdlSchedSecondRetune(&sc, 44) && !commands && awdlSchedSecondRefusedWhy == 512u &&
+           awdlSchedSecondOffGen != 7 && !awdlSchedSecondDraining);
+    widthAllowed = IWX_PHY_VHT_CHANNEL_MODE80;
+    assert(driver.awdlSchedSecondRetune(&sc, 44) && commands == 1);
+    // no usable width there
+    reset(sc); widthFits = false;
+    assert(!driver.awdlSchedSecondRetune(&sc, 44) && !commands && awdlSchedSecondRefusedWhy == 256u);
+    // home at 20: away at 20 too, even where 80 would be allowed
+    reset(sc); awdlCoexOwnWidth = 20;
+    assert(driver.awdlSchedSecondRetune(&sc, 44) && lastWidth == IWX_PHY_VHT_CHANNEL_MODE20);
+    // with the stations removed first (variant 2), a 20 MHz-only channel may be visited
+    reset(sc); awdlSchedSecondVariant = 2; widthAllowed = IWX_PHY_VHT_CHANNEL_MODE20;
+    assert(driver.awdlSchedSecondRetune(&sc, 44) && lastWidth == IWX_PHY_VHT_CHANNEL_MODE20 && peerRemoves == 1);
     // variant 1: waits 30 ms after the last session's end
     reset(sc); awdlSchedSecondVariant = 1; awdlSchedSpEndedUS = nowUS - 1000;
     assert(!driver.awdlSchedSecondRetune(&sc, 44) && !commands && awdlSchedSecondSettleWaits == 1);
@@ -283,9 +303,6 @@ int main() {
     assert(driver.awdlSchedSecondRetune(&sc, 149) && peerRemoves == 2 && macSends == 2);
     reset(sc); awdlSchedSecondVariant = 2; peerRemoveError = 5;
     assert(!driver.awdlSchedSecondRetune(&sc, 44) && !commands && awdlSchedSecondErrors == 1 && !awdlSchedSecondDraining);
-    // variant 4: away at the home width
-    reset(sc); awdlSchedSecondVariant = 4;
-    assert(driver.awdlSchedSecondRetune(&sc, 44) && lastWidth == IWX_PHY_VHT_CHANNEL_MODE80);
     for (int change : {1, 2}) {
         reset(sc); mutation = change;
         assert(!driver.awdlSchedSecondRetune(&sc, 44));

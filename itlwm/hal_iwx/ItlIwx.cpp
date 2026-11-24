@@ -577,7 +577,8 @@ static uint32_t awdlSchedSecondRefusedCh, awdlSchedSecondRefusedWhy, awdlSchedSe
 // Test only (itlsecondvar): which difference from the ordinary listener move (awdlCoexRetarget) a retune copies,
 // to find what made the first hardware retune assert the firmware (UMAC 0x20101a28 on PHY_CONTEXT_CMD):
 // 1 wait 30 ms after the last session's end, 2 remove the peer stations first and send the MAC MODIFY after (as
-// the move does), 4 stay at the home width away. A failed retune turns the experiment off for the boot.
+// the move does). Variant 4 (stay at the home width away) fixed it and is now the rule. A failed retune turns the
+// experiment off for the boot.
 static uint32_t awdlSchedSecondVariant;
 static bool awdlSchedSecondBootOff;
 static uint64_t awdlSchedSpEndedUS;
@@ -17845,27 +17846,14 @@ awdlSchedOverlapReady(int gen)
         awdlSchedStartedGen == gen;
 }
 
-static int
-awdlCoexPickOwn(struct iwx_softc *sc, uint8_t *width)
+// The width the listener may use on the 5 GHz channel c beside the station (the rules below), or false when it
+// can't use c. allow20: 20 MHz is acceptable without an overlap (the phone is known to use c). overlapOut gets
+// how the station overlaps c. Shared by the listener's pick and -itlschedsecond's visits to a second channel.
+static bool
+awdlCoexWidthFor(struct iwx_softc *sc, unsigned c, bool allow20, uint8_t *w, uint8_t *overlapOut)
 {
     struct ieee80211com *ic = &sc->sc_ic;
     auto usable = [ic](unsigned ch) { return awdlCoexChannelUsable(ic, ch); };
-    uint32_t hints = isset(ic->ic_beacon_hint, 6) ? 16U : 0U;
-    for (unsigned ch = 149, bit = 1; ch <= 161; ch += 4, bit <<= 1)
-        if (isset(ic->ic_beacon_hint, ch))
-            hints |= bit;
-    for (unsigned ch = 36, bit = 256; ch <= 48; ch += 4, bit <<= 1)
-        if (isset(ic->ic_beacon_hint, ch))
-            hints |= bit;
-    if (hints != awdlCoexBeaconHints) {
-        awdlCoexBeaconHints = hints;
-        awdlCoexPublish();
-    }
-    if (awdlCoexSameBand && ic->ic_bss && ic->ic_bss->ni_chan && IEEE80211_IS_CHAN_2GHZ(ic->ic_bss->ni_chan) &&
-        usable(6)) {
-        *width = IWX_PHY_VHT_CHANNEL_MODE20;
-        return 6;
-    }
     // How the station's channel overlaps a 5 GHz candidate (149 or 44): 1 when the station is at 80 MHz in the
     // candidate's block with another primary (#26: a listener at 80 MHz on 149 beside a router on 157/80 was never
     // seen by the iPhone), 2 when a 160 MHz (or 80+80) station channel covers the candidate's 160 MHz group (a
@@ -17891,11 +17879,12 @@ awdlCoexPickOwn(struct iwx_softc *sc, uint8_t *width)
             return 1;
         return 0;
     };
-    uint8_t overlap = 0;
     // A 5 GHz candidate: 80 MHz over its whole block when allowed; 20 MHz when the station's block overlaps,
     // or (allow20) when the phone is known to use this channel.
-    auto tryChannel = [&](unsigned c, bool allow20, uint8_t *w) -> bool {
-        overlap = overlapFor(c);
+    {
+        const uint8_t overlap = overlapFor(c);
+        if (overlapOut)
+            *overlapOut = overlap;
         // Taking the channel at 20 MHz inside the station's 160 MHz channel needs the scheduler switched on: its
         // sessions can only start once the listener is on macOS's channel, so this can't wait for them. 80 MHz
         // over an overlap needs it really running (a session in this generation).
@@ -17927,6 +17916,33 @@ awdlCoexPickOwn(struct iwx_softc *sc, uint8_t *width)
             return true;
         }
         return false;
+    }
+}
+
+static int
+awdlCoexPickOwn(struct iwx_softc *sc, uint8_t *width)
+{
+    struct ieee80211com *ic = &sc->sc_ic;
+    auto usable = [ic](unsigned ch) { return awdlCoexChannelUsable(ic, ch); };
+    uint32_t hints = isset(ic->ic_beacon_hint, 6) ? 16U : 0U;
+    for (unsigned ch = 149, bit = 1; ch <= 161; ch += 4, bit <<= 1)
+        if (isset(ic->ic_beacon_hint, ch))
+            hints |= bit;
+    for (unsigned ch = 36, bit = 256; ch <= 48; ch += 4, bit <<= 1)
+        if (isset(ic->ic_beacon_hint, ch))
+            hints |= bit;
+    if (hints != awdlCoexBeaconHints) {
+        awdlCoexBeaconHints = hints;
+        awdlCoexPublish();
+    }
+    if (awdlCoexSameBand && ic->ic_bss && ic->ic_bss->ni_chan && IEEE80211_IS_CHAN_2GHZ(ic->ic_bss->ni_chan) &&
+        usable(6)) {
+        *width = IWX_PHY_VHT_CHANNEL_MODE20;
+        return 6;
+    }
+    uint8_t overlap = 0;
+    auto tryChannel = [&](unsigned c, bool allow20, uint8_t *w) -> bool {
+        return awdlCoexWidthFor(sc, c, allow20, w, &overlap);
     };
     // The min rule (PR #21): what the phone's AWDL slots name, while it was heard in the last 10 minutes.
     const bool peerFresh = awdlCoexPeer5G && awdlUptimeUS() - awdlCoexPeer5GUS < kAwdlCoexPeer5GLifeUS;
@@ -19142,7 +19158,8 @@ awdlSchedSecondRetune(struct iwx_softc *sc, unsigned channel)
                   !awdlCoexChannelUsable(ic, channel))) {
         // why, for ITLAWDLSchedSecond: 1 already off this generation, 2 not 5 GHz, 4 not in the channel map,
         // 8 inactive, 16 no IR (no beacon hint or firmware permission), 32 DFS, 64 no ad hoc,
-        // 128 off for the boot after a failed retune.
+        // 128 off for the boot after a failed retune; below, 256 no usable width there, 512 only 20 MHz there
+        // while home is at 80.
         awdlSchedSecondRefusedCh = channel;
         awdlSchedSecondRefusedWhy = (awdlSchedSecondBootOff ? 128U : 0U) | (awdlSchedSecondOffGen == gen ? 1U : 0U) |
             (!IEEE80211_IS_CHAN_5GHZ(target) ? 2U : 0U) | (!target->ic_freq ? 4U : 0U) |
@@ -19155,6 +19172,28 @@ awdlSchedSecondRetune(struct iwx_softc *sc, unsigned channel)
         awdlSchedSecondDraining = false;
         awdlSchedSpPublish();
         return false;
+    }
+    // The width away: the home width, as on a real Mac at 80 MHz on both channels, under the listener's own rules
+    // for that channel beside the station (awdlCoexWidthFor). Narrowing from 80 to 20 MHz under the peers' stations
+    // (set up for 80) asserted the firmware on PHY_CONTEXT_CMD (variant 0); keeping 80 didn't (variant 4). So a
+    // second channel that only allows 20 MHz is skipped while home is at 80, unless itlsecondvar 2 removes the
+    // stations first. Not "off for the generation": what's allowed changes (the overlap rules wait for a session).
+    uint8_t awayWidth = IWX_PHY_VHT_CHANNEL_MODE20;
+    if (!home) {
+        const bool homeWide = awdlCoexOwnWidth == 80;
+        const bool fits = awdlCoexWidthFor(sc, channel, true, &awayWidth, nullptr);
+        const bool narrows = fits && homeWide && awayWidth != IWX_PHY_VHT_CHANNEL_MODE80 &&
+            !(awdlSchedSecondVariant & 2);
+        if (!fits || narrows) {
+            awdlSchedSecondRefusedCh = channel;
+            awdlSchedSecondRefusedWhy = !fits ? 256U : 512U;
+            awdlSchedSecondRefusedFlags = target->ic_flags;
+            ++awdlSchedSecondRefused;
+            awdlSchedSecondDraining = false;
+            return false;
+        }
+        if (!homeWide)
+            awayWidth = IWX_PHY_VHT_CHANNEL_MODE20;   // never wider than home: the stations were set up at 20
     }
     // A PHY MODIFY must not carry a home-channel frame onto the other channel. The final iwx_tx guard also
     // enforces this barrier while firmware waits release the gate. Never flush or free queued frames here.
@@ -19196,9 +19235,8 @@ awdlSchedSecondRetune(struct iwx_softc *sc, unsigned channel)
     awdlSchedSecondSwitching = true;
     struct ieee80211_channel *before = own->channel;
     own->channel = target;
-    // itlsecondvar 4: away at the home width too (80 beside a station in the same block is allowed, section 6).
-    const bool wide = awdlCoexOwnWidth == 80 && (home || (awdlSchedSecondVariant & 4));
-    awdlCoexPhyWidth = wide ? IWX_PHY_VHT_CHANNEL_MODE80 : IWX_PHY_VHT_CHANNEL_MODE20;
+    awdlCoexPhyWidth = home ? (awdlCoexOwnWidth == 80 ? IWX_PHY_VHT_CHANNEL_MODE80 : IWX_PHY_VHT_CHANNEL_MODE20) :
+        awayWidth;
     const uint64_t startUS = awdlUptimeUS();
     const int err = iwx_phy_ctxt_cmd(sc, own, 1, 1, IWX_FW_CTXT_ACTION_MODIFY, 0);
     awdlCoexPhyWidth = -1;
@@ -25020,7 +25058,7 @@ iwx_attach(struct iwx_softc *sc, struct pci_attach_args *pa)
                 }
                 uint32_t variant = 0;
                 if (awdlSchedSecond && PE_parse_boot_argn("itlsecondvar", &variant, sizeof(variant)))
-                    awdlSchedSecondVariant = variant & 7;
+                    awdlSchedSecondVariant = variant & 3;
             }
             awdlSchedSkew = itlResFlag("-itlschedskew", kItlResDiag);
             awdlSchedSyncTx = itlResFlag("-itlschedsynctx", kItlResWork);
