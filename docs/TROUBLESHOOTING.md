@@ -123,7 +123,7 @@ The driver keeps block ack with one Apple device at a time, and keeps it for as 
 ```
 ioreg -l -w0 | grep -E '"ITLAWDLCoex(BaPeerAdded|BaOtherPeer|BaRequests)"'
 ```
-A high `ITLAWDLCoexBaOtherPeer` means another device holds it. Put that device to sleep, or turn its Wi-Fi off, for about ten minutes, then try the iPhone again. From 0.7.0-alpha.2 you can instead try `-itlawdlpeerhandoff` ([PR #50](https://github.com/retropineaple/ForbiddenItlwm/pull/50), opt-in): it hands the session to the iPhone once the other device is idle. `ITLAWDLCoexPeerHandoffRetired` counts the handovers; please report whether it helped.
+A high `ITLAWDLCoexBaOtherPeer` means another device holds it. Put that device to sleep, or turn its Wi-Fi off, for about ten minutes, then try the iPhone again. From 0.7.0-alpha.2 you can instead try `-itlawdlpeerhandoff` ([PR #50](https://github.com/retropineaple/ForbiddenItlwm/pull/50), opt-in): it hands the session to the iPhone once the other device is idle. `ITLAWDLCoexPeerHandoffRetired` counts the handovers; please report whether it helped. Or try the experimental `-itlawdlmultipeer` (from 0.7.0-alpha.2): each device gets its own block ack, so neither waits for the other. `ioreg -l -w0 | grep '"ITLAWDLCoexPeers"'` shows one entry per device; please report it with how the transfers went.
 
 The two devices can also use different AirDrop channels, for example the iPhone 44 and an iPad 149 (`ITLAWDLCoexPeer5GHz` shows the last device heard). The listener is on one 5 GHz channel at a time, so the device on the other channel reaches the Mac only in its few slots there ([#45](https://github.com/retropineaple/ForbiddenItlwm/issues/45)). Following both is on the [roadmap](ROADMAP.md).
 

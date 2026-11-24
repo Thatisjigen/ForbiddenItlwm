@@ -2,9 +2,9 @@
 
 **Release names.** `x.y.z-stage.n`: `alpha` releases bring new or untested changes for testers; `beta` releases are tested on the project's hackintosh; `n` counts the builds of one version. `z` counts fixes after a stable release, so it stays 0 until a version is declared stable, and 1.0.0 will be the first stable release. Releases up to 0.5.3 were named `-test1` (now alpha) and `-beta1`.
 
-## 0.7.0-alpha.2 (unreleased)
+## 0.7.0-alpha.2
 
-**The tested set is now the default.** Up to 0.7.0-alpha.1 AirDrop needed 18 flags in `boot-args`; from this release the driver turns them on by itself, so only BTLEAdvFixup's `-btleadv` is still needed. Old flags left in `boot-args` are still read and change nothing, and a value you set yourself (`itlawdlintcoal`, `itlawdltxqueue`) still wins. `-itlawdlnodefaults` goes back to the old rule, and `ItlwmAWDLDefaults` says which rule is in use. One flag of the set can be turned off by adding `no` after `-itlawdl` (`-itlawdlnocoexmulti`). **`-itlawdloff`** turns AirDrop off whatever else is set, so the driver works as plain Wi-Fi (`ItlwmAWDLBuildCheck` "off: -itlawdloff"). `check_compat.sh` knows the new rule.
+**The tested set is now the default.** Up to 0.7.0-alpha.1 AirDrop needed 18 flags in `boot-args`; from this release the driver turns them on by itself, so only BTLEAdvFixup's `-btleadv` is still needed. Old flags left in `boot-args` are still read and change nothing, and a value you set yourself (`itlawdlintcoal`, `itlawdltxqueue`) still wins. `-itlawdlnodefaults` goes back to the old rule, and `ItlwmAWDLDefaults` says which rule is in use. One flag of the set can be turned off by adding `no` after `-itlawdl` (`-itlawdlnocoexmulti`). **`-itlawdloff`** turns AirDrop off whatever else is set, so the driver works as plain Wi-Fi (`ItlwmAWDLBuildCheck` "off: -itlawdloff"). `check_compat.sh` knows the new rule, and names `-itlawdlmultipeer`, `-itlawdlpeerhandoff` and `-itlawdlstatest` among the experimental flags it finds.
 
 The new AirDrop scheduler work stays experimental, behind the same flags as 0.7.0-alpha.1. New: one comparison flag (`-itlschedoldoverlap`) and three test-only flags.
 

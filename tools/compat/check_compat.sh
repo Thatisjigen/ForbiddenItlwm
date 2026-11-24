@@ -512,7 +512,7 @@ if [ -n "$MARKER" ]; then
     EXPERIMENTAL=""
     SIMULATION=""
     for t in $ARGS; do
-        case "$t" in itlawdlsched=*|itlsched*|-itlsched*|-btleadvnodupfilter) EXPERIMENTAL="$EXPERIMENTAL $t";; esac
+        case "$t" in itlawdlsched=*|itlsched*|-itlsched*|-btleadvnodupfilter|-itlawdlmultipeer|-itlawdlpeerhandoff|-itlawdlstatest) EXPERIMENTAL="$EXPERIMENTAL $t";; esac
         case "$t" in itlsim*|-itlsim*) SIMULATION="$SIMULATION $t";; esac
     done
     [ -n "$EXPERIMENTAL" ] && info "Experimental boot flags set:$EXPERIMENTAL. Mention them when you report a result."
