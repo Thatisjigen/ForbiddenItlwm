@@ -24,11 +24,17 @@ static void add(PeerSlot &s, uint8_t last) {
 
 int main() {
     unsigned cases = 0;
-    // Slot count: one without -itlawdlmultipeer; else one per station from 3 up, at most kMaxPeerSlots.
+    // Stations: slot 0 is 3, then 5 and up; 4 is the scheduler's channel-6 station and never a slot's.
+    assert(stationForSlot(0) == 3 && stationForSlot(1) == 5 && stationForSlot(11) == 15);
+    for (unsigned i = 0; i < kMaxPeerSlots; ++i)
+        assert(stationForSlot(i) != kChannel6Station && stationForSlot(i) < 16);
+    cases += 2;
+    // Slot count: one without -itlawdlmultipeer; else one per usable station below the firmware's count.
     for (unsigned n : {0U, 3U, 4U, 8U, 16U})
         assert(usablePeerSlots(false, n) == 1), ++cases;
     assert(usablePeerSlots(true, 0) == kMaxPeerSlots && usablePeerSlots(true, 16) == kMaxPeerSlots);
-    assert(usablePeerSlots(true, 8) == 5 && usablePeerSlots(true, 5) == 2);
+    assert(usablePeerSlots(true, 15) == 11);                               // the AX211: stations 3 and 5-14
+    assert(usablePeerSlots(true, 8) == 4 && usablePeerSlots(true, 6) == 2 && usablePeerSlots(true, 5) == 1);
     assert(usablePeerSlots(true, 4) == 1 && usablePeerSlots(true, 3) == 1 && usablePeerSlots(true, 1) == 1);
     cases += 7;
 
@@ -52,7 +58,7 @@ int main() {
     {
         PeerSlot slots[kMaxPeerSlots];
         for (unsigned i = 0; i < kMaxPeerSlots; ++i)
-            slots[i].station = uint8_t(kFirstPeerStation + i);
+            slots[i].station = stationForSlot(i);
         const AddbaRequest a = request(10), b = request(11), c = request(12);
         PeerSlot *sa = slotForRequest(slots, 3, a.peer, 1);
         assert(sa == &slots[0] && sa->requests.note(a));

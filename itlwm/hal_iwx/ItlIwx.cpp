@@ -144,7 +144,7 @@ static bool awdlCoexIrConcurrentOff;
 static uint32_t awdlCoexIrConcurrentUsed; // Channel checks that passed only because of this rule.
 // The listener's AWDL data peers (AWDLPeerSlot.hpp). awdlPeer, slot 0, is the peer with station 3, which may also
 // get our send agreement. -itlawdlmultipeer (experimental, off by default) uses the further slots: another peer's
-// ADDBA request gets its own station (4 and up, one slot per station the firmware has) and receive sessions,
+// ADDBA request gets its own station (5 and up, one slot per station the firmware has) and receive sessions,
 // instead of being refused while slot 0 belongs to someone else. Sending to those peers stays unaggregated.
 static ItlAWDL::PeerSlot awdlPeers[ItlAWDL::kMaxPeerSlots];
 static ItlAWDL::PeerSlot &awdlPeer = awdlPeers[0];
@@ -152,7 +152,7 @@ static bool awdlCoexMultiPeer;
 static unsigned awdlPeerSlotsUsable = 1;
 static uint32_t awdlPeerSlotAdds, awdlPeerSlotRemoves, awdlPeerSlotFailures, awdlPeerSlotFull;
 // -itlawdlstatest (test only, off by default): once per boot, with the listener up and no further slot in use, add
-// firmware stations 4 and up on the listener with made-up local addresses, note how many the firmware accepts, and
+// firmware stations 5 and up on the listener with made-up local addresses, note how many the firmware accepts, and
 // remove them again: how many peers it could hold (ITLAWDLStationTest). May restart the firmware if it objects.
 static bool awdlCoexStationTestEnabled, awdlCoexStationTestDone;
 static char awdlCoexStationTestResult[160];
@@ -623,6 +623,8 @@ static uint32_t awdlGroupRxSlotCh6[16], awdlGroupRxSlotListener[16];
 // stale sync timing goes out. Slot 8 stays unadvertised (MAC3 can't ACK for awdl0's address).
 static bool awdlSchedCh6Tx, awdlCh6TxStaAdded, awdlCh6TxOff, awdlCh6TxSending;
 constexpr uint8_t kAwdlCh6TxStaId = 4;
+static_assert(kAwdlCh6TxStaId == ItlAWDL::kChannel6Station, "AWDL peer slots must skip channel 6's station");
+static_assert(kAwdlBaStationId == ItlAWDL::kFirstPeerStation, "slot 0 is the Block Ack station");
 static constexpr uint64_t kAwdlCh6TxMinLeftUS = 8000ULL;
 static int awdlCh6TxQueue = -1, awdlCh6TxGen = -1;
 static uint32_t awdlCh6TxErr, awdlCh6TxSetups, awdlCh6TxSessions, awdlCh6TxNoTime, awdlCh6TxBusy, awdlCh6TxBuilt,
@@ -8964,7 +8966,8 @@ awdlCoexStationTest(struct iwx_softc *sc)
     awdlCoexStationTestDone = true;
     const int gen = sc->sc_generation;
     const unsigned stations = sc->sc_capa_num_stations > 0 ? unsigned(sc->sc_capa_num_stations) : 16U;
-    const unsigned first = ItlAWDL::kFirstPeerStation + 1U;
+    // From 5: station 4 is the scheduler's channel-6 station, which this test must never touch.
+    const unsigned first = ItlAWDL::kChannel6Station + 1U;
     uint16_t added = 0;     // bit per station, from `first`
     unsigned accepted = 0, tried = 0, firstFail = 0, removeFails = 0;
     uint32_t failStatus = 0;
@@ -9040,8 +9043,8 @@ awdlCoexBaAddPeer(struct iwx_softc *sc, ItlAWDL::PeerSlot &awdlPeer, const uint8
 {
     const int gen = sc->sc_generation;
     const int width = awdlCoexBaWidth(&sc->sc_ic);
-    // Each slot has its own station number whichever reset ran last: slot 0 is station 3, slot n station 3 + n.
-    awdlPeer.station = uint8_t(ItlAWDL::kFirstPeerStation + unsigned(&awdlPeer - awdlPeers));
+    // Each slot has its own station number whichever reset ran last (ItlAWDL::stationForSlot: 3, then 5 and up).
+    awdlPeer.station = ItlAWDL::stationForSlot(unsigned(&awdlPeer - awdlPeers));
     struct iwx_add_sta_cmd cmd;
     memset(&cmd, 0, sizeof(cmd));
     cmd.sta_id = awdlPeer.station;
@@ -9442,7 +9445,7 @@ awdlCoexBaHandle(struct iwx_softc *sc)
         awdlCoexBaGen = gen;
         for (unsigned i = 0; i < ItlAWDL::kMaxPeerSlots; ++i) {
             ItlAWDL::PeerSlot &awdlPeer = awdlPeers[i];
-            awdlPeer.station = uint8_t(ItlAWDL::kFirstPeerStation + i);
+            awdlPeer.station = ItlAWDL::stationForSlot(i);
             awdlPeer.requests.clear();
             awdlPeer.added = false;
             awdlPeer.accepted = false;
@@ -18640,7 +18643,7 @@ awdlCoexListener(struct iwx_softc *sc, bool add)
         awdlCoexBaGen = sc->sc_generation;
         for (unsigned i = 0; i < ItlAWDL::kMaxPeerSlots; ++i) {
             ItlAWDL::PeerSlot &awdlPeer = awdlPeers[i];
-            awdlPeer.station = uint8_t(ItlAWDL::kFirstPeerStation + i);
+            awdlPeer.station = ItlAWDL::stationForSlot(i);
             awdlPeer.added = false;
             awdlPeer.accepted = false;
             awdlPeer.requests.clear();
@@ -23663,7 +23666,7 @@ iwx_attach(struct iwx_softc *sc, struct pci_attach_args *pa)
         awdlCoexPeerHandoffEnabled = awdlCoexData && PE_parse_boot_argn("-itlawdlpeerhandoff", &dummy, sizeof(dummy));
         awdlCoexMultiPeer = awdlCoexData && PE_parse_boot_argn("-itlawdlmultipeer", &dummy, sizeof(dummy));
         for (unsigned i = 0; i < ItlAWDL::kMaxPeerSlots; ++i)
-            awdlPeers[i].station = uint8_t(ItlAWDL::kFirstPeerStation + i);
+            awdlPeers[i].station = ItlAWDL::stationForSlot(i);
         awdlCoexStationTestEnabled = awdlCoexData && PE_parse_boot_argn("-itlawdlstatest", &dummy, sizeof(dummy));
         awdlCoexPeerHandoff.clear();
         awdlCoexBaPeerPauseEnabled = awdlCoexBaTxEnabled && itlAWDLFlag("-itlawdlcoexpeerpause");

@@ -153,7 +153,8 @@ static unsigned count(int id, uint8_t sta, uint8_t mask = 0xff) {
 }
 static void reset() {
     // Every slot starts with the default station number (3), as after a reset that doesn't renumber: the
-    // driver must still use 3 + slot (the stick test on 2026-11-24 showed every slot at 3).
+    // driver must still use its own number per slot (3, then 5 and up; the stick test on 2026-11-24 showed every slot
+    // at 3).
     for (unsigned i = 0; i < ItlAWDL::kMaxPeerSlots; ++i)
         awdlPeers[i] = ItlAWDL::PeerSlot{};
     commands.clear();
@@ -174,13 +175,15 @@ int main() {
     assert(awdlPeers[0].added && awdlPeers[1].added && !awdlPeers[2].added);
     assert(ItlAWDL::sameAddress(awdlPeers[0].addr, request(10, 0, 0).peer));
     assert(ItlAWDL::sameAddress(awdlPeers[1].addr, request(11, 0, 0).peer));
-    assert(count(0x18, 3, 0) == 1 && count(0x18, 4, 0) == 1);            // one new station each
-    assert(awdlPeers[0].station == 3 && awdlPeers[1].station == 4);
+    assert(count(0x18, 3, 0) == 1 && count(0x18, 5, 0) == 1);            // one new station each
+    assert(awdlPeers[0].station == 3 && awdlPeers[1].station == 5);
+    for (const auto &c : commands)                                         // channel 6's station 4 is never touched
+        assert(c.sta != 4);
     for (const auto &c : commands)                                         // and each command names its own
         if (c.id == 0x18 && !c.mask)
             assert(c.sta == 3 ? ItlAWDL::sameAddress(c.addr, request(10, 0, 0).peer) :
                    ItlAWDL::sameAddress(c.addr, request(11, 0, 0).peer));
-    assert(count(0x18, 3, 0x8) == 1 && count(0x18, 4, 0x8) == 2);        // A: TID 0; B: TIDs 0 and 5
+    assert(count(0x18, 3, 0x8) == 1 && count(0x18, 5, 0x8) == 2);        // A: TID 0; B: TIDs 0 and 5
     assert(awdlPeers[0].rxTids == 0x01 && awdlPeers[1].rxTids == 0x21);
     unsigned toA = 0, toB = 0;
     for (const auto &f : sent) {
@@ -192,7 +195,7 @@ int main() {
     // A third peer with a third slot; a fourth finds none.
     assert(deliver(request(12, 0, 4)));
     settle();
-    assert(awdlPeers[2].added && count(0x18, 5, 0) == 1);
+    assert(awdlPeers[2].added && count(0x18, 6, 0) == 1);
     assert(!deliver(request(13, 0, 5)));
     ++cases;
     // A further slot gives its station back once idle: receive sessions first (DELBA, forced after 3 s), then the
@@ -209,12 +212,12 @@ int main() {
         clockUS += 1000000ULL;
     }
     assert(awdlPeers[0].added && !awdlPeers[1].added && !awdlPeers[2].added);
-    assert(count(0x19, 4) == 1 && count(0x19, 5) == 1 && count(0x19, 3) == 0);
-    assert(count(0x18, 4, 0x10) == 2 && count(0x18, 5, 0x10) == 1);    // its sessions went first
+    assert(count(0x19, 5) == 1 && count(0x19, 6) == 1 && count(0x19, 3) == 0 && count(0x19, 4) == 0);
+    assert(count(0x18, 5, 0x10) == 2 && count(0x18, 6, 0x10) == 1);    // its sessions went first
     ++cases;
     // A failed station add takes only that slot out of use; others go on, and the next peer gets the next slot.
     reset();
-    failAddFor = 4;
+    failAddFor = 5;
     assert(deliver(request(10, 0, 1)) && deliver(request(11, 0, 2)));
     settle();
     assert(awdlPeers[0].added && !awdlPeers[1].added && awdlPeers[1].failedGen == hardware.sc_generation);
@@ -236,7 +239,7 @@ int main() {
     awdlPeerSlotsUsable = 1;
     assert(deliver(request(10, 0, 1)));
     settle();
-    assert(awdlPeers[0].added && !deliver(request(11, 0, 2)) && count(0x18, 4) == 0);
+    assert(awdlPeers[0].added && !deliver(request(11, 0, 2)) && count(0x18, 5) == 0);
     ++cases;
     // A peer that already has a station in slot 0 never gets a second one in another slot.
     reset();
@@ -244,7 +247,7 @@ int main() {
     settle();
     assert(awdlPeers[1].requests.note(request(10, 3, 2)));
     settle();
-    assert(!awdlPeers[1].added && awdlPeers[1].requests.empty() && count(0x18, 4) == 0);
+    assert(!awdlPeers[1].added && awdlPeers[1].requests.empty() && count(0x18, 5) == 0);
     ++cases;
     printf("PASS %u multi-peer receive Block Ack scenarios on the real task step (host mocks only)\n", cases);
 }

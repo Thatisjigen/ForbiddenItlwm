@@ -8,9 +8,12 @@
 #include "AWDLBlockAck.hpp"
 #include "AWDLPeerSchedule.hpp"
 namespace ItlAWDL {
-// Firmware stations for AWDL peers: 3 and up (0 is the Wi-Fi network's, 1 the aux station, 2 the listener's).
+// Firmware stations for AWDL peers: 3, then 5 and up. 0 is the Wi-Fi network's, 1 the aux station, 2 the
+// listener's and 4 the scheduler's channel-6 station (kAwdlCh6TxStaId).
 constexpr uint8_t kFirstPeerStation = 3;
+constexpr uint8_t kChannel6Station = 4;
 constexpr unsigned kMaxPeerSlots = 12;
+inline uint8_t stationForSlot(unsigned slot) { return uint8_t(slot ? kChannel6Station + 1 + (slot - 1) : kFirstPeerStation); }
 struct PeerSlot {
     // The peer and its firmware station.
     uint8_t station = kFirstPeerStation;
@@ -86,15 +89,15 @@ inline PeerSlot *slotForRequest(PeerSlot *slots, unsigned usable, const uint8_t 
     return nullptr;
 }
 
-// How many slots a listener can use: one for each firmware station from kFirstPeerStation up, at most
-// kMaxPeerSlots. `firmwareStations` is the firmware's station count (0 when it doesn't say: 16).
+// How many slots a listener can use: one for each firmware station stationForSlot gives below the firmware's
+// count, at most kMaxPeerSlots, and always slot 0. `firmwareStations` is 0 when the firmware doesn't say (16).
 inline unsigned usablePeerSlots(bool several, unsigned firmwareStations) {
     if (!several)
         return 1;
     const unsigned stations = firmwareStations ? firmwareStations : 16;
-    if (stations <= kFirstPeerStation + 1)
-        return 1;
-    const unsigned n = stations - kFirstPeerStation;
-    return n < kMaxPeerSlots ? n : kMaxPeerSlots;
+    unsigned n = 1;
+    while (n < kMaxPeerSlots && stationForSlot(n) < stations)
+        ++n;
+    return n;
 }
 }
