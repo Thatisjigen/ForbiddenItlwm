@@ -71,6 +71,12 @@ static uint32_t awdlCoexToken, awdlSchedSecondRefused, awdlSchedSecondBusy, awdl
 static uint32_t awdlSchedSecondRefusedCh, awdlSchedSecondRefusedWhy, awdlSchedSecondRefusedFlags;
 static uint32_t awdlSchedSecondErrors, awdlSchedSecondHome, awdlSchedSecondAway;
 static uint64_t awdlSchedSecondTookSumUS, awdlSchedSecondTookMaxUS, nowUS;
+static uint32_t awdlSchedSecondVariant, awdlSchedSecondSettleWaits, awdlSchedSecondPeerRemovals, awdlSchedSecondMacErrors;
+static bool awdlSchedSecondBootOff;
+static uint64_t awdlSchedSpEndedUS;
+static constexpr uint64_t kAwdlSchedSecondSettleUS = 30000;
+static unsigned peerRemoves, macSends, lastWidth;
+static int peerRemoveError;
 static ItlAWDL::PeerSlot awdlPeers[ItlAWDL::kMaxPeerSlots];
 static uint64_t awdlUptimeUS() { return nowUS; }
 static void awdlSchedSpPublish() {}
@@ -103,12 +109,15 @@ public:
     bool awdlSchedSecondRetune(iwx_softc *, unsigned);
     static void awdlSchedFollowTask(void *);
     int awdlSchedSpSend(iwx_softc *, uint32_t duration) { ++sessionCalls; sessionDuration=duration; return 0; }
+    int awdlCoexBaRemoveAllPeers(iwx_softc *) { assert(!awdlSchedSecondSwitching && peerRemoves == commands); ++peerRemoves; return peerRemoveError; }
+    int awdlCoexMacSend(iwx_softc *, uint32_t action) { assert(action == IWX_FW_CTXT_ACTION_MODIFY && commands); ++macSends; return 0; }
 };
 // DRIVER
 static int iwx_phy_ctxt_cmd(iwx_softc *sc, iwx_phy_ctxt *, int, int, int action, int) {
     assert(action == IWX_FW_CTXT_ACTION_MODIFY);
     assert(awdlSchedSecondSwitching && awdlSchedSecondDraining && awdlSchedSecondTxBlocked());
     ++commands;
+    lastWidth = unsigned(awdlCoexPhyWidth);
     nowUS += 700;
     if (mutation == 3) {   // reentrant timer bookkeeping must not rewrite the executing request
         awdlSchedFollowEndUS = 9999999;
@@ -166,6 +175,9 @@ static void reset(iwx_softc &sc) {
     awdlSchedFollowArmedRunStartUS = 12000;
     awdlSchedFollowArmedClock = awdlSchedPlanClockNow = ItlAWDL::ownClock();
     awdlSchedSecondStale = awdlSchedSecondBusy = awdlSchedSecondErrors = 0;
+    awdlSchedSecondVariant = awdlSchedSecondSettleWaits = awdlSchedSecondPeerRemovals = awdlSchedSecondMacErrors = 0;
+    awdlSchedSecondBootOff = false; awdlSchedSpEndedUS = 0; awdlSchedSpOff = false;
+    peerRemoves = macSends = lastWidth = 0; peerRemoveError = 0;
 }
 static int awdlCoexQueue = 2;
 int main() {
@@ -244,8 +256,36 @@ int main() {
     assert(!driver.awdlSchedSecondRetune(&sc, 44) && !commands);
     reset(sc); commandError = 5;
     assert(!driver.awdlSchedSecondRetune(&sc, 44));
-    assert(awdlCoexTxHalted && awdlSchedSpOff && awdlCoexPhyUncertainGen == 7 && awdlSchedSecondTxBlocked());
+    // The scheduler is left on (it resumes after the firmware restart); the experiment is off for the boot.
+    assert(awdlCoexTxHalted && !awdlSchedSpOff && awdlSchedSecondBootOff && awdlCoexPhyUncertainGen == 7 &&
+           awdlSchedSecondTxBlocked());
     assert(!driver.awdlSchedSecondRetune(&sc, 149) && commands == 1);
+    {   // a later generation (after the restart) still refuses the away channel
+        const bool off = awdlSchedSecondBootOff;
+        reset(sc); awdlSchedSecondBootOff = off; sc.sc_generation = awdlCoexGeneration = awdlSchedSpGen = 8;
+        assert(!driver.awdlSchedSecondRetune(&sc, 44) && !commands && (awdlSchedSecondRefusedWhy & 128u));
+    }
+    // a restart during the MODIFY also turns it off for the boot
+    reset(sc); mutation = 1;
+    assert(!driver.awdlSchedSecondRetune(&sc, 44) && awdlSchedSecondBootOff);
+    // variant 0: away at 20 MHz, no peer removal or MAC command
+    reset(sc);
+    assert(driver.awdlSchedSecondRetune(&sc, 44) && lastWidth == IWX_PHY_VHT_CHANNEL_MODE20 && !peerRemoves && !macSends);
+    assert(driver.awdlSchedSecondRetune(&sc, 149) && lastWidth == IWX_PHY_VHT_CHANNEL_MODE80);
+    // variant 1: waits 30 ms after the last session's end
+    reset(sc); awdlSchedSecondVariant = 1; awdlSchedSpEndedUS = nowUS - 1000;
+    assert(!driver.awdlSchedSecondRetune(&sc, 44) && !commands && awdlSchedSecondSettleWaits == 1);
+    nowUS = awdlSchedSpEndedUS + kAwdlSchedSecondSettleUS;
+    assert(driver.awdlSchedSecondRetune(&sc, 44) && commands == 1);
+    // variant 2: peers removed before, MAC MODIFY after, both ways; a removal failure stops the retune
+    reset(sc); awdlSchedSecondVariant = 2;
+    assert(driver.awdlSchedSecondRetune(&sc, 44) && peerRemoves == 1 && macSends == 1);
+    assert(driver.awdlSchedSecondRetune(&sc, 149) && peerRemoves == 2 && macSends == 2);
+    reset(sc); awdlSchedSecondVariant = 2; peerRemoveError = 5;
+    assert(!driver.awdlSchedSecondRetune(&sc, 44) && !commands && awdlSchedSecondErrors == 1 && !awdlSchedSecondDraining);
+    // variant 4: away at the home width
+    reset(sc); awdlSchedSecondVariant = 4;
+    assert(driver.awdlSchedSecondRetune(&sc, 44) && lastWidth == IWX_PHY_VHT_CHANNEL_MODE80);
     for (int change : {1, 2}) {
         reset(sc); mutation = change;
         assert(!driver.awdlSchedSecondRetune(&sc, 44));

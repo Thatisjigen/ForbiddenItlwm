@@ -117,8 +117,9 @@ import hashlib
 # (status 0) opening no window, each start timed against its plan run (ITLAWDLSchedStartVsRun); and restart counts
 # at the init_task sites only with -itlfwcrashrec. The next release adds only the generation of the last successful
 # listener session start (awdlSchedStartedGen), which the overlap exceptions wait for. Then a frame-release
-# notification for a cleared or unused reorder entry is dropped instead of released (added lines only).
-a=s.index('iwx_rx_pkt(struct');b=s.index("\nvoid ItlIwx::",a);assert hashlib.sha256(s[a:b].encode()).hexdigest()=='89fd1546f8cafd8676d6a05295b7adde8581291c2045a306fd12cf4db97625cf'
+# notification for a cleared or unused reorder entry is dropped instead of released (added lines only). -itlschedsecond's
+# itlsecondvar 1 notes when the follower's last session ended (awdlSchedSpEndedUS, one added line).
+a=s.index('iwx_rx_pkt(struct');b=s.index("\nvoid ItlIwx::",a);assert hashlib.sha256(s[a:b].encode()).hexdigest()=='6c76613787fef8b66e4d170bd79fda5ecd6d80b38dd88dae80ca822178565283'
 # iwx_rx_mpdu_mq: the next release adds only a read-only per-antenna signal tap (ITLAWDLChainRssi) after the RSSI.
 a=s.index('iwx_rx_mpdu_mq(struct');b=s.index("\nvoid ItlIwx::",a);assert hashlib.sha256(s[a:b].encode()).hexdigest()=='08111bde101978bbaabf233464b82e83d93f4c87a80332d0698e8184c892e01c'
 # iwx_rx_frame: 0.6.0 adds only the phone's 5 GHz channel tracking from its TLV 18 sequence (PR #21). The AWDL

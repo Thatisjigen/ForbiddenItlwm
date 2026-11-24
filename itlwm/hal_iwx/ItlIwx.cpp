@@ -574,6 +574,15 @@ static int awdlSchedSecondOffGen = -1, awdlSchedSecondLastErr;
 static uint32_t awdlSchedSecondRuns, awdlSchedSecondAway, awdlSchedSecondHome, awdlSchedSecondErrors,
     awdlSchedSecondRefused, awdlSchedSecondTxHeld;
 static uint32_t awdlSchedSecondRefusedCh, awdlSchedSecondRefusedWhy, awdlSchedSecondRefusedFlags;
+// Test only (itlsecondvar): which difference from the ordinary listener move (awdlCoexRetarget) a retune copies,
+// to find what made the first hardware retune assert the firmware (UMAC 0x20101a28 on PHY_CONTEXT_CMD):
+// 1 wait 30 ms after the last session's end, 2 remove the peer stations first and send the MAC MODIFY after (as
+// the move does), 4 stay at the home width away. A failed retune turns the experiment off for the boot.
+static uint32_t awdlSchedSecondVariant;
+static bool awdlSchedSecondBootOff;
+static uint64_t awdlSchedSpEndedUS;
+static uint32_t awdlSchedSecondSettleWaits, awdlSchedSecondPeerRemovals, awdlSchedSecondMacErrors;
+static constexpr uint64_t kAwdlSchedSecondSettleUS = 30000;
 static uint64_t awdlSchedSecondTookSumUS, awdlSchedSecondTookMaxUS;
 // A PHY command can sleep with the gate released. Stop every listener submission while draining/switching.
 static bool awdlSchedSecondSwitching, awdlSchedSecondDraining;
@@ -18470,11 +18479,13 @@ static void awdlSchedSpPublish()
         if (awdlSchedSecond) {
             // -itlschedsecond: the second channel's runs and what retuning the listener's PHY cost.
             const uint32_t retunes = awdlSchedSecondAway + awdlSchedSecondHome;
-            char sec[480];
+            char sec[600];
             snprintf(sec, sizeof(sec),
                      "%s%s second %u%s; runs %u, retunes away %u home %u (mean %llu us, max %llu us), refused %u "
                      "(last ch %u why 0x%x flags 0x%x), "
-                     "errors %u (last %d); our frames held while away %u; drain waits %u, stale %u, second RX %u",
+                     "errors %u (last %d); our frames held while away %u; drain waits %u, stale %u, second RX %u; "
+                     "variant %u: settle waits %u, peer removals %u, MAC errors %u",
+                     awdlSchedSecondBootOff ? "off for this boot (a retune failed), " :
                      awdlSchedSecondOffGen >= 0 && awdlSchedSecondOffGen == awdlSchedSpGen ? "off for this generation, " : "",
                      awdlSimSecondChan ? "[SIMULATION]" : "on", awdlSchedSecondNow,
                      awdlSchedSecondTuned ? " (retuned now)" : "", awdlSchedSecondRuns, awdlSchedSecondAway,
@@ -18484,7 +18495,8 @@ static void awdlSchedSpPublish()
                      awdlSchedSecondRefusedCh, awdlSchedSecondRefusedWhy, awdlSchedSecondRefusedFlags,
                      awdlSchedSecondErrors,
                      awdlSchedSecondLastErr, awdlSchedSecondTxHeld, awdlSchedSecondBusy, awdlSchedSecondStale,
-                     awdlSchedSecondRx);
+                     awdlSchedSecondRx, awdlSchedSecondVariant, awdlSchedSecondSettleWaits,
+                     awdlSchedSecondPeerRemovals, awdlSchedSecondMacErrors);
             IORegistryEntry::getRegistryRoot()->setProperty("ITLAWDLSchedSecond", sec);
         }
     }
@@ -19126,12 +19138,13 @@ awdlSchedSecondRetune(struct iwx_softc *sc, unsigned channel)
     // Keep firmware regulatory restrictions intact. A rejected away channel does not prevent returning home.
     // Use the same firmware-map policy as ordinary listener setup. A passive flag alone is not a refusal
     // when a beacon hint or the firmware's IR-concurrent permission and current association allow this channel.
-    if (!home && (awdlSchedSecondOffGen == gen || !IEEE80211_IS_CHAN_5GHZ(target) ||
+    if (!home && (awdlSchedSecondBootOff || awdlSchedSecondOffGen == gen || !IEEE80211_IS_CHAN_5GHZ(target) ||
                   !awdlCoexChannelUsable(ic, channel))) {
         // why, for ITLAWDLSchedSecond: 1 already off this generation, 2 not 5 GHz, 4 not in the channel map,
-        // 8 inactive, 16 no IR (no beacon hint or firmware permission), 32 DFS, 64 no ad hoc.
+        // 8 inactive, 16 no IR (no beacon hint or firmware permission), 32 DFS, 64 no ad hoc,
+        // 128 off for the boot after a failed retune.
         awdlSchedSecondRefusedCh = channel;
-        awdlSchedSecondRefusedWhy = (awdlSchedSecondOffGen == gen ? 1U : 0U) |
+        awdlSchedSecondRefusedWhy = (awdlSchedSecondBootOff ? 128U : 0U) | (awdlSchedSecondOffGen == gen ? 1U : 0U) |
             (!IEEE80211_IS_CHAN_5GHZ(target) ? 2U : 0U) | (!target->ic_freq ? 4U : 0U) |
             (!isset(ic->ic_chan_active, channel) ? 8U : 0U) | (awdlCoexNoIr(ic, channel) ? 16U : 0U) |
             ((target->ic_flags & IEEE80211_CHAN_DFS) ? 32U : 0U) |
@@ -19159,29 +19172,67 @@ awdlSchedSecondRetune(struct iwx_softc *sc, unsigned channel)
         ++awdlSchedSecondBusy;
         return false;   // completions keep running; the next decision may retry or skip this run
     }
+    // itlsecondvar 1: the firmware may still hold the last session's time event on a MAC bound to this PHY.
+    if ((awdlSchedSecondVariant & 1) && awdlSchedSpEndedUS && awdlUptimeUS() - awdlSchedSpEndedUS < kAwdlSchedSecondSettleUS) {
+        ++awdlSchedSecondSettleWaits;
+        return false;
+    }
+    // itlsecondvar 2: as the ordinary move does, the peer stations go first (they were set up for this channel).
+    if (awdlSchedSecondVariant & 2) {
+        const int peerErr = awdlCoexBaRemoveAllPeers(sc);
+        if (gen != sc->sc_generation || token != awdlCoexToken || !awdlCoexAdded) {
+            ++awdlSchedSecondStale;
+            return false;
+        }
+        if (peerErr) {
+            awdlSchedSecondLastErr = peerErr;
+            ++awdlSchedSecondErrors;
+            awdlSchedSecondDraining = false;
+            awdlSchedSpPublish();
+            return false;
+        }
+        ++awdlSchedSecondPeerRemovals;
+    }
     awdlSchedSecondSwitching = true;
     struct ieee80211_channel *before = own->channel;
     own->channel = target;
-    awdlCoexPhyWidth = home && awdlCoexOwnWidth == 80 ? IWX_PHY_VHT_CHANNEL_MODE80 : IWX_PHY_VHT_CHANNEL_MODE20;
+    // itlsecondvar 4: away at the home width too (80 beside a station in the same block is allowed, section 6).
+    const bool wide = awdlCoexOwnWidth == 80 && (home || (awdlSchedSecondVariant & 4));
+    awdlCoexPhyWidth = wide ? IWX_PHY_VHT_CHANNEL_MODE80 : IWX_PHY_VHT_CHANNEL_MODE20;
     const uint64_t startUS = awdlUptimeUS();
     const int err = iwx_phy_ctxt_cmd(sc, own, 1, 1, IWX_FW_CTXT_ACTION_MODIFY, 0);
     awdlCoexPhyWidth = -1;
     if (gen != sc->sc_generation || token != awdlCoexToken || !awdlCoexAdded || awdlCoexGeneration != gen) {
         ++awdlSchedSecondStale;
+        if (gen != sc->sc_generation)
+            awdlSchedSecondBootOff = true;   // a firmware restart during the MODIFY: don't try again this boot
         return false;   // a newer listener owns these globals; its lifecycle reset clears the old barrier
     }
     awdlSchedSecondSwitching = false;
     awdlSchedSecondDraining = false;
     if (err) {
+        // The PHY state is unknown: listener TX stops until the listener is set up again (normally the firmware
+        // restart that follows). The scheduler itself keeps running after that restart; only this experiment
+        // stays off for the boot, so one failure can't repeat or leave AirDrop without the scheduler.
         own->channel = before;   // software rollback is not proof that the firmware stayed on this channel
         awdlCoexPhyUncertainGen = gen;
         awdlCoexTxHalted = true;
-        awdlSchedSpOff = true;
+        awdlSchedSecondBootOff = true;
         awdlSchedSecondOffGen = gen;
         awdlSchedSecondLastErr = err;
         ++awdlSchedSecondErrors;
         awdlSchedSpPublish();
         return false;
+    }
+    if (awdlSchedSecondVariant & 2) {
+        // the MAC context gets the new channel's rates in the same transition, as after a move
+        const int macErr = awdlCoexMacSend(sc, IWX_FW_CTXT_ACTION_MODIFY);
+        if (gen != sc->sc_generation)
+            return false;
+        if (macErr) {
+            ++awdlSchedSecondMacErrors;
+            awdlSchedSecondLastErr = macErr;
+        }
     }
     awdlSchedSecondTuned = home ? nullptr : target;
     if (home)
@@ -22903,6 +22954,7 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data, struct mbuf_list *ml)
                         awdlSchedSpAwaitStart = false;
                     } else {
                         ++awdlSchedSpEnds;
+                        awdlSchedSpEndedUS = spNow;
                         if (awdlSchedSpActive && awdlSchedSpStartUS) {
                             const uint64_t len = spNow - awdlSchedSpStartUS;
                             awdlSchedSpInUS += len;
@@ -24966,6 +25018,9 @@ iwx_attach(struct iwx_softc *sc, struct pci_attach_args *pa)
                     if (PE_parse_boot_argn("itlsimsecondmask", &simMask, sizeof(simMask)) && (simMask & 0xffff))
                         awdlSimSecondMask = uint16_t(simMask);
                 }
+                uint32_t variant = 0;
+                if (awdlSchedSecond && PE_parse_boot_argn("itlsecondvar", &variant, sizeof(variant)))
+                    awdlSchedSecondVariant = variant & 7;
             }
             awdlSchedSkew = itlResFlag("-itlschedskew", kItlResDiag);
             awdlSchedSyncTx = itlResFlag("-itlschedsynctx", kItlResWork);
