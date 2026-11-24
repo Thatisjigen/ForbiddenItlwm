@@ -288,6 +288,11 @@ static const char *awdlSchedSpState = "off";
 // Session timing: start delay (send to start notification) and real length, host time.
 static uint32_t awdlSchedSpDurationTU = 64;
 static bool awdlSchedSpAwaitStart;
+// Station transitions (join, leave, roam): sessions cancelled before the listener's contexts go, ticks skipped
+// meanwhile, and the last cancel's error. A live session on a MAC whose binding is removed asserts the firmware
+// (UMAC 0x2000320f on every network switch with itlawdlsched=3, 2026-11-24).
+static uint32_t awdlSchedLeaveCancels, awdlSchedTransitionSkips;
+static int awdlSchedLeaveCancelErr;
 static uint64_t awdlSchedSpSentUS, awdlSchedSpDelaySumUS, awdlSchedSpDelayMinUS = ~0ULL, awdlSchedSpDelayMaxUS,
     awdlSchedSpLenMinUS = ~0ULL, awdlSchedSpLenMaxUS;
 static uint32_t awdlSchedSpDelays, awdlSchedSpAwdlIn, awdlSchedSpAwdlBase, awdlSchedSpAwdlMark;
@@ -18018,7 +18023,7 @@ static void awdlSchedSpPublish()
 {
     const uint64_t total = awdlSchedSpFirstUS ? awdlUptimeUS() - awdlSchedSpFirstUS : 0;
     const uint64_t out = total > awdlSchedSpInUS ? total - awdlSchedSpInUS : 0;
-    char text[300];
+    char text[380];
     char pausedText[96] = "";
     if (awdlSchedPaused)
         snprintf(pausedText, sizeof(pausedText), " (paused: macOS wants %u, listener on %u; pauses %u)",
@@ -18026,7 +18031,7 @@ static void awdlSchedSpPublish()
     else if (awdlSchedPauses)
         snprintf(pausedText, sizeof(pausedText), " (pauses %u)", awdlSchedPauses);
     snprintf(text, sizeof(text), "%s%s%s%s%s%s; mac %u conf %u sent %u err %d starts %u ends %u fails %u; in %llu ms lis %u sta %u; "
-             "out %llu ms lis %u sta %u", awdlSchedSpState,
+             "out %llu ms lis %u sta %u; station transitions: cancels %u (err %d), skipped ticks %u", awdlSchedSpState,
              awdlSchedSharedChannel ? " (shared channel: channel 6 only)" : "", pausedText,
              awdlSched160 ? (awdlSched80 ? " [160 and same-block 80 allowed]" : " [160 allowed]") :
              awdlSched80 ? " [same-block 80 allowed]" : "",
@@ -18035,7 +18040,7 @@ static void awdlSchedSpPublish()
              awdlSimSta160 || awdlSimMacChan || awdlSimUnusable ? " [SIMULATION]" : "", awdlSchedSpMacId, awdlSchedSpConf, awdlSchedSpSent, awdlSchedSpLastErr,
              awdlSchedSpStarts, awdlSchedSpEnds, awdlSchedSpFails, (unsigned long long)(awdlSchedSpInUS / 1000),
              awdlSchedSpLisIn, awdlSchedSpStaIn, (unsigned long long)(out / 1000), awdlSchedSpLisOut,
-             awdlSchedSpStaOut);
+             awdlSchedSpStaOut, awdlSchedLeaveCancels, awdlSchedLeaveCancelErr, awdlSchedTransitionSkips);
     IORegistryEntry::getRegistryRoot()->setProperty("ITLAWDLSchedSp", text);
     {
         // start delay (send to start notification) and real length, host time, in µs; AWDL frames
@@ -18388,6 +18393,33 @@ awdlSchedSpSend(struct iwx_softc *sc, uint32_t durationTU)
     return err;
 }
 
+// Removes the follower's session, if one was asked for or is running, before the listener's contexts are removed.
+int ItlIwx::
+awdlSchedSpCancel(struct iwx_softc *sc)
+{
+    const int gen = sc->sc_generation;
+    if (!awdlSchedSp || !awdlSchedSpSent || awdlSchedSpGen != gen || !(awdlSchedSpActive || awdlSchedSpAwaitStart))
+        return 0;
+    struct iwx_session_prot_cmd cmd = {
+        .id_and_color = htole32(IWX_FW_CMD_ID_AND_COLOR(awdlSchedSpMacId, 0)),
+        .action = htole32(IWX_FW_CTXT_ACTION_REMOVE),
+        .conf_id = htole32(awdlSchedSpConf),
+    };
+    awdlSchedSpActive = false;
+    awdlSchedSpAwaitStart = false;
+    awdlSchedSpRunStartUS = 0;
+    awdlSchedSpPlannedEndUS = 0;
+    ++awdlSchedLeaveCancels;
+    const int err = iwx_send_cmd_pdu(sc, iwx_cmd_id(IWX_SESSION_PROTECTION_CMD, IWX_MAC_CONF_GROUP, 0), 0,
+                                     sizeof(cmd), &cmd);
+    if (gen != sc->sc_generation)
+        return ECANCELED;
+    if (err)
+        awdlSchedLeaveCancelErr = err;
+    awdlSchedSpPublish();
+    return err;
+}
+
 // -itlschedsp: the follower's tick. Waits for the station, the listener and the settle rule, then plans sessions.
 void ItlIwx::
 awdlSchedSpTick(struct iwx_softc *sc)
@@ -18429,6 +18461,13 @@ awdlSchedSpTick(struct iwx_softc *sc)
             awdlSchedSpPublish();
             return;
         }
+    }
+    // No sessions while the station joins, leaves or roams: the transition removes and re-adds the listener's
+    // contexts, and its firmware commands drop the gate, so a tick can run in between.
+    if (awdlCoexStationTransitionGen == gen) {
+        ++awdlSchedTransitionSkips;
+        awdlStartNote(1, awdlUptimeUS(), awdlSchedFollowStartedUS != 0);
+        return;
     }
     struct iwx_node *in = (struct iwx_node *)ic->ic_bss;
     const unsigned stationChannel = in && in->in_phyctxt && in->in_phyctxt->channel ?
@@ -20262,6 +20301,11 @@ iwx_newstate_task(void *psc)
     if (nstate <= ostate) {
         switch (ostate) {
             case IEEE80211_S_RUN:
+                // The follower's session goes first: removing a binding with a session still on it asserts
+                // the firmware. Ticks stay off until the station is up again (awdlCoexStationTransitionGen).
+                (void)that->awdlSchedSpCancel(sc);
+                if (generation != sc->sc_generation || (sc->sc_flags & IWX_FLAG_SHUTDOWN))
+                    goto out;
                 // Reassociation must not inherit a listener that is still owned by the
                 // previous station context.  Use the actual listener state rather than
                 // only the boot-time probe flag: an in-flight add or queue can survive

@@ -166,6 +166,7 @@ public:
     uint8_t iwx_lookup_cmd_ver(iwx_softc *, int, int) { return 1; }
     int awdlSchedHandleMac(iwx_softc *, uint32_t) { return 0; }   // unreachable here
     void awdlSchedCh6Remove(iwx_softc *) {}   // channel 6's handle, never added here
+    int awdlSchedSpCancel(iwx_softc *) { return 0; }   // the follower never runs here
     int awdlCoexMacSend(iwx_softc *, int action) {
         events.push_back(action == IWX_FW_CTXT_ACTION_ADD ? "mac-add" : "mac-remove");
         if (action == IWX_FW_CTXT_ACTION_ADD &&

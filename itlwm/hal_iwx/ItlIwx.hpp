@@ -471,6 +471,7 @@ public:
     void   awdlCoexRetarget(struct iwx_softc *);
     void   awdlSchedSpTick(struct iwx_softc *);
     int    awdlSchedSpSend(struct iwx_softc *, uint32_t durationTU);
+    int    awdlSchedSpCancel(struct iwx_softc *);
     void   awdlSchedFollowPlan(struct iwx_softc *, uint64_t nowUS);
     int    awdlSchedHandleMac(struct iwx_softc *, uint32_t action);
     bool   awdlSchedHandleEnsure(struct iwx_softc *);
