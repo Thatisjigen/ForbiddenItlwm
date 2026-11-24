@@ -67,6 +67,7 @@ What each one does:
 | `itlawdlsched=3` | The scheduler plus its diagnostics: more I/O Registry keys under `ITLAWDLSched*`, firmware crash records in `ITLFwCrashRecords`, counts of AirDrop frames lost before reaching macOS, and `-itlawdlpmdebug`. For bug reports |
 | `itlschedlead=N` | With the scheduler: how early, in µs, the driver asks the firmware for each of macOS's slots (1000 to 20000, default 12000) |
 | `itlschedstartdelay=N` | With the scheduler: the minimum seconds it waits after AirDrop starts (0 to 60, default 3). It also waits for the conditions above, so 0 doesn't mean at once |
+| `-itlawdlmultipeer` | From 0.7.0-alpha.2, untested with more than one Apple device: every Apple device that asks to send to the Mac with Block Ack gets its own firmware station and receive sessions (one per station the firmware has, up to 12), instead of being refused while another device holds the driver's one station ([#81](https://github.com/retropineaple/ForbiddenItlwm/issues/81), [#45](https://github.com/retropineaple/ForbiddenItlwm/issues/45)). So several devices can send to the Mac at full speed. A device that has sent nothing for about a minute gives its station back. Sending from the Mac is still aggregated to one device only. `ITLAWDLCoexPeers` shows each slot. If you try it with two or more Apple devices, please report how it went |
 | `-btleadvnodupfilter` | BTLEAdvFixup turns off `bluetoothd`'s scan duplicate filter, so the Mac notices at once when the iPhone asks for a link, instead of up to about 10 s later |
 
 ## Optional
@@ -116,6 +117,7 @@ Not needed for AirDrop. Listed so you know what they do if you find them in a gu
 | `-itlawdldatacopy` | Publishes `ItlwmAWDLDataCopyAttempts`/`Success`, a receive-copy probe from the bring-up. Diagnostic only |
 | `-itlawdlpoolprobe` | Probes the `awdl0` packet pools once at start and publishes the result. Diagnostic only |
 | `-btlenoscan` | BTLEAdvFixup: advertising fixes only, without the scanning changes. For comparison |
+| `-itlawdlstatest` | **Test only.** From 0.7.0-alpha.2: once per boot, after AirDrop starts, the driver adds up to 12 extra firmware stations on the AirDrop listener with made-up addresses, notes how many the firmware accepts, and removes them again. `ITLAWDLStationTest` shows the result: how many Apple devices `-itlawdlmultipeer` could serve on your card. The firmware may restart if it objects |
 | `-itlsimsta160`, `itlsimmacchan=N`, `-itlsimunusable` | **Test only, never for daily use.** From 0.7.0-alpha.2, to recreate #101 without a 160 MHz router: tell the firmware the Mac's 80 MHz Wi-Fi link (in 36–64 or 100–128) is 160 MHz wide, use channel N instead of macOS's AirDrop channel, or treat macOS's channel as unusable. `ITLAWDLSchedSp` then says "[SIMULATION]" |
 | `-btleadvdbg`, `-btleadvbeta` | Lilu's standard debug and beta switches for BTLEAdvFixup |
 | `itlwm_he=1` | Wi-Fi 6 (802.11ax), from the upstream driver. Not tested here. One tester ran all their AirDrop tests with it without problems (#58); on another's AX201, Wi-Fi dropped as soon as an AirDrop started (#83), with a router using 160 MHz. Fixed in 0.6.0-beta.4; not tested here yet |

@@ -190,7 +190,7 @@ public:
         if (scenario.find("setup-queue") == 0) pauseFirmware();
         return suffix("negative") ? -ECANCELED : 1;
     }
-    int awdlCoexBaRemovePeer(iwx_softc *) { events.push_back("peer-remove"); return 0; }
+    int awdlCoexBaRemoveAllPeers(iwx_softc *) { events.push_back("peer-remove"); return 0; }
     int iwx_flush_sta_tids(iwx_softc *sc, int sta, int tids) {
         assert(sta == IWX_MONITOR_STA_ID && tids == 0xffff);
         events.push_back("flush");

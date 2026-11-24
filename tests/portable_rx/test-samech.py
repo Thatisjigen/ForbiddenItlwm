@@ -126,5 +126,7 @@ a=s.index('iwx_rx_mpdu_mq(struct');b=s.index("\nvoid ItlIwx::",a);assert hashlib
 # promiscuous frames after the AWDL hand-off unless the station is on 6 (-itlschedch6); group AWDL data heard on 6
 # passed to the hand-off (-itlawdlch6group), without the schedule-peer timing note; group data per slot
 # (-itlschedch6peer); measurements only with -itlsvctiming, -itlschedskew and -itlrxloss. The next release adds only a
-# count of received frames by reported channel while the listener is added (ITLAWDLListenerRxChan), read-only.
-a=s.index('iwx_rx_frame(struct');b=s.index("\nvoid ItlIwx::",a);assert hashlib.sha256(s[a:b].encode()).hexdigest()=='4e6e56cf787914af9e81658ddce0ccca41522549676ea381620be715e60d259e'
+# count of received frames by reported channel while the listener is added (ITLAWDLListenerRxChan), read-only. Then
+# a peer's DELBA and data are matched to that peer's slot (ItlAWDL::addedSlotFor) instead of the one BA peer: the same
+# peer with one slot, the only change without -itlawdlmultipeer.
+a=s.index('iwx_rx_frame(struct');b=s.index("\nvoid ItlIwx::",a);assert hashlib.sha256(s[a:b].encode()).hexdigest()=='e169b0f248fb45a536aa7851d582f6fd5483726a3256c228beaab0144a3b3dd1'

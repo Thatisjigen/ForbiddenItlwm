@@ -26,8 +26,10 @@ MAP = {
 
 _PATTERN = re.compile(r'\b(' + '|'.join(sorted(MAP, key=len, reverse=True)) + r')\b')
 SLOT = ('#include <AWDLPeerSlot.hpp>\n'
-        'static ItlAWDL::PeerSlot awdlPeers[1];\n'
-        'static ItlAWDL::PeerSlot &awdlPeer = awdlPeers[0];\n')
+        'static ItlAWDL::PeerSlot awdlPeers[ItlAWDL::kMaxPeerSlots];\n'
+        'static ItlAWDL::PeerSlot &awdlPeer = awdlPeers[0];\n'
+        'static unsigned awdlPeerSlotsUsable = 1;\n'
+        'static unsigned awdlPeerSlotFull;\n')
 
 
 def rename(text):

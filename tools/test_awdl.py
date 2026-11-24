@@ -7,7 +7,7 @@ import tempfile
 
 root = Path(__file__).resolve().parents[1]
 with tempfile.TemporaryDirectory(prefix="forbiddenitlwm-tests-") as directory:
-    for name in ("awdl_requested_configuration", "awdl_protocol", "awdl_frame_builder", "awdl_sync_prefix", "awdl_local_schedule", "awdl_probe_policy", "awdl_data_payload", "awdl_data_frame", "awdl_observation", "awdl_regulatory", "awdl_tx_burst", "awdl_peer_schedule", "awdl_session_follow", "awdl_exec_plan", "awdl_election", "awdl_build_guard", "btleadv_hci", "btleadv_verify", "eapol_key_length", "ptk_derive", "wcl_transition", "counted_copy", "scan_cursor"):
+    for name in ("awdl_requested_configuration", "awdl_protocol", "awdl_frame_builder", "awdl_sync_prefix", "awdl_local_schedule", "awdl_probe_policy", "awdl_data_payload", "awdl_data_frame", "awdl_observation", "awdl_regulatory", "awdl_tx_burst", "awdl_peer_schedule", "awdl_peer_slots", "awdl_session_follow", "awdl_exec_plan", "awdl_election", "awdl_build_guard", "btleadv_hci", "btleadv_verify", "eapol_key_length", "ptk_derive", "wcl_transition", "counted_copy", "scan_cursor"):
         output = Path(directory) / name
         subprocess.run([
             "xcrun", "clang++", "-std=c++14",
@@ -50,6 +50,8 @@ subprocess.run(["python3", str(root / "tests/portable_rx/test-samech.py")], chec
 # PR #50: the idle receive-peer handoff (-itlawdlpeerhandoff), its helper and its ADDBA dispatch.
 subprocess.run(["python3", str(root / "tests/portable_rx/test-handoff.py")], check=True)
 subprocess.run(["python3", str(root / "tests/portable_rx/test-handoff-rx.py")], check=True)
+# Several AWDL peers, each with its own receive Block Ack station (-itlawdlmultipeer).
+subprocess.run(["python3", str(root / "tests/awdl_multi_peer.py")], check=True)
 # The Sonoma set needs a 14.8.9 bluetoothd. Point this at one to check it.
 if os.environ.get("FORBIDDEN_SONOMA_BLUETOOTHD"):
     subprocess.run(["python3", str(root / "tests/btleadv_patterns.py"), "--target", "sonoma",

@@ -141,7 +141,7 @@
 #include <HAL/ItlDriverInfo.hpp>
 #include <HAL/ItlDriverController.hpp>
 
-namespace ItlAWDL { struct MccSample; }
+namespace ItlAWDL { struct MccSample; struct PeerSlot; }
 
 class ItlIwx : public ItlHalService, ItlDriverInfo, ItlDriverController {
     OSDeclareDefaultStructors(ItlIwx)
@@ -480,8 +480,11 @@ public:
     static void    awdlSchedFollowTask(void *);
     void   awdlCoexDataPump(struct iwx_softc *, unsigned budget = ~0U);
     void   awdlCoexBaHandle(struct iwx_softc *);
-    int    awdlCoexBaRemovePeer(struct iwx_softc *);
-    int    awdlCoexBaAddPeer(struct iwx_softc *, const uint8_t *);
+    int    awdlCoexBaRemovePeer(struct iwx_softc *, ItlAWDL::PeerSlot &);
+    int    awdlCoexBaRemoveAllPeers(struct iwx_softc *);
+    int    awdlCoexBaAddPeer(struct iwx_softc *, ItlAWDL::PeerSlot &, const uint8_t *);
+    bool   awdlCoexBaRxPeer(struct iwx_softc *, ItlAWDL::PeerSlot &, int, uint32_t, uint64_t);
+    void   awdlCoexStationTest(struct iwx_softc *);
     void   awdlCoexBaPauseStep(struct iwx_softc *);
     bool   awdlCoexSendMgmt(struct iwx_softc *, const uint8_t *, size_t, uint8_t kind);
     int    iwx_auth(struct iwx_softc *);

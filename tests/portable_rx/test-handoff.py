@@ -8,7 +8,7 @@ s=(R/'itlwm/hal_iwx/ItlIwx.cpp').read_text()
 assert 'static bool awdlCoexPeerHandoffEnabled;' in s
 assert 'awdlCoexData && PE_parse_boot_argn("-itlawdlpeerhandoff"' in s
 a=s.index('    // Peer handoff runs only in the task,')
-b=s.index('    // Keep the station and TX agreement',a)
+b=s.index('    // Each peer\'s station and receive sessions',a)
 block=s[a:b]
 assert s.index('if (!awdlCoexData || !awdlCoexAdded',s.index('awdlCoexBaHandle(struct')) < a
 assert 'awdlCoexPeerHandoff.note' in s[s.index('ItlAWDL::parseAddbaRequest(cf, coexLen'):]
@@ -32,7 +32,7 @@ static unsigned itlAWDLTransmitQueued(void*){return softwareQueued;}
 static void*getController(){return nullptr;}
 static bool awdlCoexPeerKnown(const uint8_t*,uint64_t){return known;}
 static uint64_t awdlUptimeUS(){return clockUS;}
-static int awdlCoexBaRemovePeer(SC*sc){
+static int awdlCoexBaRemovePeer(SC*sc,ItlAWDL::PeerSlot&){
  ++removeCalls;awdlCoexBaPeerAdded=false;awdlCoexBaRequestsPending.clear();
  if(removeBehavior==1)return 5;
  if(removeBehavior==2)++sc->gen;
