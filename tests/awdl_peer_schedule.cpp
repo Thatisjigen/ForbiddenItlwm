@@ -268,6 +268,28 @@ int main() {
         }
         assert(k.calibrated && k.offset == 0 && !k.refuted && k.refutations == 0);
     }
+    {   // -itlschedsecond: channelAt names the peer's channel at a time, from its sequence; 0 while not known
+        uint8_t two[16];
+        for (unsigned k = 0; k < 16; ++k) two[k] = k == 10 || k == 11 ? 44 : 149;
+        uint8_t h[200];
+        const size_t hn = buildFrame(h, 400, 20, 16, two);
+        PeerSyncInfo ti{};
+        assert(peerSyncFromAction(h, hn, &ti));
+        static PeerSchedule c; c.reset();
+        const uint64_t t1 = 20000000;
+        assert(c.channelAt(t1) == 0);                       // nothing heard
+        c.note(ti, t1, 149);
+        c.assumeZero = false;
+        assert(c.channelAt(t1) == 0);                       // timing not known (not calibrated, no assumption)
+        c.assumeZero = true;
+        // extended AW 101 starts 20 TU after t1; entry = eaw % 16 at offset 0
+        const uint64_t eawLen = 65536, start101 = t1 + 20 * 1024;
+        for (uint32_t e = 101; e < 101 + 16; ++e) {
+            const uint64_t mid = start101 + (e - 101) * eawLen + eawLen / 2;
+            assert(c.channelAt(mid) == ((e % 16 == 10 || e % 16 == 11) ? 44 : 149));
+        }
+        assert(c.channelAt(t1 + 100000000ULL) == 0);        // stale
+    }
     printf("AWDL peer schedule and pause: passed\n");
     return 0;
 }

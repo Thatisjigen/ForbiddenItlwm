@@ -4,6 +4,7 @@
 #include <Airport/IOSkywalkQueueFactories.h>
 #include "AWDLRequestedValue.hpp"
 #include "AWDLInactiveProtocol.hpp"
+#include <AWDLTxPass.hpp>
 #include <IOKit/IOLocks.h>
 
 class ItlAWDLInterface : public IO80211AWDLProtocol {
@@ -30,7 +31,8 @@ public:
     bool takeUnicastMI(uint8_t *output, size_t capacity, size_t *written, uint8_t peer[6], uint64_t nowUS);
     void noteUnicastMISent();
     // Under the shared gate. Converts the oldest queued frame into a caller-owned buffer.
-    bool popTransmit(uint8_t *, size_t, size_t *, const uint8_t *holdPayloadFor, bool holdEverySize = false);
+    bool popTransmit(uint8_t *, size_t, size_t *, const uint8_t *holdPayloadFor, bool holdEverySize = false,
+                     const ItlAWDL::TxPassList *pass = nullptr);
     // Frames macOS has queued that the driver hasn't taken yet.
     unsigned queuedTransmit() const { return transmitQueued + parkedQueued; }
     unsigned heldShortTransmit() const { return transmitHeldShort; }
@@ -145,7 +147,8 @@ private:
     void noteQueueState(const char *);
     UInt32 acceptTransmit(IOSkywalkPacket *const *, UInt32);
     // Only under the shared gate. Each frame is a copy, so no packet waits on the radio.
-    struct TransmitFrame { uint16_t length; uint8_t bytes[1514]; };
+    // next/order: for parked frames only, the next parked frame of the same peer and when it was parked.
+    struct TransmitFrame { uint16_t length; uint16_t next; uint32_t order; uint8_t bytes[1514]; };
     // itlawdltxqueue=N, 128 to 4096: frames held while the radio can't send, such as while the
     // peer is on another channel. A full queue drops, and the sender's transport reads that as loss.
     // Set once, before the frames are allocated (about 1.5 KB each).
@@ -172,7 +175,16 @@ private:
     unsigned parkedFrameCount = 0;
     TransmitFrame *parkedFrames = nullptr;
     unsigned parkedHead = 0, parkedQueued = 0, parkedPeak = 0, transmitParked = 0, transmitPassed = 0;
-    uint8_t parkedPeer[6] = {};
+    uint8_t parkedPeer[6] = {};   // the peer whose parked frame is oldest (the only one before -itlschedsecond)
+    // Several peers can have parked frames at once (-itlschedsecond's pass list holds every peer that isn't on the
+    // listener's channel). Each peer's frames are a list through the ring in their order; a frame taken from the
+    // middle leaves an empty slot (length 0) that is reused once the ring's head passes it. parkedUsed counts the
+    // ring's slots in use, empty ones included; parkedQueued counts frames.
+    static constexpr unsigned parkedPeerMax = 12;
+    struct ParkedPeer { uint8_t addr[6]; uint16_t first, last; uint32_t count; };
+    ParkedPeer parkedPeerTable[parkedPeerMax] = {};
+    unsigned parkedPeerCount = 0, parkedUsed = 0, parkedTableFull = 0;
+    uint32_t parkedSerial = 0;
     bool dataTransmitEnabled = false;
     ItlAWDLNativeState nativeState;
     unsigned oobRequests = 0;

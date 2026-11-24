@@ -13,7 +13,9 @@ def function(signature):
 
 
 implementations = "\n".join([
+    function("static bool awdlSchedSecondAwayTxOpen()"),
     function("static bool awdlSchedSecondTxBlocked()"),
+    function("static bool awdlSchedSecondTxAllowed("),
     function("static inline unsigned awdlCoexUnii("),
     function("static inline bool awdlCoexNoIr("),
     function("static bool\nawdlCoexChannelUsable("),
@@ -32,6 +34,7 @@ program = r'''
 #include <cstddef>
 #include <AWDLSessionFollow.hpp>
 #include <AWDLPeerSlot.hpp>
+#include <AWDLTxPass.hpp>
 #define nitems(x) (sizeof(x) / sizeof((x)[0]))
 enum { IEEE80211_CHAN_DFS = 1, IEEE80211_CHAN_PASSIVE = 2, IEEE80211_CHAN_NOADHOC = 4,
        IWX_PHY_VHT_CHANNEL_MODE20 = 0, IWX_PHY_VHT_CHANNEL_MODE80 = 2,
@@ -95,6 +98,9 @@ static uint32_t itlAWDLPlanVersion, awdlSchedSpTargetMac;
 static unsigned awdlSchedFollowArmedChannel, sessionCalls, sessionDuration;
 static uint64_t awdlSchedFollowEndUS, awdlSchedFollowSendAtUS, awdlSchedFollowArmedRunStartUS;
 static uint64_t awdlSchedFollowLateSumUS, awdlSchedFollowLateMaxUS, awdlSchedSpRunStartUS, awdlSchedSpPlannedEndUS;
+static bool awdlSchedSecondTx;
+static ItlAWDL::TxPassList awdlSchedSecondPass;
+static constexpr uint64_t kAwdlSchedSecondTxStopUS = 4000;
 static unsigned awdlSchedFollowFired, awdlSchedOffStale, awdlSchedFollowStale, awdlSchedFollowLateN, awdlSchedFollowAligned;
 static ItlAWDL::Clock awdlSchedFollowArmedClock, awdlSchedPlanClockNow;
 using IOReturn = int;
@@ -326,6 +332,29 @@ int main() {
     reset(sc); awdlSchedSecond = false;
     awdlSchedSecondSwitching = awdlSchedSecondDraining = awdlSchedSpActive = true;
     assert(!awdlSchedSecondOwnsPhy() && !awdlSchedSecondTxBlocked());
+    {   // -itlschedsecondtx: during an open visit only the pass list's peers' unicast data may be submitted
+        static const uint8_t onThere[6] = {2, 1, 1, 1, 1, 1}, home[6] = {2, 2, 2, 2, 2, 2}, group[6] = {0x33, 0x33, 0, 0, 0, 1};
+        reset(sc);
+        assert(driver.awdlSchedSecondRetune(&sc, 44) && awdlSchedSecondTuned);
+        awdlSchedSecondPass.clear(); awdlSchedSecondPass.active = true; awdlSchedSecondPass.add(onThere);
+        awdlSchedSecondTx = false; awdlSchedSpPlannedEndUS = nowUS + 50000;
+        assert(awdlSchedSecondTxBlocked() && !awdlSchedSecondTxAllowed(onThere));   // flag off: listen only
+        awdlSchedSecondTx = true;
+        assert(awdlSchedSecondAwayTxOpen() && !awdlSchedSecondTxBlocked());
+        assert(awdlSchedSecondTxAllowed(onThere) && !awdlSchedSecondTxAllowed(home) &&
+               !awdlSchedSecondTxAllowed(group) && !awdlSchedSecondTxAllowed(nullptr));
+        nowUS = awdlSchedSpPlannedEndUS - kAwdlSchedSecondTxStopUS;   // the last few ms: closed
+        assert(!awdlSchedSecondAwayTxOpen() && awdlSchedSecondTxBlocked() && !awdlSchedSecondTxAllowed(onThere));
+        awdlSchedSpPlannedEndUS = 0;                                  // no session asked for this visit: closed
+        assert(!awdlSchedSecondAwayTxOpen());
+        awdlSchedSpPlannedEndUS = nowUS + 50000;
+        awdlSchedSecondDraining = true;                                // leaving: closed
+        assert(awdlSchedSecondTxBlocked());
+        awdlSchedSecondDraining = false;
+        assert(driver.awdlSchedSecondRetune(&sc, 149) && !awdlSchedSecondTuned);
+        assert(awdlSchedSecondTxAllowed(home) && awdlSchedSecondTxAllowed(group));   // home: as before
+        awdlSchedSecondTx = false; awdlSchedSpPlannedEndUS = 0; awdlSchedSecondPass.clear();
+    }
     puts("Second-channel real retune: queue drains, TX barrier, regulatory refusal, session guards, stale ownership and failure quarantine passed (host only)");
 }
 '''

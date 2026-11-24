@@ -25,6 +25,7 @@
 #include <IOKit/IOLib.h>
 #include <libkern/OSKextLib.h>
 #include <libkern/c++/OSMetaClass.h>
+#include <AWDLTxPass.hpp>
 #include <IOKit/IOFilterInterruptEventSource.h>
 
 #include "ItlIwm.hpp"
@@ -80,7 +81,8 @@ public:
     IOReturn receiveAWDLActionFrame(mbuf_t, size_t, uint32_t, int32_t);
     void observeAWDLDataFrame(const uint8_t*, size_t);
     IOReturn buildAWDLSyncProbe(mbuf_t*, uint64_t);
-    IOReturn buildAWDLTransmit(mbuf_t*, const uint8_t *holdPayloadFor = nullptr, bool holdEverySize = false);
+    IOReturn buildAWDLTransmit(mbuf_t*, const uint8_t *holdPayloadFor = nullptr, bool holdEverySize = false,
+                               const ItlAWDL::TxPassList *pass = nullptr);
     bool serviceAWDLTransmit();
     unsigned queuedAWDLTransmit();
     unsigned heldShortAWDLTransmit();

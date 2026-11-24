@@ -9,13 +9,14 @@ program = r'''
 #include <AWDLDataFrame.hpp>
 #include <AWDLPeerProbe.hpp>
 #include <AWDLObservation.hpp>
+#include <AWDLTxPass.hpp>
 #include <cassert>
 #include <cstdio>
 #include <cstring>
 #include <vector>
 static unsigned max(unsigned x, unsigned y) { return x > y ? x : y; }
 struct ItlAWDLInterface {
-    struct TransmitFrame { uint16_t length; uint8_t bytes[1514]; };
+    struct TransmitFrame { uint16_t length; uint16_t next; uint32_t order; uint8_t bytes[1514]; };
     unsigned transmitFrameCount = 8, parkedFrameCount = 4;
     TransmitFrame transmitStore[8], parkedStore[4];
     TransmitFrame *transmitFrames = transmitStore, *parkedFrames = parkedStore;
@@ -23,10 +24,16 @@ struct ItlAWDLInterface {
     unsigned transmitPopped = 0, transmitHeldMark = 0;
     unsigned parkedHead = 0, parkedQueued = 0, parkedPeak = 0, transmitParked = 0, transmitPassed = 0;
     uint8_t parkedPeer[6] = {};
+    static constexpr unsigned parkedPeerMax = 3;   // small, so the table-full case is reachable
+    struct ParkedPeer { uint8_t addr[6]; uint16_t first, last; uint32_t count; };
+    ParkedPeer parkedPeerTable[parkedPeerMax] = {};
+    unsigned parkedPeerCount = 0, parkedUsed = 0, parkedTableFull = 0;
+    uint32_t parkedSerial = 0;
     uint32_t transmitDepthBins[9] = {};
     uint16_t transmitSequence = 0;
     uint8_t localFrameAddress[6] = {2, 0, 0, 0, 0, 1};
-    bool popTransmit(uint8_t *, size_t, size_t *, const uint8_t *holdPayloadFor, bool holdEverySize = false);
+    bool popTransmit(uint8_t *, size_t, size_t *, const uint8_t *holdPayloadFor, bool holdEverySize = false,
+                     const ItlAWDL::TxPassList *pass = nullptr);
     // An IPv6 frame from us to `to`, `size` bytes of payload, its id in the payload.
     void push(const uint8_t *to, uint8_t id, size_t size) {
         assert(transmitQueued < transmitFrameCount);
@@ -47,9 +54,10 @@ program += r'''
 static const uint8_t P[6] = {6, 1, 1, 1, 1, 1}, Q[6] = {6, 2, 2, 2, 2, 2}, G[6] = {0x33, 0x33, 0, 0, 0, 1};
 static uint8_t out[2048];
 // The id of the frame popped, or -1 for none, and its 802.11 sequence number.
-static int pop(ItlAWDLInterface &t, const uint8_t *hold, bool every = false, unsigned *sequence = nullptr) {
+static int pop(ItlAWDLInterface &t, const uint8_t *hold, bool every = false, unsigned *sequence = nullptr,
+               const ItlAWDL::TxPassList *pass = nullptr) {
     size_t written = 0;
-    if (!t.popTransmit(out, sizeof(out), &written, hold, every)) return -1;
+    if (!t.popTransmit(out, sizeof(out), &written, hold, every, pass)) return -1;
     if (sequence) *sequence = ItlAWDL::read16(out + 22) >> 4;
     for (size_t i = 0; i + 5 <= written; ++i)
         if (!memcmp(out + i, "PARK", 4)) return out[i + 4];
@@ -121,6 +129,60 @@ int main() {
             assert(pop(t, P) == int(10 * round + 3));
             assert(pop(t, nullptr) == int(10 * round + 1) && pop(t, nullptr) == int(10 * round + 2));
         }
+    }
+    static const uint8_t R[6] = {6, 3, 3, 3, 3, 3}, S[6] = {6, 4, 4, 4, 4, 4};
+    {   // -itlschedsecond pass list: only Q goes while on its channel; P's and R's frames of every size park, each
+        // peer's in order, and the group frame too. Back home (no list), the oldest parked frame goes first.
+        ItlAWDLInterface t;
+        ItlAWDL::TxPassList onlyQ; onlyQ.active = true; onlyQ.add(Q);
+        t.push(P, 1, 100); t.push(R, 2, 1300); t.push(Q, 3, 100); t.push(P, 4, 1300); t.push(G, 5, 100);
+        t.push(R, 6, 50);
+        assert(pop(t, nullptr, false, nullptr, &onlyQ) == 3);
+        assert(pop(t, nullptr, false, nullptr, &onlyQ) == -1 && t.parkedQueued == 4 && t.parkedPeerCount == 3 &&
+               t.transmitQueued == 1);   // the ring (4) is full: R's second frame waits at the head
+        assert(!memcmp(t.parkedPeer, P, 6));
+        // home again: everything in the order it was queued, the group frame included
+        assert(pop(t, nullptr) == 1 && pop(t, nullptr) == 2 && pop(t, nullptr) == 4 && pop(t, nullptr) == 5);
+        assert(pop(t, nullptr) == 6);
+        assert(pop(t, nullptr) == -1 && !t.parkedQueued && !t.parkedUsed && !t.parkedPeerCount);
+    }
+    {   // Released one at a time: R released first goes first, from the middle of the ring; P's still wait.
+        // The empty slots are reused once the head passes them.
+        ItlAWDLInterface t;
+        ItlAWDL::TxPassList none; none.active = true;   // no peer on this channel
+        t.push(P, 1, 1300); t.push(R, 2, 1300); t.push(P, 3, 1300); t.push(R, 4, 1300);
+        assert(pop(t, nullptr, false, nullptr, &none) == -1 && t.parkedQueued == 4 && t.parkedUsed == 4);
+        // slots 1 and 3 are now empty but behind P's live slot 0: still in use
+        assert(pop(t, P) == 2 && pop(t, P) == 4 && t.parkedQueued == 2 && t.parkedUsed == 4);
+        assert(!memcmp(t.parkedPeer, P, 6));
+        // so a new P frame can't park yet: it waits at the head
+        t.push(P, 5, 1300);
+        assert(pop(t, P) == -1 && t.parkedQueued == 2 && t.transmitQueued == 1);
+        // P released: its frames in order; taking slot 0 lets the head pass the empty slot 1
+        assert(pop(t, nullptr) == 1 && t.parkedUsed == 2);
+        assert(pop(t, nullptr) == 3 && !t.parkedUsed);
+        assert(pop(t, nullptr) == 5 && pop(t, nullptr) == -1);
+        // the ring is reusable after wrapping
+        t.push(R, 6, 1300); t.push(R, 7, 1300); t.push(Q, 8, 100);
+        assert(pop(t, R) == 8 && t.parkedUsed == 2 && pop(t, nullptr) == 6 && pop(t, nullptr) == 7);
+        assert(!t.parkedQueued && !t.parkedUsed && !t.transmitDropped);
+    }
+    {   // A frame for a peer with parked frames joins them even when that peer isn't held any more.
+        ItlAWDLInterface t;
+        ItlAWDL::TxPassList onlyQ; onlyQ.active = true; onlyQ.add(Q);
+        t.push(P, 1, 1300);
+        assert(pop(t, nullptr, false, nullptr, &onlyQ) == -1 && t.parkedQueued == 1);
+        t.push(P, 2, 100);
+        assert(pop(t, nullptr) == 1 && pop(t, nullptr) == 2);   // in order
+    }
+    {   // More held peers than table entries: the head waits (nothing lost), as with a full ring.
+        ItlAWDLInterface t;
+        ItlAWDL::TxPassList none; none.active = true;
+        t.push(P, 1, 1300); t.push(Q, 2, 1300); t.push(R, 3, 1300); t.push(S, 4, 1300);
+        assert(pop(t, nullptr, false, nullptr, &none) == -1 && t.parkedPeerCount == 3 && t.transmitQueued == 1);
+        assert(t.parkedTableFull >= 1);
+        for (uint8_t i = 1; i <= 4; ++i) assert(pop(t, nullptr) == i);
+        assert(pop(t, nullptr) == -1 && !t.transmitDropped);
     }
     puts("held peer's frames parked in order, others pass: passed (host mocks only)");
 }

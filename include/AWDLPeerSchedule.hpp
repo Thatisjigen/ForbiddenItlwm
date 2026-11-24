@@ -171,6 +171,14 @@ struct PeerSchedule {
     bool presentInEntry(uint32_t eaw) const {
         return channels[(eaw + entryOffset()) % kPeerSeqEntries] == ourChannel;
     }
+    // -itlschedsecond: the channel the peer's sequence names at `t`, or 0 when its timing isn't known (no fresh,
+    // known schedule). For sending on a second channel only to the peers that are there now.
+    uint8_t channelAt(uint64_t t) const {
+        if (!known() || !fresh(t) || !eawUS)
+            return 0;
+        uint64_t into = 0;
+        return channels[(eawAt(t, &into) + entryOffset()) % kPeerSeqEntries];
+    }
     // Every frame heard from the peer. Feeds calibration, then checks it.
     void notePeerFrame(uint64_t t) {
         if (!fresh(t) || !eawUS) return;

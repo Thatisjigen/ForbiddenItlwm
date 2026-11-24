@@ -1071,16 +1071,60 @@ UInt32 ItlAWDLInterface::acceptTransmit(IOSkywalkPacket *const *packets, UInt32 
 }
 
 bool ItlAWDLInterface::popTransmit(uint8_t *output, size_t available, size_t *written,
-                                   const uint8_t *holdPayloadFor, bool holdEverySize)
+                                   const uint8_t *holdPayloadFor, bool holdEverySize, const ItlAWDL::TxPassList *pass)
 {
     ++transmitDepthBins[ItlAWDL::depthBin(transmitQueued + parkedQueued)];
-    // The parked frames first, in their order, once their peer is no longer held.
-    while (parkedQueued && !(holdPayloadFor && ItlAWDL::sameAddress(parkedPeer, holdPayloadFor))) {
-        const auto &frame = parkedFrames[parkedHead];
+    // Whether a peer's unicast data waits now: the one peer the radio holds (holdPayloadFor), or, while the listener
+    // is on a second channel (-itlschedsecond), every peer that isn't on that channel (pass).
+    auto peerHeld = [&](const uint8_t *addr) {
+        return (holdPayloadFor && ItlAWDL::sameAddress(addr, holdPayloadFor)) || (pass && pass->holds(addr));
+    };
+    auto findParked = [&](const uint8_t *addr) -> int {
+        for (unsigned i = 0; i < parkedPeerCount; ++i)
+            if (ItlAWDL::sameAddress(parkedPeerTable[i].addr, addr))
+                return int(i);
+        return -1;
+    };
+    // parkedPeer names the peer whose parked frame is oldest, as it named the one parked peer before.
+    auto notePeer = [&]() {
+        uint32_t oldest = 0;
+        for (unsigned i = 0; i < parkedPeerCount; ++i) {
+            const uint32_t order = parkedFrames[parkedPeerTable[i].first].order;
+            if (!i || int32_t(order - oldest) < 0) {
+                oldest = order;
+                memcpy(parkedPeer, parkedPeerTable[i].addr, sizeof(parkedPeer));
+            }
+        }
+    };
+    // The parked frames first: of the peers no longer held, the one whose frame was parked first, its oldest frame.
+    while (parkedQueued) {
+        int pick = -1;
+        uint32_t oldest = 0;
+        for (unsigned i = 0; i < parkedPeerCount; ++i) {
+            const uint32_t order = parkedFrames[parkedPeerTable[i].first].order;
+            if (!peerHeld(parkedPeerTable[i].addr) && (pick < 0 || int32_t(order - oldest) < 0)) {
+                pick = int(i);
+                oldest = order;
+            }
+        }
+        if (pick < 0)
+            break;
+        auto &peer = parkedPeerTable[pick];
+        const unsigned index = peer.first;
+        auto &frame = parkedFrames[index];
         const auto result = ItlAWDL::buildDataFrameFromEthernet(frame.bytes, frame.length, localFrameAddress,
                                                                 transmitSequence, output, available, written);
-        parkedHead = (parkedHead + 1) % parkedFrameCount;
+        peer.first = frame.next;
+        if (!--peer.count) {
+            parkedPeerTable[pick] = parkedPeerTable[--parkedPeerCount];
+        }
+        frame.length = 0;   // an empty slot until the ring's head passes it
         --parkedQueued;
+        while (parkedUsed && !parkedFrames[parkedHead].length) {
+            parkedHead = (parkedHead + 1) % parkedFrameCount;
+            --parkedUsed;
+        }
+        notePeer();
         ++transmitPopped;
         if (result == ItlAWDL::BuildResult::Ready) {
             ++transmitSequence;
@@ -1097,21 +1141,40 @@ bool ItlAWDLInterface::popTransmit(uint8_t *output, size_t available, size_t *wr
         // listener's unpaused queue, and QUIC counts overtaken packets as lost. Without it, only payload-sized
         // frames, as on iface157 to iface159. Held frames are parked, in order, so the frames behind them for
         // other peers still go; once some of its frames are parked, all of that peer's later ones join them.
-        const bool unicastData = result == ItlAWDL::BuildResult::Ready && output[0] == 0x08 && !(output[4] & 1);
-        const bool held = unicastData && holdPayloadFor && (holdEverySize || *written >= 1200) &&
-            ItlAWDL::sameAddress(output + 4, holdPayloadFor);
-        const bool behindParked = unicastData && parkedQueued && ItlAWDL::sameAddress(output + 4, parkedPeer);
+        // A peer held by the pass list (another channel) waits with every size: it isn't there to hear any. Group
+        // frames wait under their group address while the list is active, as the peers on the home channel would
+        // miss them; they're only ever parked then, so without a list they go as before.
+        const bool dataFrame = result == ItlAWDL::BuildResult::Ready && output[0] == 0x08;
+        const bool unicastData = dataFrame && !(output[4] & 1);
+        const bool held = (unicastData && holdPayloadFor && (holdEverySize || *written >= 1200) &&
+                           ItlAWDL::sameAddress(output + 4, holdPayloadFor)) ||
+            (dataFrame && pass && pass->holds(output + 4));
+        const int parkedAt = dataFrame && parkedQueued ? findParked(output + 4) : -1;
+        const bool behindParked = parkedAt >= 0;
         if (held || behindParked) {
             const bool shortFrame = *written < 1200;
-            if (parkedFrames && parkedQueued < parkedFrameCount &&
-                (!parkedQueued || ItlAWDL::sameAddress(output + 4, parkedPeer))) {
-                if (!parkedQueued)
-                    memcpy(parkedPeer, output + 4, sizeof(parkedPeer));
-                auto &slot = parkedFrames[(parkedHead + parkedQueued) % parkedFrameCount];
+            if (parkedFrames && parkedUsed < parkedFrameCount && (behindParked || parkedPeerCount < parkedPeerMax)) {
+                const unsigned index = (parkedHead + parkedUsed) % parkedFrameCount;
+                auto &slot = parkedFrames[index];
                 slot.length = frame.length;
+                slot.next = 0xffff;
+                slot.order = ++parkedSerial;
                 memcpy(slot.bytes, frame.bytes, frame.length);
+                if (behindParked) {
+                    auto &peer = parkedPeerTable[parkedAt];
+                    parkedFrames[peer.last].next = uint16_t(index);
+                    peer.last = uint16_t(index);
+                    ++peer.count;
+                } else {
+                    auto &peer = parkedPeerTable[parkedPeerCount++];
+                    memcpy(peer.addr, output + 4, sizeof(peer.addr));
+                    peer.first = peer.last = uint16_t(index);
+                    peer.count = 1;
+                }
+                ++parkedUsed;
                 ++parkedQueued;
                 parkedPeak = max(parkedPeak, parkedQueued);
+                notePeer();
                 ++transmitParked;
                 if (shortFrame)
                     ++transmitHeldShort;
@@ -1119,6 +1182,8 @@ bool ItlAWDLInterface::popTransmit(uint8_t *output, size_t available, size_t *wr
                 --transmitQueued;
                 continue;
             }
+            if (parkedFrames && parkedUsed < parkedFrameCount)
+                ++parkedTableFull;   // room in the ring, but every peer entry is taken
             // No room to park it: it waits at the head, and what is behind it waits too, as before.
             // Once per frame, not once per attempt: the pump asks again every millisecond.
             if (shortFrame && transmitHeldMark != transmitPopped + 1) {
@@ -1243,6 +1308,7 @@ void ItlAWDLInterface::releaseNetworkResources()
     // The held peer's copies go with the queue they came from.
     parkedQueued = 0;
     parkedHead = 0;
+    parkedUsed = parkedPeerCount = 0;
     if (registrationAttempted) {
         registrationAttempted = false;
         deregisterEthernetInterface(0);
@@ -1358,6 +1424,7 @@ void ItlAWDLInterface::free()
         IOFree(parkedFrames, sizeof(TransmitFrame) * parkedFrameCount);
         parkedFrames = nullptr;
         parkedQueued = 0;
+        parkedUsed = parkedPeerCount = 0;
     }
     if (configurationLock) {
         IOLockFree(configurationLock);
@@ -1575,7 +1642,7 @@ IOReturn ItlAWDLInterface::initializeNetwork(IO80211Controller *controller,
             IOFree(parkedFrames, sizeof(TransmitFrame) * parkedFrameCount);
             parkedFrames = nullptr;
         }
-        parkedQueued = parkedHead = 0;
+        parkedQueued = parkedHead = parkedUsed = parkedPeerCount = 0;
         parkedFrameCount = min(transmitFrameCount, parkedFrameMax);
         parkedFrames = static_cast<TransmitFrame *>(IOMalloc(sizeof(TransmitFrame) * parkedFrameCount));
         setProperty("ItlwmAWDLTxParkFrames", parkedFrames ? parkedFrameCount : 0, 32);
@@ -1873,6 +1940,14 @@ IOReturn itlAWDLBuildTransmit(IOEthernetController *owner, mbuf_t *packet, const
     return controller ? controller->buildAWDLTransmit(packet, holdPayloadFor, holdEverySize) : kIOReturnNotReady;
 }
 
+// -itlschedsecond: as above, and while the listener is on a second channel only `pass`'s peers' unicast data goes.
+IOReturn itlAWDLBuildTransmit(IOEthernetController *owner, mbuf_t *packet, const uint8_t *holdPayloadFor,
+                              bool holdEverySize, const ItlAWDL::TxPassList *pass)
+{
+    auto *controller = OSDynamicCast(AirportItlwm, owner);
+    return controller ? controller->buildAWDLTransmit(packet, holdPayloadFor, holdEverySize, pass) : kIOReturnNotReady;
+}
+
 unsigned itlAWDLTransmitHeldShort(IOEthernetController *owner)
 {
     auto *controller = OSDynamicCast(AirportItlwm, owner);
@@ -1891,7 +1966,8 @@ bool itlAWDLServiceTransmit(IOEthernetController *owner)
     return controller && controller->serviceAWDLTransmit();
 }
 
-IOReturn AirportItlwm::buildAWDLTransmit(mbuf_t *packet, const uint8_t *holdPayloadFor, bool holdEverySize)
+IOReturn AirportItlwm::buildAWDLTransmit(mbuf_t *packet, const uint8_t *holdPayloadFor, bool holdEverySize,
+                                         const ItlAWDL::TxPassList *pass)
 {
     if (!packet || *packet || !_fWorkloop || !_fWorkloop->inGate() || !awdlManagementInputEnabled || !fAWDLInterface)
         return kIOReturnNotReady;
@@ -1902,7 +1978,7 @@ IOReturn AirportItlwm::buildAWDLTransmit(mbuf_t *packet, const uint8_t *holdPayl
     auto *interface = static_cast<ItlAWDLInterface *>(fAWDLInterface);
     interface->retain();
     const bool ready = interface->popTransmit(static_cast<uint8_t *>(mbuf_data(result)), mbuf_maxlen(result), &length, holdPayloadFor,
-                                                 holdEverySize);
+                                                 holdEverySize, pass);
     interface->release();
     if (!ready) {
         mbuf_freem(result);
