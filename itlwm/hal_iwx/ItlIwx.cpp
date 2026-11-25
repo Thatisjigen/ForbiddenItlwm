@@ -17608,8 +17608,11 @@ iwx_rs_init(struct iwx_softc *sc, struct iwx_node *in, bool update)
         // 80 MHz-or-narrower peer with a UMAC assert (#83).
         memset(cfg_cmd.ht_rates, 0, sizeof(cfg_cmd.ht_rates));
         cfg_cmd.mode = IWX_TLC_MNG_MODE_HT;
+        // Two-stream rates only on a card with two streams (MCS 8-15 supported), as for the router's station and as
+        // Linux does. A one-antenna card (AX101, #97) asserted in the firmware's TX path once these were offered.
+        const bool twoStreams = sc->sc_ic.ic_sup_mcs[1] != 0;
         cfg_cmd.ht_rates[IWX_TLC_NSS_1][IWX_TLC_MCS_PER_BW_80] = htole16(0xf0);
-        cfg_cmd.ht_rates[IWX_TLC_NSS_2][IWX_TLC_MCS_PER_BW_80] = htole16(0xf0);
+        cfg_cmd.ht_rates[IWX_TLC_NSS_2][IWX_TLC_MCS_PER_BW_80] = twoStreams ? htole16(0xf0) : 0;
         cfg_cmd.sta_id = awdlBaTlcStation;
         // -itlawdlamsdutx: the VHT baseline maximum MPDU length lets the firmware enable A-MSDU per TID for this
         // peer (it reports the limits in TLC updates); 0, as before, leaves A-MSDU off.
@@ -17623,7 +17626,7 @@ iwx_rs_init(struct iwx_softc *sc, struct iwx_node *in, bool update)
             cfg_cmd.mode = IWX_TLC_MNG_MODE_VHT;
             const uint16_t vhtMask = uint16_t(0x3ffU & ~((1U << awdlBaTxMinMcs) - 1U));
             cfg_cmd.ht_rates[IWX_TLC_NSS_1][IWX_TLC_MCS_PER_BW_80] = htole16(vhtMask);
-            cfg_cmd.ht_rates[IWX_TLC_NSS_2][IWX_TLC_MCS_PER_BW_80] = htole16(vhtMask);
+            cfg_cmd.ht_rates[IWX_TLC_NSS_2][IWX_TLC_MCS_PER_BW_80] = twoStreams ? htole16(vhtMask) : 0;
             cfg_cmd.max_ch_width = IWX_TLC_MNG_CH_WIDTH_80MHZ;
         }
         cfg_cmd.chains = iwx_rs_fw_set_active_chains(iwx_fw_valid_tx_ant(sc));
