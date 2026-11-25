@@ -120,6 +120,7 @@ What's planned: [ROADMAP](docs/ROADMAP.md).
 | [CHECK-MY-MAC](docs/CHECK-MY-MAC.md) | Sending in data so an unsupported macOS build can be added |
 | [tools/compat](tools/compat/README.md) | Compatibility checker, transfer measurement, hardware reports |
 | [CHANGELOG](CHANGELOG.md) | Releases |
+| [CONTRIBUTING](CONTRIBUTING.md) | How to make a pull request that can be reviewed and merged |
 
 ## Credits
 

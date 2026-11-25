@@ -2,6 +2,32 @@
 
 **Release names.** `x.y.z-stage.n`: `alpha` releases bring new or untested changes for testers; `beta` releases are tested on the project's hackintosh; `n` counts the builds of one version. `z` counts fixes after a stable release, so it stays 0 until a version is declared stable, and 1.0.0 will be the first stable release. Releases up to 0.5.3 were named `-test1` (now alpha) and `-beta1`.
 
+## 0.7.0-alpha.4
+
+The last alpha of 0.7.0; the next 0.7.0 release is beta.1, with fixes and new defaults only. Faster Mac → iPhone transfers by default, hidden networks and enterprise Wi-Fi fixes, and the last new features of 0.7.0 behind experimental flags. **BTLEAdvFixup 0.9.8.**
+
+**AirDrop**
+- **Faster Mac → iPhone by default.** After each Block Ack from the iPhone, the next frames now go to the firmware straight away instead of at the driver's next pass (`-itlawdlcoexbarefill`, now part of the tested set). The time macOS had frames waiting while the firmware's queue was empty fell from 11.2% to 0.1% of sending time. With 105 MB files on the project's hackintosh (AX211, Tahoe 26.7.1, Wi-Fi on 36, iPhone on 149), Mac → iPhone went from about 18 MB/s to 27 MB/s on average, up to 33 MB/s. `-itlawdlnocoexbarefill` turns it off.
+- **One-antenna cards** ([#97](https://github.com/retropineaple/ForbiddenItlwm/issues/97)): the rate setup for Block Ack sending to an Apple device offered two-stream rates even on a one-antenna card such as the AX101, and its firmware restarted as soon as Mac → iPhone Block Ack started (Wi-Fi dropped, sends failed). Two-stream rates are now offered only on cards that have two streams, as for the Mac's own Wi-Fi connection. Found from Lawrence629's step-by-step tests; not yet tested on an AX101. Two-antenna cards are unchanged.
+
+**Wi-Fi**
+- **Hidden networks, and three requests macOS made on every join** ([PR #107](https://github.com/retropineaple/ForbiddenItlwm/pull/107), thanks to miziho, ported from laobamac's itlwm). A hidden network is found by the name you type, and the driver remembers that name for the network's nameless beacons, so macOS can join and list it. The network's details are kept from the scan while the join is in progress, so an 802.1X join no longer ends with "Update Bss fail". On WPA2 and WPA3-Personal networks, macOS is told the link is up only after the password handshake has finished. `PM_MODE`, `WCL_FW_HOT_CHANNELS` and `POWERSAVE` are answered instead of failing, and the driver no longer waits on its command gate while Wi-Fi is going down. The review added: an access point the join asked for is never replaced by another of the same network, a hidden network only counts for the network being joined, and power save is reported off until macOS sets a level. Tested by miziho with a hidden 802.1X (EAP-PEAP) network on Sequoia 15.8.3, and here on Tahoe with an open network behind a captive portal, WPA2, WPA2/WPA3, WPA3 and a hidden WPA3 hotspot, each joining first time. It may also fix [#108](https://github.com/retropineaple/ForbiddenItlwm/issues/108).
+
+**AirDrop with the experimental flags**
+- **New `-itlawdlamsdutx`: the Mac packs two packets into one frame (A-MSDU)** when it sends to an Apple device that agreed to it. Tested here with one iPhone: hundreds of thousands of packed frames and no firmware crash. There's no clear speed change, since frames already go out in groups (A-MPDU). `ITLAWDLAmsduTx` shows what happened. An early build crashed the firmware because the packed frames were marked as padded; that's fixed.
+- **`itlawdlsched=1` now covers a second 5 GHz AirDrop channel, like a real Mac** ([#45](https://github.com/retropineaple/ForbiddenItlwm/issues/45)). When macOS's plan names a second channel beside the main one (for example 44, for a nearby device that can't use 149), the listener switches there in those slots and back, sends to the devices that are there, announces the visits and answers Block Ack requests there. With only devices on 149 nearby, nothing changes. `ITLAWDLSchedSecond` shows the switches, and `-itlschednosecond` turns it off. Tested here only with a simulated second channel (`itlsimsecond`, test only), with no errors over hundreds of switches; a test with a real device on 44 is still needed.
+
+**Bluetooth: BTLEAdvFixup 0.9.8**
+- **`bluetoothd` no longer killed with "Code Signature Invalid"** ([#62](https://github.com/retropineaple/ForbiddenItlwm/issues/62), thanks to xiaoxin1262 for the crash reports). macOS can check a `bluetoothd` page again while it still holds the patches; the bytes then don't match the signature and `bluetoothd` is killed, again and again. In the reports, 15 of 20 kills were on the page with one of BTLEAdvFixup's own patches, and the rest matched BlueToolFixup's pages. Such a page now gets its original bytes for the check and its patches back afterwards. `BTLEAdvVerifyRevalidations` counts these. It only happens after long uptimes, so it hasn't been reproduced here; please report the counter after a few days.
+
+**Diagnostics (read-only)**
+- `ITLAWDLAirtime` (with `-itlawdlairtime`): where the time goes while the Mac sends to an Apple device (not on AirDrop's channel, device away, nothing to send, held back, frames waiting with the firmware's queue empty, queued), for speed reports.
+
+**Docs**
+- New [CONTRIBUTING](CONTRIBUTING.md): how to make a pull request that can be reviewed and merged.
+- [INSTALL](docs/INSTALL.md): without `-btleadv`, keep IntelBTPatcher enabled, or new Bluetooth LE mice may never finish pairing ([#110](https://github.com/retropineaple/ForbiddenItlwm/issues/110)).
+- [BOOT-FLAGS](docs/BOOT-FLAGS.md): the new flags.
+
 ## 0.7.0-alpha.3
 
 Fixes for 0.7.0-alpha.2's experimental flags, two fixes found by testers, opt-in WPA3, and new diagnostics. Without the experimental flags the driver behaves as in 0.7.0-alpha.2. **BTLEAdvFixup 0.9.7.**

@@ -28,6 +28,12 @@ This beta has been tested on one hackintosh: an HP Envy x360 13-bf with an Intel
 
 **Disable `IntelBTPatcher.kext`.** It and BTLEAdvFixup hook the same function, and Lilu panics if two plugins do. BTLEAdvFixup takes over IntelBTPatcher's job. For the same reason, don't use IntelBTUnified, which includes IntelBTPatcher's hook ([#32](https://github.com/retropineaple/ForbiddenItlwm/issues/32), [#51](https://github.com/retropineaple/ForbiddenItlwm/issues/51)); use IntelBluetoothFirmware and BlueToolFixup.
 
+**Add `-btleadv` to `boot-args`.** BTLEAdvFixup does nothing without it, and then:
+- **AirDrop doesn't work:** the Mac can't advertise over Bluetooth LE, which is how iPhones and other Macs find it first.
+- **New Bluetooth LE mice and keyboards may never finish pairing** ([#110](https://github.com/retropineaple/ForbiddenItlwm/issues/110)), since IntelBTPatcher's fix for them is off too.
+
+If you only want the Wi-Fi driver and don't use `-btleadv`, leave BTLEAdvFixup out and keep IntelBTPatcher enabled (or use IntelBTUnified instead of IntelBluetoothFirmware and IntelBTPatcher), as with AirportItlwm.
+
 ## Building
 
 You need the Xcode Command Line Tools (`xcode-select --install`). Full Xcode isn't needed. The build was tested with Python 3 on the Intel hackintosh it was developed on.
@@ -116,7 +122,7 @@ All of this goes on the **USB stick's** EFI.
    ioreg -l -w0 | grep -E '"ItlwmAWDL(InterfaceBuild|BuildCheck)"|"ITLAWDLCoex(Added|Channel|CountryLearned)"'
    ```
 
-   You should see `forbidden-0.7.0-alpha.3` (`forbidden-0.7.0-alpha.3-sequoia` on Sequoia, `forbidden-0.7.0-alpha.3-sonoma` on Sonoma), `BuildCheck` `verified`, `Added` Yes, `Channel` 149 (or 44 where your iPhone uses 44, for example in Japan) and `CountryLearned` Yes. `Channel` 6 means the firmware hasn't opened 149 or 44: see [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
+   You should see `forbidden-0.7.0-alpha.4` (`forbidden-0.7.0-alpha.4-sequoia` on Sequoia, `forbidden-0.7.0-alpha.4-sonoma` on Sonoma), `BuildCheck` `verified`, `Added` Yes, `Channel` 149 (or 44 where your iPhone uses 44, for example in Japan) and `CountryLearned` Yes. `Channel` 6 means the firmware hasn't opened 149 or 44: see [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
 4. Or run `bash tools/compat/check_compat.sh` again. It now also reads the listener's state.
 5. Turn on AirDrop on both devices. Contacts Only works when the iPhone and the Mac share an Apple Account or know each other as contacts. Otherwise use Everyone for 10 Minutes.

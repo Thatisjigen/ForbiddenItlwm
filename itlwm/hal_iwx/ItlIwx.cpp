@@ -25648,7 +25648,11 @@ iwx_attach(struct iwx_softc *sc, struct pci_attach_args *pa)
             awdlSchedMacChan = itlResFlag("-itlschedmacchan", kItlResWork);
             awdlUmi = PE_parse_boot_argn("-itlawdlumi", &dummy, sizeof(dummy));   // experiment, flag only
             awdlSchedHandover = itlResFlag("-itlschedhandover", kItlResWork);
-            awdlSchedSecond = awdlSchedHandle && PE_parse_boot_argn("-itlschedsecond", &dummy, sizeof(dummy));
+            // The second 5 GHz channel (#45) is part of itlawdlsched=1 from 0.7.0-alpha.4: listening, sending and
+            // announcing the visits together. -itlschednosecond turns all three off; each old flag still turns its
+            // part on by itself.
+            const bool secondOff = PE_parse_boot_argn("-itlschednosecond", &dummy, sizeof(dummy));
+            awdlSchedSecond = awdlSchedHandle && !secondOff && itlResFlag("-itlschedsecond", kItlResWork);
             {
                 int simSecond = 0;
                 uint32_t simMask = 0;
@@ -25662,9 +25666,8 @@ iwx_attach(struct iwx_softc *sc, struct pci_attach_args *pa)
                 uint32_t variant = 0;
                 if (awdlSchedSecond && PE_parse_boot_argn("itlsecondvar", &variant, sizeof(variant)))
                     awdlSchedSecondVariant = variant & 3;
-                awdlSchedSecondTx = awdlSchedSecond && PE_parse_boot_argn("-itlschedsecondtx", &dummy, sizeof(dummy));
-                awdlSchedSecondSync = awdlSchedSecondTx &&
-                    PE_parse_boot_argn("-itlschedsecondsync", &dummy, sizeof(dummy));
+                awdlSchedSecondTx = awdlSchedSecond && itlResFlag("-itlschedsecondtx", kItlResWork);
+                awdlSchedSecondSync = awdlSchedSecondTx && itlResFlag("-itlschedsecondsync", kItlResWork);
             }
             awdlSchedSkew = itlResFlag("-itlschedskew", kItlResDiag);
             awdlSchedSyncTx = itlResFlag("-itlschedsynctx", kItlResWork);
