@@ -113,8 +113,23 @@ jobs:
           Do not keep IntelBTPatcher.kext: it hooks the same function as
           BTLEAdvFixup and Lilu panics when two plugins do.
 
-          Boot with -btleadv added to the boot-args of config.plist, or
-          BTLEAdvFixup does nothing.
+          Boot arguments, in the boot-args of config.plist:
+
+            -btleadv         BTLEAdvFixup needs it, otherwise it does nothing.
+
+            itlawdlsched=1   Let macOS share the radio between WiFi and
+                              AirDrop. Without it the firmware splits the
+                              time by its own rule. macOS splits it into 16
+                              slots of about 65 ms and gives the AirDrop
+                              listener a few of them, so WiFi gets less of
+                              the radio. On a 100 Mbps link that shows as
+                              about 60 Mbps and a higher ping. That is the
+                              cost of having AirDrop, not a defect.
+
+            -itlawdloff      Turn AirDrop off completely. WiFi then behaves
+                              like the stock AirportItlwm and the full speed
+                              comes back. Use it when the link speed matters
+                              more than AirDrop.
 
           A kext built for one macOS version refuses to start on another
           one, so use the archive that matches the system.
@@ -162,7 +177,12 @@ jobs:
           printf '%s\n\n' 'ForbiddenItlwm replaces AirportItlwm.kext. Lilu has to load before' >> ReleaseNotes.md
           printf '%s\n\n' 'BTLEAdvFixup, which is a Lilu plugin. Do not keep IntelBTPatcher.kext:' >> ReleaseNotes.md
           printf '%s\n\n' 'it hooks the same function and Lilu panics when two plugins do. Boot with' >> ReleaseNotes.md
-          printf '%s\n\n' '-btleadv in the boot-args, or BTLEAdvFixup does nothing.' >> ReleaseNotes.md
+          printf '%s\n\n' 'Boot arguments: -btleadv (BTLEAdvFixup needs it),' >> ReleaseNotes.md
+          printf '%s\n\n' 'itlawdlsched=1 (let macOS share the radio between WiFi and AirDrop;' >> ReleaseNotes.md
+          printf '%s\n\n' 'without it the firmware splits the time by its own rule and WiFi gets less of' >> ReleaseNotes.md
+          printf '%s\n\n' 'the radio, which shows as about 60 Mbps on a 100 Mbps link, the cost of having' >> ReleaseNotes.md
+          printf '%s\n\n' 'AirDrop rather than a defect), and -itlawdloff (turn AirDrop off completely,' >> ReleaseNotes.md
+          printf '%s\n\n' 'the full speed comes back).' >> ReleaseNotes.md
           printf '\n%s\n' 'Changes:' >> ReleaseNotes.md
           git log -5 --format='- %h %s' >> ReleaseNotes.md
           cp artifacts/SHA256SUMS.txt . 2>/dev/null || true
