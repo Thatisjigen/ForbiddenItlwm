@@ -137,4 +137,6 @@ a=s.index('iwx_rx_mpdu_mq(struct');b=s.index("\nvoid ItlIwx::",a);assert hashlib
 # AirDrop channel is noted for ITLAWDLPeerChannels (#45, diagnostics only; added lines only). Then a DELBA also finds
 # a slot whose station is being added (ownedSlotFor), and only unicast QoS data to us with TID 0-7 keeps a receive
 # session alive.
-a=s.index('iwx_rx_frame(struct');b=s.index("\nvoid ItlIwx::",a);assert hashlib.sha256(s[a:b].encode()).hexdigest()=='e9ceea89752db67babd878de8c561d7a98b4af45c5c90ef05010b5f2b86bf670'
+# -itlawdlamsdutx (A-MSDU send, step A2): our send agreement keeps the answer's A-MSDU bit per slot and clears it on
+# a DELBA of that session (added lines only; the answer's matching and every receive check are unchanged).
+a=s.index('iwx_rx_frame(struct');b=s.index("\nvoid ItlIwx::",a);assert hashlib.sha256(s[a:b].encode()).hexdigest()=='d7b569e5b86fa3f01779e39d182cc408c81993d489719bd4aa5c6b8c16d86728'

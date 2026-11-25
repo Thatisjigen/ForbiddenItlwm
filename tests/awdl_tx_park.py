@@ -27,6 +27,7 @@ struct ItlAWDLInterface {
     uint16_t transmitSequence = 0;
     uint8_t localFrameAddress[6] = {2, 0, 0, 0, 0, 1};
     bool popTransmit(uint8_t *, size_t, size_t *, const uint8_t *holdPayloadFor, bool holdEverySize = false);
+    bool popTransmitFor(uint8_t *, size_t, size_t *, const uint8_t *destination, size_t maxLength);
     // An IPv6 frame from us to `to`, `size` bytes of payload, its id in the payload.
     void push(const uint8_t *to, uint8_t id, size_t size) {
         assert(transmitQueued < transmitFrameCount);
@@ -122,7 +123,35 @@ int main() {
             assert(pop(t, nullptr) == int(10 * round + 1) && pop(t, nullptr) == int(10 * round + 2));
         }
     }
-    puts("held peer's frames parked in order, others pass: passed (host mocks only)");
+    {   // -itlawdlamsdutx: popTransmitFor takes the head only for that peer, within the length, with nothing parked;
+        // otherwise nothing changes and popTransmit returns the same frame next.
+        ItlAWDLInterface t;
+        t.push(P, 1, 1300); t.push(Q, 2, 100); t.push(P, 3, 100);
+        size_t w = 0;
+        assert(!t.popTransmitFor(out, sizeof(out), &w, Q, 2000) && t.transmitQueued == 3);   // head is P's
+        assert(!t.popTransmitFor(out, sizeof(out), &w, P, 1300 + 40) && t.transmitQueued == 3);   // too long
+        const unsigned before = t.transmitSequence;
+        assert(t.popTransmitFor(out, sizeof(out), &w, P, 2000) && w == 14 + 40 + 1300 + 26 && t.transmitQueued == 2);
+        assert(t.transmitSequence == before + 1 && out[0] == 0x08 && !memcmp(out + 4, P, 6));
+        unsigned s;
+        assert(pop(t, nullptr, false, &s) == 2 && s == before + 1);   // numbering continues in order
+        assert(t.popTransmitFor(out, sizeof(out), &w, P, 2000) && t.transmitQueued == 0);
+        assert(!t.popTransmitFor(out, sizeof(out), &w, P, 2000));                             // empty
+        // a group frame at the head is never taken
+        t.push(G, 4, 100);
+        assert(!t.popTransmitFor(out, sizeof(out), &w, G, 2000) && pop(t, nullptr) == 4);
+        // parked frames pending: nothing taken (they come first)
+        t.push(P, 5, 1300); t.push(Q, 6, 1300);
+        assert(pop(t, P) == 6 && t.parkedQueued == 1);
+        t.push(P, 7, 100);
+        assert(!t.popTransmitFor(out, sizeof(out), &w, P, 2000) && t.transmitQueued == 1);
+        assert(pop(t, nullptr) == 5 && pop(t, nullptr) == 7);
+        // an invalid frame at the head is left for popTransmit, which drops it as before
+        t.push(P, 8, 100); t.transmitFrames[t.transmitHead].bytes[12] = 0x08;   // not IPv6
+        assert(!t.popTransmitFor(out, sizeof(out), &w, P, 2000) && t.transmitQueued == 1);
+        assert(pop(t, nullptr) == -1 && t.transmitDropped == 1);
+    }
+    puts("held peer's frames parked in order, others pass; A-MSDU next-frame take: passed (host mocks only)");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='awdl-tx-park-') as directory:

@@ -104,6 +104,46 @@ int main() {
         assert(amsduTlcNote(st, kTlcNotifAmsdu, 7935, 0x1ff) && st.tids == 0xff);
         cases += 5;
     }
+    // Room for the next frame, and the well-formed check on what buildAmsdu produces.
+    {
+        const size_t la = frame(a, peer, own, 1481, 3);
+        const size_t one[1] = {la};
+        AmsduLimits l{true, 1U, 7935, kAmsduBaselineMpdu, 4096};          // the peer's MPDU length binds
+        const size_t room = amsduRoomForNext(l, 0, one, 1);
+        size_t two[2] = {la, room};
+        assert(room > 24 && amsduAllowed(l, 0, two, 2) && amsduMpduLength(two, 2) == kAmsduBaselineMpdu);
+        two[1] = room + 1;
+        assert(!amsduAllowed(l, 0, two, 2));                              // one byte more doesn't fit
+        l.firmwareSize = 2600;                                          // the firmware's size binds instead
+        const size_t room2 = amsduRoomForNext(l, 0, one, 1);
+        two[1] = room2; assert(amsduAllowed(l, 0, two, 2) && amsduBodyLength(two, 2) == 2600);
+        two[1] = room2 + 1; assert(!amsduAllowed(l, 0, two, 2));
+        l.firmwareSize = 1400; assert(!amsduRoomForNext(l, 0, one, 1)); l.firmwareSize = 3839;   // no room left
+        l.txBuffer = 3000;                                              // our buffer binds
+        const size_t room3 = amsduRoomForNext(l, 0, one, 1);
+        two[1] = room3; assert(amsduAllowed(l, 0, two, 2) && amsduMpduLength(two, 2) - 4 == 3000);
+        two[1] = room3 + 1; assert(!amsduAllowed(l, 0, two, 2)); l.txBuffer = 4096;
+        const size_t twoFull[2] = {la, la};
+        assert(!amsduRoomForNext(l, 0, twoFull, 2));                     // already two subframes
+        l.peerAgreed = false; assert(!amsduRoomForNext(l, 0, one, 1)); l.peerAgreed = true;
+        assert(!amsduRoomForNext(l, 3, one, 1));
+        // well-formed: what we build passes; damage of each kind fails
+        const size_t lb = frame(b, peer, own, 777, 9);
+        const uint8_t *fs[2] = {a, b};
+        const size_t ls[2] = {la, lb};
+        const size_t n = buildAmsdu(fs, ls, 2, 0, 1, out, sizeof(out));
+        assert(n && amsduWellFormed(out, n, 2) && !amsduWellFormed(out, n, 1));
+        assert(!amsduWellFormed(out, n - 1, 2) && !amsduWellFormed(out, n + 1, 2));
+        out[24] &= 0x7f; assert(!amsduWellFormed(out, n, 2)); out[24] |= 0x80;
+        out[26] ^= 1; assert(!amsduWellFormed(out, n, 2)); out[26] ^= 1;      // subframe DA differs
+        out[39] ^= 0x10; assert(!amsduWellFormed(out, n, 2)); out[39] ^= 0x10;   // first length wrong
+        assert(amsduWellFormed(out, n, 2));
+        const size_t single = buildAmsdu(fs, ls, 1, 0, 1, out, sizeof(out));
+        assert(single && !amsduWellFormed(out, single, 2));                // one subframe isn't one of ours
+        uint8_t plain[200]; const size_t lp = frame(plain, peer, own, 100, 0);
+        assert(!amsduWellFormed(plain, lp, 2));
+        cases += 16;
+    }
     printf("AWDL A-MSDU send helpers: %u cases passed (host only)\n", cases);
     return 0;
 }

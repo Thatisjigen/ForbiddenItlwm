@@ -386,6 +386,25 @@ static uint64_t awdlUptimeUS();
 // BSSID (whether the AWDL parser then took them shows in the data counters).
 static bool awdlAmsduRx;
 static uint32_t awdlAmsduRxAsked, awdlAmsduRxNotAsked, awdlAmsduRxAllowed, awdlAmsduRxSubframes;
+// -itlawdlamsdutx, experimental (step A2: plumbing, no packing yet): our ADDBA requests offer A-MSDU, the peer's
+// answer bit is kept per slot, the AWDL stations' rate control is configured with the VHT baseline maximum MPDU
+// length (3895) so the firmware can enable A-MSDU per TID, its TLC A-MSDU updates are kept per slot (apart from the
+// rate updates). TX buffers need no change: with VT-d every TX slot's bounce buffer is at least 4096 bytes
+// (bus_dmamap_create allocates MAX(size, 4096)), and without it the mbuf cursor takes several 2048-byte segments.
+// ITLAWDLAmsduTx shows what was offered, agreed and enabled. Off: unchanged.
+static bool awdlAmsduTx;
+static uint32_t awdlAmsduTxOffers, awdlAmsduTxAgreed, awdlAmsduTxRefused, awdlAmsduTxTlcUpdates,
+    awdlAmsduTxTlcUnmatched;
+// The largest MPDU iwx_tx's aggregation path takes: the VT-d bounce buffer (4096) less room for nothing else; the
+// 802.11 header goes into the TX command, the rest is the mapped payload.
+static constexpr size_t kAwdlAmsduTxBuffer = 4096;
+// Step A3: A-MSDUs sent and their subframes; tries that didn't pack, by reason: not ready (no agreement or the firmware
+// hasn't enabled A-MSDU on the TID), no room (the first frame leaves no room under the limits), nothing next (the next
+// queued frame isn't for this peer, doesn't fit, or frames are parked), split (both taken, but packing failed: each
+// went on as a frame of its own, in order).
+static uint32_t awdlAmsduTxSent, awdlAmsduTxSubframes, awdlAmsduTxNotReady, awdlAmsduTxNoRoom, awdlAmsduTxNoNext,
+    awdlAmsduTxSplit;
+static constexpr uint16_t kAwdlAmsduTxMaxMpdu = uint16_t(ItlAWDL::kAmsduBaselineMpdu);
 // The station's receive Block Ack sessions (sc_rx_ba_sessions, mirrored for ITLRxBaSessions): the firmware's
 // receive sessions are one pool for the station and every AWDL peer, so the key shows them side by side.
 static uint32_t itlStationRxBa;
@@ -6270,6 +6289,7 @@ extern IOReturn itlAWDLBuildSyncProbe(IOEthernetController*, mbuf_t*, uint64_t);
 extern IOReturn itlAWDLBuildTransmit(IOEthernetController*, mbuf_t*);
 extern IOReturn itlAWDLBuildTransmit(IOEthernetController*, mbuf_t*, const uint8_t*);
 extern IOReturn itlAWDLBuildTransmit(IOEthernetController*, mbuf_t*, const uint8_t*, bool);
+extern IOReturn itlAWDLBuildTransmitFor(IOEthernetController*, mbuf_t*, const uint8_t*, size_t);
 extern unsigned itlAWDLTransmitHeldShort(IOEthernetController*);
 extern bool itlAWDLServiceTransmit(IOEthernetController*);
 extern unsigned itlAWDLTransmitQueued(IOEthernetController*);
@@ -7225,6 +7245,23 @@ static void awdlCoexPublish()
                  awdlAmsduRx ? "on" : "off", awdlAmsduRxAsked, awdlAmsduRxNotAsked, awdlAmsduRxAllowed,
                  awdlAmsduRxSubframes);
         root->setProperty("ITLAWDLAmsduRx", am);
+        if (awdlAmsduTx) {
+            char tx[768];
+            int n = snprintf(tx, sizeof(tx), "on; offered %u, agreed %u, refused %u; tlc updates %u (unmatched %u); "
+                             "sent %u (subframes %u); not packed: not ready %u, no room %u, nothing next %u, split %u; "
+                             "slots:", awdlAmsduTxOffers, awdlAmsduTxAgreed, awdlAmsduTxRefused,
+                             awdlAmsduTxTlcUpdates, awdlAmsduTxTlcUnmatched, awdlAmsduTxSent, awdlAmsduTxSubframes,
+                             awdlAmsduTxNotReady, awdlAmsduTxNoRoom, awdlAmsduTxNoNext, awdlAmsduTxSplit);
+            for (unsigned i = 0; i < ItlAWDL::kMaxPeerSlots && n > 0 && size_t(n) < sizeof(tx); ++i) {
+                const ItlAWDL::PeerSlot &p = awdlPeers[i];
+                if (!p.added)
+                    continue;
+                n += snprintf(tx + n, sizeof(tx) - size_t(n), " %u:%s tlc %s size %u tids 0x%02x", i,
+                              p.txAmsduAgreed ? "agreed" : "no", p.amsduTlc.known ? "yes" : "none",
+                              p.amsduTlc.size, p.amsduTlc.tids);
+            }
+            root->setProperty("ITLAWDLAmsduTx", tx);
+        }
     }
     root->setProperty("ITLAWDLCoexSameChannelProbeEnabled", awdlCoexSameChannelProbe.enabled);
     root->setProperty("ITLAWDLCoexSameChannelProbeLive", awdlCoexSameChannelProbe.applied);
@@ -9063,6 +9100,14 @@ awdlCoexDataPump(struct iwx_softc *sc, unsigned budget)
                 }
                 continue;
             }
+            // -itlawdlamsdutx: in bulk, packed with the next frame for this peer when it fits (both consumed if so).
+            const int packed = own->txBulk.bulk ? awdlCoexAmsduTry(sc, *own, next) : 0;
+            if (packed) {
+                own->aggFailStreak = 0;
+                if (budget)
+                    --budget;   // the second frame
+                continue;
+            }
             if (awdlCoexPeerSendAgg(sc, *own, next)) {
                 own->aggFailStreak = 0;
                 continue;
@@ -9119,6 +9164,12 @@ awdlCoexDataPump(struct iwx_softc *sc, unsigned budget)
             unicast && !mbuf_next(next) && nextBytes[0] == 0x08 &&
             uint32_t(sc->txq[awdlPeer.txQueue].queued) < awdlCoexBaTxQueuedCap() &&
             ItlAWDL::sameAddress(nextBytes + 4, awdlPeer.addr)) {
+            // -itlawdlamsdutx: in bulk, packed with the next frame for the peer when it fits (both consumed if so).
+            if (aggregate && awdlCoexAmsduTry(sc, awdlPeer, next)) {
+                if (budget)
+                    --budget;   // the second frame
+                continue;
+            }
             // QoS data on TID 0 with our sequence, on the peer's aggregation queue, at firmware-chosen rates.
             mbuf_t qos = nullptr;
             if (!mbuf_getpacket(MBUF_DONTWAIT, &qos) && qos) {
@@ -9250,6 +9301,8 @@ awdlCoexBaRemovePeer(struct iwx_softc *sc, ItlAWDL::PeerSlot &awdlPeer)
     awdlPeer.rxIdleTids = 0;
     const int txQueue = awdlPeer.txQueue;
     awdlPeer.txState = kCoexBaTxOff;
+    awdlPeer.txAmsduAgreed = false;
+    awdlPeer.amsduTlc = ItlAWDL::AmsduTlcState{};
     awdlPeer.txQueue = -1;
     awdlPeer.txBulk = ItlAWDL::BaTxBulkState{};
     awdlPeer.txFailedUS = 0;
@@ -9437,6 +9490,8 @@ awdlCoexBaAddPeer(struct iwx_softc *sc, ItlAWDL::PeerSlot &awdlPeer, const uint8
     }
     awdlPeer.width = uint32_t(width);
     awdlPeer.accepted = false;
+    awdlPeer.txAmsduAgreed = false;
+    awdlPeer.amsduTlc = ItlAWDL::AmsduTlcState{};
     awdlPeer.queueAllocPending = false;
     ++awdlPeer.epoch;
     awdlPeer.delbaWaitTid = -1;
@@ -9998,8 +10053,9 @@ awdlCoexBaTxPeer(struct iwx_softc *sc, ItlAWDL::PeerSlot &awdlPeer, int gen, uin
     static const uint8_t kBssid[6] = {0x00, 0x25, 0x00, 0xff, 0x94, 0x73};
     uint8_t ask[ItlAWDL::kAddbaResponseLength];
     const size_t askLength = ItlAWDL::buildAddbaRequest(ask, sizeof(ask), awdlPeer.addr, awdlCoexAddr, kBssid,
-        awdlPeer.txToken, kAwdlBaTxTid, ItlAWDL::kBaWindowMax, awdlPeer.txSeq, ++awdlCoexBaSequence);
+        awdlPeer.txToken, kAwdlBaTxTid, ItlAWDL::kBaWindowMax, awdlPeer.txSeq, ++awdlCoexBaSequence, awdlAmsduTx);
     if (askLength && awdlCoexSendMgmt(sc, ask, askLength, kCoexSlotBaAsk)) {
+        awdlAmsduTxOffers += awdlAmsduTx;
         awdlPeer.txLastAskUS = now;
         ++awdlPeer.txAsks;
     }
@@ -10035,12 +10091,101 @@ awdlCoexPeerSendAgg(struct iwx_softc *sc, ItlAWDL::PeerSlot &awdlPeer, mbuf_t ne
     }
     awdlPeer.txSeq = (awdlPeer.txSeq + 1) & 0xfff;
     awdlPeer.txLastAggUS = awdlUptimeUS();
-    ++awdlPeer.txAggFrames;
-    ++awdlPeerTxAggFrames;
+    if (&awdlPeer == &awdlPeers[0]) {
+        ++awdlCoexBaTxFrames;   // slot 0's own count (its bulk detector reads it), as the pump's inline path
+    } else {
+        ++awdlPeer.txAggFrames;
+        ++awdlPeerTxAggFrames;
+    }
     ++awdlCoexDataTx;
     awdlCoexLastDataUS = awdlPeer.txLastAggUS;
     mbuf_freem(next);
     return true;
+}
+
+// -itlawdlamsdutx (step A3): packs `first` with the next queued frame for the same peer into one A-MSDU on the peer's
+// aggregation queue, if the peer agreed, the firmware enabled A-MSDU on the TID and both fit every limit. The next
+// frame is taken only when it will fit (popTransmitFor), so order is kept and nothing is put back. Returns 0 when it
+// didn't try (the caller sends `first` as before; nothing was taken), 1 when both went as one A-MSDU, 2 when both were
+// taken but couldn't be packed: then each went on its own, in order (aggregated, else singly). `first` is consumed
+// unless 0 is returned.
+int ItlIwx::
+awdlCoexAmsduTry(struct iwx_softc *sc, ItlAWDL::PeerSlot &awdlPeer, mbuf_t first)
+{
+    if (!awdlAmsduTx || !first || mbuf_next(first))
+        return 0;
+    if (!awdlPeer.txAmsduAgreed || awdlPeer.txState != kCoexBaTxAgreed || !awdlPeer.added || awdlPeer.txQueue < 0 ||
+        !awdlPeer.amsduTlc.known) {
+        ++awdlAmsduTxNotReady;
+        return 0;
+    }
+    const uint8_t *firstBytes = static_cast<const uint8_t *>(mbuf_data(first));
+    const size_t firstLength = mbuf_len(first);
+    if (!ItlAWDL::amsduCandidate(firstBytes, firstLength) || !ItlAWDL::sameAddress(firstBytes + 4, awdlPeer.addr))
+        return 0;
+    const ItlAWDL::AmsduLimits limits{true, awdlPeer.amsduTlc.tids, awdlPeer.amsduTlc.size, ItlAWDL::kAmsduBaselineMpdu,
+                                      kAwdlAmsduTxBuffer};
+    const size_t one[1] = {firstLength};
+    const size_t room = ItlAWDL::amsduRoomForNext(limits, kAwdlBaTxTid, one, 1);
+    if (!room) {
+        ++(limits.firmwareTids & (1U << kAwdlBaTxTid) ? awdlAmsduTxNoRoom : awdlAmsduTxNotReady);
+        return 0;
+    }
+    mbuf_t second = nullptr;
+    if (itlAWDLBuildTransmitFor(getController(), &second, awdlPeer.addr, room) != kIOReturnSuccess || !second) {
+        ++awdlAmsduTxNoNext;
+        return 0;
+    }
+    const uint8_t *frames[2] = {firstBytes, static_cast<const uint8_t *>(mbuf_data(second))};
+    const size_t lengths[2] = {firstLength, mbuf_len(second)};
+    struct ieee80211com *ic = &sc->sc_ic;
+    mbuf_t amsdu = nullptr;
+    unsigned int chunks = 1;
+    const size_t mpdu = ItlAWDL::amsduMpduLength(lengths, 2);
+    if (ItlAWDL::amsduAllowed(limits, kAwdlBaTxTid, lengths, 2) && mpdu &&
+        !mbuf_allocpacket(MBUF_DONTWAIT, mpdu - ItlAWDL::kAmsduFcs, &chunks, &amsdu) && amsdu && !mbuf_next(amsdu)) {
+        const size_t built = ItlAWDL::buildAmsdu(frames, lengths, 2, kAwdlBaTxTid, awdlPeer.txSeq,
+                                                 static_cast<uint8_t *>(mbuf_data(amsdu)), mbuf_maxlen(amsdu));
+        if (built) {
+            mbuf_setlen(amsdu, built);
+            mbuf_pkthdr_setlen(amsdu, built);
+            auto *node = ieee80211_ref_node(ic->ic_bss);
+            const AwdlSendingPeer sending(awdlPeer);
+            awdlCoexBaSendingAgg = true;
+            const int err = iwx_tx(sc, amsdu, node, EDCA_AC_BE, awdlPeer.txQueue);
+            awdlCoexBaSendingAgg = false;
+            amsdu = nullptr;   // iwx_tx owns it either way
+            if (!err) {
+                awdlPeer.txSeq = (awdlPeer.txSeq + 1) & 0xfff;
+                awdlPeer.txLastAggUS = awdlUptimeUS();
+                if (&awdlPeer == &awdlPeers[0]) {
+                    ++awdlCoexBaTxFrames;
+                    awdlCoexBaTxPeakQueued = MAX(awdlCoexBaTxPeakQueued, uint32_t(sc->txq[awdlPeer.txQueue].queued));
+                } else {
+                    ++awdlPeer.txAggFrames;
+                    ++awdlPeerTxAggFrames;
+                }
+                awdlCoexDataTx += 2;
+                awdlCoexLastDataUS = awdlPeer.txLastAggUS;
+                ++awdlAmsduTxSent;
+                awdlAmsduTxSubframes += 2;
+                mbuf_freem(first);
+                mbuf_freem(second);
+                return 1;
+            }
+            ieee80211_release_node(ic, node);
+            ++awdlCoexBaTxSubmitErrors;
+        }
+    }
+    if (amsdu)
+        mbuf_freem(amsdu);
+    // Both are ours now: each goes on by itself, first then second, as they would have without packing.
+    ++awdlAmsduTxSplit;
+    if (!awdlCoexPeerSendAgg(sc, awdlPeer, first))
+        (void)awdlCoexPeerSendSingle(sc, first);   // consumed either way
+    if (!awdlCoexPeerSendAgg(sc, awdlPeer, second))
+        (void)awdlCoexPeerSendSingle(sc, second);
+    return 2;
 }
 
 // One frame on the listener's single-frame queue (consumed either way).
@@ -10436,8 +10581,9 @@ awdlCoexBaHandle(struct iwx_softc *sc)
     static const uint8_t kBssid[6] = {0x00, 0x25, 0x00, 0xff, 0x94, 0x73};
     uint8_t ask[ItlAWDL::kAddbaResponseLength];
     const size_t askLength = ItlAWDL::buildAddbaRequest(ask, sizeof(ask), awdlPeer.addr, awdlCoexAddr, kBssid,
-        awdlPeer.txToken, kAwdlBaTxTid, ItlAWDL::kBaWindowMax, awdlPeer.txSeq, ++awdlCoexBaSequence);
+        awdlPeer.txToken, kAwdlBaTxTid, ItlAWDL::kBaWindowMax, awdlPeer.txSeq, ++awdlCoexBaSequence, awdlAmsduTx);
     if (askLength && awdlCoexSendMgmt(sc, ask, askLength, kCoexSlotBaAsk)) {
+        awdlAmsduTxOffers += awdlAmsduTx;
         awdlPeer.txLastAskUS = askNow;
         ++awdlCoexBaTxAsks;
         awdlCoexBaEvent('A', awdlPeer.txToken, awdlPeer.txSeq,
@@ -11396,6 +11542,7 @@ iwx_rx_frame(struct iwx_softc *sc, mbuf_t m, int chanidx,
                             if (!awdlFrame)
                                 ++awdlCoexBaNonAwdlBssidApplied;
                             ++awdlCoexBaTxDelbas;
+                            awdlPeer.txAmsduAgreed = false;   // a new agreement decides again
                             awdlPeer.txState = kCoexBaTxAsking;
                             ++awdlPeer.txToken;
                             awdlPeer.probeTried = false;
@@ -11435,6 +11582,10 @@ iwx_rx_frame(struct iwx_softc *sc, mbuf_t m, int chanidx,
                                 ++awdlCoexBaTxAgreements;
                                 if (&awdlPeer != &awdlPeers[0])
                                     ++awdlPeerTxAgreements;
+                                // -itlawdlamsdutx: whether the peer accepts our A-MSDUs in this agreement.
+                                awdlPeer.txAmsduAgreed = awdlAmsduTx && answer.amsdu;
+                                if (awdlAmsduTx)
+                                    ++(answer.amsdu ? awdlAmsduTxAgreed : awdlAmsduTxRefused);
                                 // A window of 0 isn't valid in an answer; it's taken as our requested 64.
                                 awdlPeer.txWindow = answer.window && answer.window < 64 ? answer.window : 64;
                                 if (awdlPeer.txWindow < 64)
@@ -14337,13 +14488,17 @@ iwx_tx(struct iwx_softc *sc, mbuf_t m, struct ieee80211_node *ni, int ac, int mo
     // Receive/queue-allocation experiments must not submit even incidental
     // network traffic to a newly allocated firmware queue.
     ItlAWDL::PeerSlot *aggSlot = awdlCoexData && !awdlRx ? awdlPeerForTxQueue(monitorQueue) : nullptr;
+    // -itlawdlamsdutx: one of our A-MSDUs, to a peer that agreed to them (larger than 2304 bytes, up to the TX buffer).
+    const bool awdlAmsduFrame = aggSlot && awdlAmsduTx && aggSlot->txAmsduAgreed && !mbuf_next(m) &&
+        ItlAWDL::amsduWellFormed(mtod(m, const uint8_t *), mbuf_len(m), ItlAWDL::kAmsduMaxSubframes);
     if (aggSlot) {
         // A listener peer's aggregation queue: only AWDL data the pump converted, while the session is up.
         ItlAWDL::PeerSlot &awdlPeer = *aggSlot;
         if (!awdlCoexBaSendingAgg || awdlPeer.txState != kCoexBaTxAgreed || !awdlPeer.added ||
             !awdlCoexAdded || awdlCoexGeneration != sc->sc_generation || !getMainWorkLoop()->inGate() ||
             sc->sc_ic.ic_opmode != IEEE80211_M_STA || sc->sc_ic.ic_state != IEEE80211_S_RUN || mbuf_next(m) ||
-            mbuf_len(m) != mbuf_pkthdr_len(m) || mbuf_len(m) > 2304 || !awdlMonitorRequestValidCoex(m)) {
+            mbuf_len(m) != mbuf_pkthdr_len(m) || mbuf_len(m) > (awdlAmsduFrame ? kAwdlAmsduTxBuffer : 2304U) ||
+            (!awdlAmsduFrame && !awdlMonitorRequestValidCoex(m))) {
             mbuf_freem(m);
             return EACCES;
         }
@@ -14558,6 +14713,8 @@ iwx_tx(struct iwx_softc *sc, mbuf_t m, struct ieee80211_node *ni, int ac, int mo
     totlen = mbuf_pkthdr_len(m);
     
     offload_assist = itlTxOffloadHeader(hdrlen);
+    if (awdlAmsduFrame)
+        offload_assist |= IWX_TX_CMD_OFFLD_AMSDU;   // as Linux marks host-built A-MSDUs for the firmware
     
     if (sc->sc_device_family >= IWX_DEVICE_FAMILY_AX210) {
         tx_gen3 = (struct iwx_tx_cmd_gen3 *)cmd->data;
@@ -17038,6 +17195,9 @@ iwx_rs_init(struct iwx_softc *sc, struct iwx_node *in, bool update)
         cfg_cmd.ht_rates[IWX_TLC_NSS_1][IWX_TLC_MCS_PER_BW_80] = htole16(0xf0);
         cfg_cmd.ht_rates[IWX_TLC_NSS_2][IWX_TLC_MCS_PER_BW_80] = htole16(0xf0);
         cfg_cmd.sta_id = awdlBaTlcStation;
+        // -itlawdlamsdutx: the VHT baseline maximum MPDU length lets the firmware enable A-MSDU per TID for this
+        // peer (it reports the limits in TLC updates); 0, as before, leaves A-MSDU off.
+        cfg_cmd.max_mpdu_len = awdlAmsduTx ? htole16(kAwdlAmsduTxMaxMpdu) : 0;
         cfg_cmd.max_ch_width = IWX_TLC_MNG_CH_WIDTH_20MHZ;
         // The listener's peer: legacy fallback rates from the listener's band, not the BSS's.
         if (awdlCoexOwnChan)
@@ -17229,6 +17389,22 @@ iwx_rs_update(struct iwx_softc *sc, struct iwx_tlc_update_notif *notif)
     uint8_t notifver;
     uint32_t format;
 
+    // -itlawdlamsdutx: an AWDL peer station's A-MSDU limits, kept per slot. The AMSDU bit is handled apart from the
+    // RATE bit (an update may carry either); the station's rate itself stays the firmware's business, as before.
+    if (awdlAmsduTx && notif->sta_id != IWX_STATION_ID) {
+        if (le32toh(notif->flags) & IWX_TLC_NOTIF_FLAG_AMSDU) {
+            ItlAWDL::PeerSlot *slot = nullptr;
+            for (unsigned i = 0; i < awdlPeerSlotsUsable && i < ItlAWDL::kMaxPeerSlots && !slot; ++i)
+                if (awdlPeers[i].added && awdlPeers[i].station == notif->sta_id)
+                    slot = &awdlPeers[i];
+            if (slot && ItlAWDL::amsduTlcNote(slot->amsduTlc, le32toh(notif->flags), le32toh(notif->amsdu_size),
+                                              le32toh(notif->amsdu_enabled)))
+                ++awdlAmsduTxTlcUpdates;
+            else if (!slot)
+                ++awdlAmsduTxTlcUnmatched;
+        }
+        return;
+    }
     if (notif->sta_id != IWX_STATION_ID ||
         (le32toh(notif->flags) & IWX_TLC_NOTIF_FLAG_RATE) == 0)
         return;
@@ -19552,6 +19728,8 @@ awdlCoexListener(struct iwx_softc *sc, bool add)
             awdlPeer.rxTids = 0;
             awdlPeer.answerLength = 0;
             awdlPeer.txState = kCoexBaTxOff;
+            awdlPeer.txAmsduAgreed = false;
+            awdlPeer.amsduTlc = ItlAWDL::AmsduTlcState{};
             awdlPeer.txQueue = -1;
             awdlPeer.rxTidTeardown = 0;
             awdlPeer.rxIdleTids = 0;
@@ -24647,6 +24825,7 @@ iwx_attach(struct iwx_softc *sc, struct pci_attach_args *pa)
         awdlSchedSp = itlResFlag("-itlschedsp", kItlResWork);
         itlFwCrashRec = itlResFlag("-itlfwcrashrec", kItlResDiag);
         awdlAmsduRx = PE_parse_boot_argn("-itlawdlamsdurx", &dummy, sizeof(dummy));
+        awdlAmsduTx = PE_parse_boot_argn("-itlawdlamsdutx", &dummy, sizeof(dummy));
         // Part of itlawdlsched=1 (#26, #101: the user can't tell when the router's width or channel puts the
         // listener in an overlap). -itlschedoldoverlap keeps the old 20 MHz / skip rules, for comparison.
         {

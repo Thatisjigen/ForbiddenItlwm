@@ -72,6 +72,54 @@ inline bool amsduAllowed(const AmsduLimits &l, uint8_t tid, const size_t *length
     return body <= l.firmwareSize && mpdu <= l.maxMpdu && mpdu - kAmsduFcs <= l.txBuffer;
 }
 
+// The longest next frame (24-byte header included) that may still join `count` frames under `l`, or 0 if none may.
+// For taking the next frame from awdl0's queue only when it will be packed (never taken just to be put back).
+inline size_t amsduRoomForNext(const AmsduLimits &l, uint8_t tid, const size_t *lengths, unsigned count) {
+    if (count < 1 || count + 1 > kAmsduMaxSubframes || tid >= 8 || !l.peerAgreed || !(l.firmwareTids & (1U << tid)) ||
+        !l.firmwareSize)
+        return 0;
+    const size_t now = amsduMpduLength(lengths, count);
+    if (!now)
+        return 0;
+    // Adding a frame of total length L (body L - 24): the current last subframe gets its padding, then 14 + body.
+    const size_t lastSub = kAmsduSubHeader + (lengths[count - 1] - 24);
+    const size_t base = now + amsduPad(lastSub) + kAmsduSubHeader;   // MPDU length before the new body
+    size_t limit = l.maxMpdu;
+    if (l.txBuffer + kAmsduFcs < limit) limit = l.txBuffer + kAmsduFcs;
+    const size_t byBody = l.firmwareSize + kAmsduQosHeader + kAmsduFcs;
+    if (byBody < limit) limit = byBody;
+    if (limit <= base)
+        return 0;
+    const size_t body = limit - base;
+    return body ? body + 24 : 0;
+}
+
+// Whether `f` is an A-MSDU we built: QoS data with the A-MSDU bit, 2..maxSubframes subframes that exactly fill it,
+// each addressed as the MPDU (DA = addr1, SA = addr2), non-empty, padded between. For iwx_tx's last check.
+inline bool amsduWellFormed(const uint8_t *f, size_t length, unsigned maxSubframes) {
+    if (!f || length < kAmsduQosHeader + kAmsduSubHeader + 1 || f[0] != 0x88 || (f[1] & 0x03) || !(f[24] & 0x80) ||
+        (f[4] & 1))
+        return false;
+    size_t at = kAmsduQosHeader;
+    unsigned n = 0;
+    while (at < length) {
+        if (length - at < kAmsduSubHeader || ++n > maxSubframes)
+            return false;
+        if (memcmp(f + at, f + 4, 6) || memcmp(f + at + 6, f + 10, 6))
+            return false;
+        const size_t body = size_t(f[at + 12]) << 8 | f[at + 13];
+        if (!body || body > length - at - kAmsduSubHeader)
+            return false;
+        at += kAmsduSubHeader + body;
+        if (at < length) {
+            at += amsduPad(kAmsduSubHeader + body);
+            if (at >= length)
+                return false;   // padding is only ever followed by another subframe; the last one has none
+        }
+    }
+    return at == length && n >= 2;
+}
+
 // Builds one QoS data MPDU carrying `count` frames as A-MSDU subframes: the first frame's header with QoS control
 // (TID, A-MSDU present bit 7), then per frame DA (addr1), SA (addr2), body length (big-endian) and its body, each but
 // the last padded to 4 bytes with zeros. Returns the length without FCS, or 0 (nothing usable written) if a frame

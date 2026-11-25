@@ -6,6 +6,7 @@
 // peers their own station and receive sessions.
 #pragma once
 #include "AWDLBlockAck.hpp"
+#include "AWDLAmsdu.hpp"
 #include "AWDLPeerSchedule.hpp"
 namespace ItlAWDL {
 // Firmware stations for AWDL peers: 3, then 5 and up. 0 is the Wi-Fi network's, 1 the aux station, 2 the
@@ -44,6 +45,10 @@ struct PeerSlot {
     int txState = 0;             // kCoexBaTxOff
     int txQueue = -1;
     uint16_t txSeq = 0, txWindow = 0;
+    // -itlawdlamsdutx: the peer accepted A-MSDUs in our send agreement (its ADDBA answer's bit 0), and the firmware
+    // rate control's A-MSDU limits for this station (TLC updates, AMSDU bit). Both reset with the station.
+    bool txAmsduAgreed = false;
+    AmsduTlcState amsduTlc{};
     uint8_t txToken = 0x5a;
     BaTxBulkState txBulk{};
     uint64_t txLastAskUS = 0, txRestUntilUS = 0, txLastAggUS = 0, txLastNotifUS = 0;

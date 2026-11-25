@@ -487,6 +487,7 @@ public:
     bool   awdlCoexBaRxPeer(struct iwx_softc *, ItlAWDL::PeerSlot &, int, uint32_t, uint64_t);
     bool   awdlCoexBaTxPeer(struct iwx_softc *, ItlAWDL::PeerSlot &, int, uint32_t, uint64_t);
     bool   awdlCoexPeerSendAgg(struct iwx_softc *, ItlAWDL::PeerSlot &, mbuf_t);
+    int    awdlCoexAmsduTry(struct iwx_softc *, ItlAWDL::PeerSlot &, mbuf_t);
     bool   awdlCoexPeerSendSingle(struct iwx_softc *, mbuf_t);
     void   awdlCoexPeerHoldDrain(struct iwx_softc *, unsigned &);
     void   awdlCoexStationTest(struct iwx_softc *);
