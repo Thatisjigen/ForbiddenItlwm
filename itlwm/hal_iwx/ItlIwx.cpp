@@ -130,6 +130,7 @@ extern bool itlAWDLDefaults();
 #include <AWDLPeerHandoff.hpp>
 #include <AWDLPeerSlot.hpp>
 #include <AWDLChannelMix.hpp>
+#include <AWDLAirtime.hpp>
 #include <AWDLRxDup.hpp>
 #include <AWDLChainRssi.hpp>
 #include <AWDLTxPass.hpp>
@@ -419,6 +420,13 @@ static uint32_t awdlAmsduTxLastLen, awdlAmsduTxLastOffload, awdlAmsduTxLastTb1, 
 // The station's receive Block Ack sessions (sc_rx_ba_sessions, mirrored for ITLRxBaSessions): the firmware's
 // receive sessions are one pool for the station and every AWDL peer, so the key shows them side by side.
 static uint32_t itlStationRxBa;
+// -itlawdlairtime: where slot 0's send time goes (AWDLAirtime.hpp), sampled at each data pump, Block Ack
+// notification and coex tick, in the gate. Published as ITLAWDLAirtime. Diagnostics only.
+static bool awdlAirtime;
+static ItlAWDL::AirtimeMeter awdlAirtimeMeter;
+static int awdlAirtimeGen = -1;
+static uint8_t awdlAirtimePeer[6];
+static uint32_t awdlAirtimeOutOfGate;
 static bool itlFwCrashRec;
 struct ItlFwCrashRecord {
     uint64_t upUS;
@@ -7349,6 +7357,28 @@ static void awdlCoexPublish()
             root->setProperty("ITLAWDLAmsduTx", tx);
         }
     }
+    if (awdlAirtime) {   // where slot 0's send time went, in ms and per mille of the sampled time
+        static const char *const names[ItlAWDL::kAirtimeStates] = {"no airtime", "peer away", "no demand",
+                                                                     "policy blocked", "empty with ready", "queued"};
+        char at[640];
+        size_t u = 0;
+        const ItlAWDL::AirtimeAccount *accounts[2] = {&awdlAirtimeMeter.bulk, &awdlAirtimeMeter.all};
+        for (unsigned k = 0; k < 2 && u < sizeof(at); ++k) {
+            const ItlAWDL::AirtimeAccount &a = *accounts[k];
+            u += size_t(snprintf(at + u, sizeof(at) - u, "%s%s %llu ms:", k ? "; " : "", k ? "all" : "bulk",
+                                 (unsigned long long)(a.totalUS() / 1000)));
+            for (unsigned i = 0; i < ItlAWDL::kAirtimeStates && u < sizeof(at); ++i)
+                u += size_t(snprintf(at + u, sizeof(at) - u, " %s %llu (%u.%u%%)%s", names[i],
+                                     (unsigned long long)(a.us[i] / 1000), a.share(i) / 10, a.share(i) % 10,
+                                     i + 1 < ItlAWDL::kAirtimeStates ? "," : ""));
+            if (u < sizeof(at))
+                u += size_t(snprintf(at + u, sizeof(at) - u, "; unsampled %llu ms, samples %u, longest gap %u us",
+                                     (unsigned long long)(a.unsampledUS / 1000), a.samples, a.maxGapUS));
+        }
+        if (u < sizeof(at))
+            snprintf(at + u, sizeof(at) - u, "; skipped outside the gate %u", awdlAirtimeOutOfGate);
+        root->setProperty("ITLAWDLAirtime", at);
+    }
     root->setProperty("ITLAWDLCoexSameChannelProbeEnabled", awdlCoexSameChannelProbe.enabled);
     root->setProperty("ITLAWDLCoexSameChannelProbeLive", awdlCoexSameChannelProbe.applied);
     root->setProperty("ITLAWDLCoexSameChannelProbeOpens", awdlCoexSameChannelProbe.opens, 32);
@@ -8954,6 +8984,7 @@ awdlCoexTxTask(void *arg)
             that->awdlCoexDataPump(sc);
             that->awdlSchedSecondMgmtStep(sc);   // step 2d: held Block Ack answers, on the second channel
         }
+        that->awdlAirtimeSample(sc);
         if (awdlCoexBaTraceEnabled && !awdlStopping && awdlCoexAdded && awdlCoexGeneration == sc->sc_generation) {
             const uint64_t now = awdlUptimeUS();
             if (now - awdlCoexBaTimelineLastUS >= 50000ULL) {
@@ -9063,9 +9094,50 @@ awdlCoexTxTask(void *arg)
 }
 
 // Sends what macOS queued on awdl0 out the listener's queue, keeping room in the ring for sync frames.
+// One airtime sample for slot 0's peer (see AWDLAirtime.hpp for the states). awdl0's queue can only be read in the
+// gate, so a call outside it is counted and skipped.
+void ItlIwx::
+awdlAirtimeSample(struct iwx_softc *sc)
+{
+#if defined(ITL_AWDL_NATIVE)
+    if (!awdlAirtime)
+        return;
+    if (!getMainWorkLoop() || !getMainWorkLoop()->inGate()) {
+        ++awdlAirtimeOutOfGate;
+        return;
+    }
+    if (!awdlCoexAdded || !awdlPeer.added || awdlCoexGeneration != sc->sc_generation || awdlStopping) {
+        awdlAirtimeMeter.restart();
+        return;
+    }
+    if (awdlAirtimeGen != sc->sc_generation || !ItlAWDL::sameAddress(awdlAirtimePeer, awdlPeer.addr)) {
+        awdlAirtimeMeter.restart();
+        awdlAirtimeGen = sc->sc_generation;
+        memcpy(awdlAirtimePeer, awdlPeer.addr, sizeof(awdlAirtimePeer));
+    }
+    const uint64_t now = awdlUptimeUS();
+    ItlAWDL::AirtimeSample s;
+    // On the AWDL channel: inside the follower's session when sessions decide it, else always.
+    s.localWindow = !awdlSchedSyncTxGated() ||
+        (awdlSchedSpActive && awdlSchedSpStartUS && awdlSchedSpMacId == kAwdlSchedHandleMacId &&
+         awdlSchedSpStartUS <= now && awdlSchedSpStartUS + uint64_t(awdlSchedSpCurDurTU) * 1024 > now);
+    s.peerAvailable = !awdlCoexScheduleCurrent() || !awdlCoexPeerSchedule.shouldPause(now);
+    s.hostReady = itlAWDLTransmitQueued(getController()) > 0;
+    const bool aggQueue = awdlPeer.txQueue >= 0 && awdlPeer.txQueue < int(nitems(sc->txq));
+    const bool listenQueue = awdlCoexQueue >= 0 && awdlCoexQueue < int(nitems(sc->txq));
+    s.firmwareQueued = (aggQueue && sc->txq[awdlPeer.txQueue].queued > 0) ||
+        (listenQueue && sc->txq[awdlCoexQueue].queued > 0);
+    const bool gateHeld = awdlCoexGateSinceUS && awdlCoexGateLimitUS && now - awdlCoexGateSinceUS < awdlCoexGateLimitUS;
+    s.policyAllows = now >= awdlCoexTxPauseUntilUS && !awdlPeer.pause.paused && !awdlCoexTxHalted &&
+        !awdlCoexMovePending && !gateHeld;
+    (void)awdlAirtimeMeter.sample(now, s, awdlPeer.txBulk.bulk);
+#endif
+}
+
 void ItlIwx::
 awdlCoexDataPump(struct iwx_softc *sc, unsigned budget)
 {
+    awdlAirtimeSample(sc);
 #if defined(ITL_AWDL_NATIVE)
     struct ieee80211com *ic = &sc->sc_ic;
     const int gen = sc->sc_generation;
@@ -13083,6 +13155,8 @@ iwx_rx_tx_ba_notif(struct iwx_softc *sc, struct iwx_rx_packet *pkt, struct iwx_r
         awdlCoexBaLastRefillSample = {baUS, uint32_t(sc->sc_generation), awdlCoexToken, awdlPeer.epoch,
                                      queue, uint16_t(readyAfterReclaim), afterReclaim,
                                      uint16_t(sc->txq[queue].queued)};
+    if (coexNotified)
+        awdlAirtimeSample(sc);
 }
 
 // After a completion has been fully reclaimed. If the next frame can't go from here, the
@@ -25478,8 +25552,12 @@ iwx_attach(struct iwx_softc *sc, struct pci_attach_args *pa)
         awdlCoexPeerHandoff.clear();
         awdlCoexBaPeerPauseEnabled = awdlCoexBaTxEnabled && itlAWDLFlag("-itlawdlcoexpeerpause");
         awdlCoexBaTraceEnabled = awdlCoexBaTxEnabled && itlAWDLFlag("-itlawdlcoexbatrace");
-        awdlCoexBaRefillEnabled = awdlCoexBaTxEnabled &&
-            PE_parse_boot_argn("-itlawdlcoexbarefill", &dummy, sizeof(dummy));
+        // Completion-driven refill: after each Block Ack notification, the next frames go to the firmware at once
+        // instead of at the next pump. On by default from 0.7.0-alpha.4 (part of the tested set, so
+        // -itlawdlnocoexbarefill or -itlawdlnodefaults turns it off): with it, the time awdl0 held frames while
+        // the aggregation queue sat empty fell from 11.2% to 0.1% of Mac -> iPhone sending, and 105 MB sends went
+        // from 18.4 to 24.8 MB/s on average (ITLAWDLAirtime, 2026-11-25).
+        awdlCoexBaRefillEnabled = awdlCoexBaTxEnabled && itlAWDLFlag("-itlawdlcoexbarefill");
         awdlCoexBaFilterHysteresis = awdlCoexData &&
             PE_parse_boot_argn("-itlawdlcoexbafilterhyst", &dummy, sizeof(dummy));
         awdlCoexBaFilterBySession = PE_parse_boot_argn("-itlawdlfilterbysession", &dummy, sizeof(dummy));
@@ -25519,6 +25597,7 @@ iwx_attach(struct iwx_softc *sc, struct pci_attach_args *pa)
         awdlCoexNoSearch6 = itlResFlag("-itlawdlnosearch6", kItlResWork);
         awdlSchedSp = itlResFlag("-itlschedsp", kItlResWork);
         itlFwCrashRec = itlResFlag("-itlfwcrashrec", kItlResDiag);
+        awdlAirtime = itlResFlag("-itlawdlairtime", kItlResDiag);
         awdlAmsduRx = PE_parse_boot_argn("-itlawdlamsdurx", &dummy, sizeof(dummy));
         awdlAmsduTx = PE_parse_boot_argn("-itlawdlamsdutx", &dummy, sizeof(dummy));
         // Part of itlawdlsched=1 (#26, #101: the user can't tell when the router's width or channel puts the

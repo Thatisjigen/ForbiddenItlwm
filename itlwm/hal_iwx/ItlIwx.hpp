@@ -481,6 +481,7 @@ public:
     static void    awdlSchedFollowTimeout(void *);
     static void    awdlSchedFollowTask(void *);
     void   awdlCoexDataPump(struct iwx_softc *, unsigned budget = ~0U);
+    void   awdlAirtimeSample(struct iwx_softc *);
     void   awdlCoexBaHandle(struct iwx_softc *);
     int    awdlCoexBaRemovePeer(struct iwx_softc *, ItlAWDL::PeerSlot &);
     int    awdlCoexBaRemoveAllPeers(struct iwx_softc *);
