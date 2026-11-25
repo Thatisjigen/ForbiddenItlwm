@@ -137,6 +137,14 @@ jobs:
                               Use itlawdlsched=3 for the diagnostics of the
                               scheduler as well.
 
+                              Not on 0.7.0-alpha.2: there the scheduler
+                              kept its airtime request on the AirDrop
+                              listener while the driver removed the
+                              listener for a network switch, the firmware
+                              asserted and the first join to the new
+                              network failed. Fixed in 0.7.0-alpha.3, which
+                              is what this bundle is built from.
+
             -itlawdloff      Turn AirDrop off completely. WiFi then behaves
                               like the stock AirportItlwm and the full speed
                               comes back. Use it when the link speed matters
