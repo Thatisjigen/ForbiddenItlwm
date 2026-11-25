@@ -117,6 +117,7 @@ Not needed for AirDrop. Listed so you know what they do if you find them in a gu
 | `-itlmccprobe` | Records what the laptop's ACPI methods report about the Wi-Fi country, in the I/O Registry. Diagnostic only |
 | `-itlawdlpmdebug` | Asks macOS's AWDL peer manager for its debug flags. Diagnostic only. `itlawdlsched=3` sets it |
 | `-itlawdldatacopy` | Publishes `ItlwmAWDLDataCopyAttempts`/`Success`, a receive-copy probe from the bring-up. Diagnostic only |
+| `-itlawdlairtime` | From 0.7.0-alpha.4: measures where the time goes while the Mac sends to the iPhone (Mac not on AirDrop's channel, iPhone away, nothing to send, held back, frames waiting with the firmware's queue empty, queued) and publishes it as `ITLAWDLAirtime`. Diagnostic only; changes nothing about sending |
 | `-itlawdlpoolprobe` | Probes the `awdl0` packet pools once at start and publishes the result. Diagnostic only |
 | `-btlenoscan` | BTLEAdvFixup: advertising fixes only, without the scanning changes. For comparison |
 | `-itlawdlstatest` | **Test only.** From 0.7.0-alpha.2: once per boot, after AirDrop starts, the driver adds extra firmware stations (5 and up; 4 is the scheduler's) on the AirDrop listener with made-up addresses, notes how many the firmware accepts, and removes them again. `ITLAWDLStationTest` shows the result: how many Apple devices `-itlawdlmultipeer` could serve on your card. The firmware may restart if it objects |
