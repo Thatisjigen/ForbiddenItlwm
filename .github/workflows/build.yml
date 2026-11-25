@@ -117,24 +117,51 @@ jobs:
 
             -btleadv         BTLEAdvFixup needs it, otherwise it does nothing.
 
-            itlawdlsched=1   Experimental, and not recommended: it makes
-                              AirDrop transfers very slow (0.1 MB/s from an
-                              iPhone against 0.8 to 1.4 MB/s without it,
-                              upstream issue 103) and that is still open.
-                              Without it the driver behaves like
-                              0.6.0-beta.4: the AirDrop listener sits on
-                              its own channel and Intel's firmware shares
-                              the radio between it and the station by its
-                              own rule. With it macOS does the sharing, in
-                              a repeating cycle of 16 slots of about 65 ms,
-                              and picks a channel for each slot. The
-                              listener keeps the width of the station's
-                              channel and the search on channel 6 is off.
+            itlawdlsched=1   Experimental. Without it the driver behaves
+                              like 0.6.0-beta.4: the AirDrop listener sits
+                              on its own channel and Intel's firmware
+                              shares the radio between it and the station
+                              by its own rule. With it macOS does the
+                              sharing, in a repeating cycle of 16 slots of
+                              about 65 ms, and picks a channel for each
+                              slot: the router's one, the AirDrop one,
+                              channel 6 or none. The listener keeps the
+                              width of the station's channel and the
+                              search on channel 6 is off.
+
+                              It does not make WiFi faster. macOS gives
+                              the slots by what is happening: while an
+                              AirDrop transfer runs it takes about 11 of
+                              the 16 and WiFi about 4. The speed a WiFi
+                              link loses is the cost of AirDrop, and
+                              -itlawdloff is the only way to get it back.
+
+                              Use it with -itlawdlmultipeer. A report of
+                              0.1 MB/s from an iPhone with the scheduler
+                              on (upstream issue 103) came from a machine
+                              with seven Apple devices in range and without
+                              that flag, where the iPhone also lost the
+                              one Block Ack session; the two were not
+                              separated, and the maintainer is still
+                              waiting for a run with both flags on.
+
                               It needs an AX210 family card (not tested on
                               the AX200 family yet) and, on 0.7.0-alpha.2,
                               a network switch with it on restarts the
                               firmware; that is fixed in 0.7.0-alpha.3,
                               which this bundle is built from.
+
+            -itlawdlamsdurx
+                              Accept A-MSDU from Apple devices: when an
+                              Apple device packs several packets into one
+                              frame for its transfer to the Mac, the driver
+                              now agrees, as a real Mac's receiver can. The
+                              card already unpacks such frames on receive.
+                              It only helps the iPhone to Mac direction,
+                              the Mac still does not pack its own frames.
+                              The upstream project saw no clear speed
+                              change in its small test and asks for a
+                              timing of a large file with and without it.
 
             -itlawdlmultipeer
                               Add it when other Apple devices are nearby.
