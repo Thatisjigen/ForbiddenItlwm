@@ -71,6 +71,25 @@ int main() {
         assert(recordPatchedPage(pages, 0x100000 + i * kVerifyPage, page3.data(), patched3.data()));
     assert(pages.count == kMaxPatchedPages);
     assert(!recordPatchedPage(pages, 0x900000, page3.data(), patched3.data()) && pages.full == 1);
+    // A page validated again while still patched (the "Code Signature Invalid" kills): found by its offset and its
+    // exact patched bytes, so the hook can give the check the original bytes.
+    {
+        const uint64_t at = base + 3 * kVerifyPage;
+        const PatchedPage *p = patchedPageAt(pages, at, patched3.data());
+        assert(p && p->offset == at && !memcmp(p->original, page3.data(), kVerifyPage));
+        assert(!patchedPageAt(pages, at, page3.data()));                    // freshly read: original bytes
+        assert(!patchedPageAt(pages, at + kVerifyPage, patched3.data()));   // another offset
+        std::vector<uint8_t> other = patched3;
+        other[0] ^= 1;                                                      // neither original nor patched
+        assert(!patchedPageAt(pages, at, other.data()));
+        assert(!patchedPageAt(pages, at, nullptr));
+        // The restore-validate-repatch cycle leaves the page exactly as before.
+        std::vector<uint8_t> live = patched3;
+        memcpy(live.data(), p->original, kVerifyPage);
+        assert(!memcmp(live.data(), page3.data(), kVerifyPage));            // what validation hashes
+        memcpy(live.data(), p->patched, kVerifyPage);
+        assert(!memcmp(live.data(), patched3.data(), kVerifyPage));
+    }
     puts("btleadv_verify: passed");
     return 0;
 }

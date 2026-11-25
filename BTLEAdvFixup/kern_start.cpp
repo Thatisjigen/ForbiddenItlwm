@@ -22,6 +22,8 @@
 // Patches bluetoothd's pages as they're validated, the same way BlueToolFixup does.
 // Lilu's onProcLoad route was tried first and didn't apply to this process.
 static mach_vm_address_t orig_cs_validate {};
+// bluetoothd pages validated again while still patched, given their original bytes for the check (#62).
+static uint32_t revalidations {};
 static bool patchScanning {};
 // Experimental, off by default: -btleadvnodupfilter turns bluetoothd's scan duplicate filter off.
 static bool patchDuplicateFilter {};
@@ -47,8 +49,17 @@ static void patched_cs_validate_page(vnode_t vp, memory_object_t pager, memory_o
     }
     // The page as it came from disk, before any hook in the chain changes it.
     const bool keep = data && patchedPages && pageScratch && pagesLock;
+    // A page validated again while it still holds its patches (#62, "Code Signature Invalid"): it gets its original
+    // bytes back for the check, and its patches again after it.
+    const BTLEAdv::PatchedPage *again = nullptr;
     if (keep) {
         IOLockLock(pagesLock);
+        if (bluetoothdVnode == vp && bluetoothdVid == vnode_vid(vp))
+            again = BTLEAdv::patchedPageAt(*patchedPages, page_offset, static_cast<const uint8_t *>(data));
+        if (again) {
+            memcpy(const_cast<void *>(data), again->original, PAGE_SIZE);
+            __atomic_add_fetch(&revalidations, 1, __ATOMIC_RELAXED);
+        }
         memcpy(pageScratch, data, PAGE_SIZE);
     }
     FunctionCast(patched_cs_validate_page, orig_cs_validate)(vp, pager, page_offset, data, validated_p, tainted_p, nx_p);
@@ -59,6 +70,10 @@ static void patched_cs_validate_page(vnode_t vp, memory_object_t pager, memory_o
                                           patch.replace, patch.size);
     if (!keep)
         return;
+    // Every recorded patch back, BlueToolFixup's included when its hook isn't in this chain. Only after a validation
+    // that passed: a page that failed keeps the bytes it was checked with.
+    if (again && validated_p && *validated_p && !(tainted_p && *tainted_p))
+        memcpy(const_cast<void *>(data), again->patched, PAGE_SIZE);
     // A new vnode for the file has its own pages: the old records don't apply to it.
     const uint32_t vid = vnode_vid(vp);
     if (bluetoothdVnode != vp || bluetoothdVid != vid) {
@@ -142,6 +157,7 @@ struct VerifyArgs {
 };
 static mach_vm_address_t orig_apfs_verify {};
 static uint32_t verifyRescues {}, verifyRescueFailures {};
+
 static int patched_apfs_verify(VerifyArgs *args) {
     // Only checks of file data: no flags, or the filesystem's own context (VNODE_VERIFY_WITH_CONTEXT).
     if (LIKELY(!args || args->vp != bluetoothdVnode) || !args->buf || !args->bufsize || args->foffset < 0 ||
@@ -183,6 +199,7 @@ static void publishVerify(thread_call_param_t, thread_call_param_t) {
     noteHook("BTLEAdvPatchedPages", count);
     noteHook("BTLEAdvPatchedPagesFull", full);
     noteHook("BTLEAdvVerifyRescues", __atomic_load_n(&verifyRescues, __ATOMIC_RELAXED));
+    noteHook("BTLEAdvVerifyRevalidations", __atomic_load_n(&revalidations, __ATOMIC_RELAXED));
     noteHook("BTLEAdvVerifyRescueFailures", __atomic_load_n(&verifyRescueFailures, __ATOMIC_RELAXED));
 }
 
