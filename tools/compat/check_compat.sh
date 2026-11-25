@@ -57,6 +57,9 @@ OS_MAJOR=${OS_VER%%.*}
 OFFLINE_BUILDS="25G332 25G342"
 if [ "$OS_BUILD" = "$TESTED_BUILD" ]; then
     pass "Same build as the tested one ($TESTED_VERSION, $TESTED_BUILD)."
+elif [ "$OS_BUILD" = "25G422" ]; then
+    pass "macOS $OS_VER ($OS_BUILD, a 26.7.4 beta): on the list from 0.7.0-alpha.3, from a user's check-my-mac report;"
+    warn "the final 26.7.4 may be another build. 0.7.0-alpha.2 and older keep AirDrop off here."
 elif [ "$OS_BUILD" = "25G229" ] || [ "$OS_BUILD" = "25G330" ]; then
     pass "macOS $OS_VER ($OS_BUILD): its Wi-Fi stack was checked offline and is supported from 0.7.0-alpha.2;"
     warn "0.7.0-alpha.1 and older keep AirDrop off here. See the bluetoothd check below."
@@ -512,7 +515,7 @@ if [ -n "$MARKER" ]; then
     EXPERIMENTAL=""
     SIMULATION=""
     for t in $ARGS; do
-        case "$t" in itlawdlsched=*|itlsched*|-itlsched*|-btleadvnodupfilter|-itlawdlmultipeer|-itlawdlpeerhandoff|-itlawdlstatest) EXPERIMENTAL="$EXPERIMENTAL $t";; esac
+        case "$t" in itlawdlsched=*|itlsched*|-itlsched*|-btleadvnodupfilter|-itlawdlmultipeer|-itlawdlpeerhandoff|-itlawdlstatest|-itlawdlamsdurx|-itlwmwpa3) EXPERIMENTAL="$EXPERIMENTAL $t";; esac
         case "$t" in itlsim*|-itlsim*) SIMULATION="$SIMULATION $t";; esac
     done
     [ -n "$EXPERIMENTAL" ] && info "Experimental boot flags set:$EXPERIMENTAL. Mention them when you report a result."

@@ -8,7 +8,7 @@ ioreg -l -w0 | grep -E '"ItlwmAWDL(InterfaceBuild|BuildCheck)"|"ITLAWDLCoex(Adde
 
 | Key | Healthy value |
 | --- | --- |
-| `ItlwmAWDLInterfaceBuild` | `forbidden-` and the version you installed, for example `forbidden-0.7.0-alpha.2` (`-sequoia` or `-sonoma` added on those builds) |
+| `ItlwmAWDLInterfaceBuild` | `forbidden-` and the version you installed, for example `forbidden-0.7.0-alpha.3` (`-sequoia` or `-sonoma` added on those builds) |
 | `ItlwmAWDLBuildCheck` | `verified` (`expected: …` on a 15.8.x kernel that wasn't checked offline). Anything starting with `blocked` means AirDrop is off on this macOS build: see below |
 | `ITLAWDLCoexAdded` | Yes: the AirDrop listener exists |
 | `ITLAWDLCoexChannel`, `ITLAWDLCoexOwnWidth` | 149 and 80. From 0.6.0, 44 and 80 where your iPhone uses 44. 20 when your router is in the same 80 MHz block on another main channel; from 0.7.0-alpha.2 80 there too with `itlawdlsched=1`, once the scheduler runs |
@@ -22,7 +22,7 @@ The driver's log doesn't reach the unified log, so its state is only in the I/O 
 
 ## `ItlwmAWDLBuildCheck` says blocked
 
-The driver only starts AirDrop on macOS builds whose Wi-Fi stack was checked: Tahoe 26.7.1 to 26.7.3, Sequoia 15.8 to 15.8.3, and Sonoma 14.8.9. Up to 0.7.0-alpha.1, 15.8.1 and 15.8.2 start AirDrop but without the announcement copy, since only 15.8 and 15.8.3 are on the list; any other 15.8.x kernel starts as "expected". 0.7.0-alpha.2 adds 26.7 (25G229), 26.7.2's other build (25G330), 15.8.1, 15.8.2 (both builds), 15.7.3, 15.7.4, 15.7.8, 15.7.9, 14.8.3, 14.8.4, 14.8.7 and 14.8.8, all checked offline from Apple's Kernel Debug Kits or installers.
+The driver only starts AirDrop on macOS builds whose Wi-Fi stack was checked: Tahoe 26.7.1 to 26.7.3, Sequoia 15.8 to 15.8.3, and Sonoma 14.8.9. Up to 0.7.0-alpha.1, 15.8.1 and 15.8.2 start AirDrop but without the announcement copy, since only 15.8 and 15.8.3 are on the list; any other 15.8.x kernel starts as "expected". 0.7.0-alpha.2 adds 26.7 (25G229), 26.7.2's other build (25G330), 15.8.1, 15.8.2 (both builds), 15.7.3, 15.7.4, 15.7.8, 15.7.9, 14.8.3, 14.8.4, 14.8.7 and 14.8.8, all checked offline from Apple's Kernel Debug Kits or installers. 0.7.0-alpha.3 adds the 26.7.4 beta 25G422, from a user's `check-my-mac.pl` report.
 - **Nothing at all, and no ForbiddenItlwm keys:** check that you used the kexts for your macOS version. A ForbiddenItlwm built for another macOS version refuses to start, and logs `this kext is for macOS …`.
 - **`blocked: unverified macOS build`:** your build isn't on the list yet. Normal Wi-Fi still works. Please open an issue with your build (`sw_vers -buildVersion`) so it can be checked. `-itlawdlanybuild` forces AirDrop on anyway, announcement included from 0.6.0-beta.2, and from 0.7.0-alpha.2 the packet counters too, so the build works like a verified one. It's at the risk of a kernel panic, so use it only from a USB stick. Bluetooth still needs BTLEAdvFixup's patterns to match the build: `perl tools/check-my-mac.pl` shows whether they do.
 - **`blocked: IO80211AWDLProtocol table differs`:** the Wi-Fi stack isn't the one the driver was checked against. If you applied OpenCore Legacy Patcher's "Modern Wireless" root patches, revert them. Otherwise Apple changed the part of its Wi-Fi stack the driver plugs into. Starting AirDrop would likely panic, so no flag overrides this. Please report your build.

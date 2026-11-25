@@ -108,6 +108,8 @@ static uint32_t awdlCoexToken = 5, awdlCoexBaStatus, awdlCoexBaSessions, awdlCoe
 constexpr uint64_t kAwdlPeerTxRetryUS = 30000000ULL;
 static unsigned awdlCoexRateStep;
 static uint16_t awdlCoexBaSequence, awdlCoexLastMgmtEnqueueId;
+static bool awdlAmsduRx;
+static uint32_t awdlAmsduRxAsked, awdlAmsduRxNotAsked, awdlAmsduRxAllowed;
 static uint64_t awdlCoexTxPauseUntilUS;
 static uint8_t awdlCoexAddr[6] = {2, 9, 9, 9, 9, 9};
 static ItlAWDL::BaFilterState awdlCoexBaFilter;

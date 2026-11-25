@@ -386,6 +386,16 @@ bool itlResFlag(const char *name, uint32_t bit)
     return PE_parse_boot_argn(name, &dummy, sizeof(dummy)) || (itlAwdlSchedMask() & bit);
 }
 static uint64_t awdlUptimeUS();
+// -itlawdlamsdurx, experimental: answer an Apple device's ADDBA with A-MSDU allowed when it asks (iPhones do), as a
+// real Mac's receiver may. The firmware already splits A-MSDUs into MSDUs on receive (iwx_rx_mpdu_mq clears the
+// A-MSDU bit, the reorder buffer handles subframes), so each reaches the AWDL hand-off as a plain data frame.
+// ITLAWDLAmsduRx: requests that asked / didn't, answers that allowed it, and A-MSDU subframes received with AWDL's
+// BSSID (whether the AWDL parser then took them shows in the data counters).
+static bool awdlAmsduRx;
+static uint32_t awdlAmsduRxAsked, awdlAmsduRxNotAsked, awdlAmsduRxAllowed, awdlAmsduRxSubframes;
+// The station's receive Block Ack sessions (sc_rx_ba_sessions, mirrored for ITLRxBaSessions): the firmware's
+// receive sessions are one pool for the station and every AWDL peer, so the key shows them side by side.
+static uint32_t itlStationRxBa;
 static bool itlFwCrashRec;
 struct ItlFwCrashRecord {
     uint64_t upUS;
@@ -400,6 +410,14 @@ struct ItlFwCrashRecord {
     uint8_t histCount;
 };
 static ItlFwCrashRecord itlFwCrashRecords[4];
+// The newest crash's error tables as the firmware wrote them, in full: firmware 68 declares a 300-byte LMAC and a
+// 76-byte UMAC error table in its own debug TLVs, and the structs above read only the first 152 and 60 bytes
+// (#97, #87). Raw words, read from the same base right after the parsed read; not interpreted. Published as
+// ITLFwCrashRaw.
+static constexpr unsigned kItlFwRawLmacWords = 300 / 4, kItlFwRawUmacWords = 76 / 4;
+static uint32_t itlFwRawLmac[kItlFwRawLmacWords], itlFwRawUmac[kItlFwRawUmacWords];
+static uint8_t itlFwRawLmacCount, itlFwRawUmacCount;
+static uint64_t itlFwRawUS;
 // the last 16 host commands sent (with -itlfwcrashrec), copied into each crash record.
 static constexpr unsigned kItlFwCmdHist = 16;
 static uint32_t itlFwCmdHistCode[kItlFwCmdHist];
@@ -5316,6 +5334,7 @@ iwx_sta_rx_agg(struct iwx_softc *sc, struct ieee80211_node *ni, uint8_t tid,
         ieee80211_addba_req_accept(ic, ni, tid);
     } else if (sc->sc_rx_ba_sessions > 0)
         sc->sc_rx_ba_sessions--;
+    itlStationRxBa = uint32_t(sc->sc_rx_ba_sessions);
 
     splx(s);
     return 0;
@@ -7246,6 +7265,24 @@ static void awdlCoexPublish()
     auto *root = IORegistryEntry::getRegistryRoot();
     awdlChainPublish(root);
     root->setProperty("ITLAWDLCoexAdded", awdlCoexAdded);
+    {   // receive Block Ack sessions across the station and the AWDL peers (one firmware pool), and A-MSDU
+        unsigned awdlRx = 0, awdlPeersWithRx = 0;
+        for (unsigned i = 0; i < awdlPeerSlotsUsable; ++i) {
+            const unsigned n = unsigned(__builtin_popcount(awdlPeers[i].rxTids));
+            awdlRx += n;
+            awdlPeersWithRx += n ? 1 : 0;
+        }
+        char ba[160];
+        snprintf(ba, sizeof(ba), "station %u (its limit %u), awdl %u on %u peers, total %u; awdl declined for no room %u",
+                 itlStationRxBa, unsigned(IWX_MAX_RX_BA_SESSIONS), awdlRx, awdlPeersWithRx, itlStationRxBa + awdlRx,
+                 awdlCoexBaRxDeclined);
+        root->setProperty("ITLRxBaSessions", ba);
+        char am[160];
+        snprintf(am, sizeof(am), "%s; requests asked %u, not asked %u; allowed %u; awdl subframes received %u",
+                 awdlAmsduRx ? "on" : "off", awdlAmsduRxAsked, awdlAmsduRxNotAsked, awdlAmsduRxAllowed,
+                 awdlAmsduRxSubframes);
+        root->setProperty("ITLAWDLAmsduRx", am);
+    }
     root->setProperty("ITLAWDLCoexSameChannelProbeEnabled", awdlCoexSameChannelProbe.enabled);
     root->setProperty("ITLAWDLCoexSameChannelProbeLive", awdlCoexSameChannelProbe.applied);
     root->setProperty("ITLAWDLCoexSameChannelProbeOpens", awdlCoexSameChannelProbe.opens, 32);
@@ -10011,7 +10048,10 @@ awdlCoexBaRxPeer(struct iwx_softc *sc, ItlAWDL::PeerSlot &awdlPeer, int gen, uin
             awdlPeer.answerTid = request.tid;
             awdlPeer.answerRetryUS = 0;
             awdlPeer.answerLength = ItlAWDL::buildAddbaResponse(awdlPeer.answer, sizeof(awdlPeer.answer), request,
-                                                                 awdlCoexAddr, ++awdlCoexBaSequence);
+                                                                 awdlCoexAddr, ++awdlCoexBaSequence, 0, awdlAmsduRx);
+            ++(request.amsdu ? awdlAmsduRxAsked : awdlAmsduRxNotAsked);
+            if (awdlAmsduRx && request.amsdu)
+                ++awdlAmsduRxAllowed;
         }
     }
     const uint64_t answerNow = awdlUptimeUS();
@@ -12304,6 +12344,9 @@ iwx_rx_mpdu_mq(struct iwx_softc *sc, mbuf_t m, void *pktdata,
      */
     if (desc->mac_flags2 & IWX_RX_MPDU_MFLG2_AMSDU) {
         struct ieee80211_frame *wh = mtod(m, struct ieee80211_frame *);
+        static const uint8_t kAwdlBssidAmsdu[6] = {0x00, 0x25, 0x00, 0xff, 0x94, 0x73};
+        if (mbuf_len(m) >= 24 && !memcmp(wh->i_addr3, kAwdlBssidAmsdu, 6))
+            ++awdlAmsduRxSubframes;
         uint8_t subframe_idx = (desc->amsdu_info &
                                 IWX_RX_MPDU_AMSDU_SUBFRAME_IDX_MASK);
         if (subframe_idx > 0)
@@ -15393,8 +15436,7 @@ iwx_umac_scan_fill_channels(struct iwx_softc *sc,
         }
         
 #ifdef AIRPORT_WCL
-        if (AirportWCL::probeChannel(n_ssids != 0,
-                c->ic_flags & IEEE80211_CHAN_PASSIVE, c->ic_flags & IEEE80211_CHAN_DFS))
+        if (AirportWCL::umacScanSelectsSsid(n_ssids != 0))
 #else
         if (n_ssids != 0 && !bgscan)
 #endif
@@ -18278,6 +18320,17 @@ static void itlFwDiagPublish()
             hu += size_t(snprintf(hist + hu, sizeof(hist) - hu, " 0x%x/%u@-%u", r.histCode[k], r.histLen[k],
                                   r.histMsBefore[k]));
         root->setProperty("ITLFwCrashCmds", hist);
+        // The newest crash's full tables, raw (a word that read 0 is printed as 0).
+        static char raw[1024];   // static: this runs only from the coex task, and the stack already holds rec and hist
+        size_t ru = size_t(snprintf(raw, sizeof(raw), "crash at %llu ms: lmac %u words", (unsigned long long)(itlFwRawUS / 1000),
+                                    itlFwRawLmacCount));
+        for (unsigned k = 0; k < itlFwRawLmacCount && ru < sizeof(raw); ++k)
+            ru += size_t(snprintf(raw + ru, sizeof(raw) - ru, " %x", itlFwRawLmac[k]));
+        if (ru < sizeof(raw))
+            ru += size_t(snprintf(raw + ru, sizeof(raw) - ru, "; umac %u words", itlFwRawUmacCount));
+        for (unsigned k = 0; k < itlFwRawUmacCount && ru < sizeof(raw); ++k)
+            ru += size_t(snprintf(raw + ru, sizeof(raw) - ru, " %x", itlFwRawUmac[k]));
+        root->setProperty("ITLFwCrashRaw", raw);
     }
 }
 
@@ -22431,6 +22484,7 @@ iwx_nic_umac_error(struct iwx_softc *sc)
         r.ud2 = table.data2;
         r.ud3 = table.data3;
         r.ucmd = table.cmd_header;
+        itlFwRawUmacCount = iwx_read_mem(sc, base, itlFwRawUmac, kItlFwRawUmacWords) ? 0 : uint8_t(kItlFwRawUmacWords);
     }
     if (ERROR_START_OFFSET <= table.valid * ERROR_ELEM_SIZE) {
         XYLog("%s: Start UMAC Error Log Dump:\n", DEVNAME(sc));
@@ -22545,6 +22599,9 @@ iwx_nic_error(struct iwx_softc *sc)
             }
             r.histCount = uint8_t(total);
         }
+        itlFwRawUS = r.upUS;
+        itlFwRawUmacCount = 0;   // filled by iwx_nic_umac_error for this crash
+        itlFwRawLmacCount = iwx_read_mem(sc, base, itlFwRawLmac, kItlFwRawLmacWords) ? 0 : uint8_t(kItlFwRawLmacWords);
         ++itlFwCrashCount;
     }
     
@@ -25137,6 +25194,7 @@ iwx_attach(struct iwx_softc *sc, struct pci_attach_args *pa)
         awdlCoexNoSearch6 = itlResFlag("-itlawdlnosearch6", kItlResWork);
         awdlSchedSp = itlResFlag("-itlschedsp", kItlResWork);
         itlFwCrashRec = itlResFlag("-itlfwcrashrec", kItlResDiag);
+        awdlAmsduRx = PE_parse_boot_argn("-itlawdlamsdurx", &dummy, sizeof(dummy));
         // Part of itlawdlsched=1 (#26, #101: the user can't tell when the router's width or channel puts the
         // listener in an overlap). -itlschedoldoverlap keeps the old 20 MHz / skip rules, for comparison.
         {
