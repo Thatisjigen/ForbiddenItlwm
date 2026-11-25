@@ -11,6 +11,7 @@ The Tahoe, Sequoia and Sonoma builds use the same flags. Which ones you need dep
 ```
 
 - **Updating from an older release?** You don't have to change `boot-args`. Every flag of the old tested set is still read and changes nothing, so a leftover set works exactly like the defaults. A value you set yourself, such as `itlawdltxqueue=2048`, still wins.
+- **From 0.7.0-alpha.4, Block Ack refill is part of the set** (`-itlawdlcoexbarefill`): after each Block Ack from the iPhone, the next frames go to the firmware straight away instead of at the driver's next pass. In tests here it took 105 MB Mac → iPhone sends from 18.4 to 24.8 MB/s on average. `-itlawdlnocoexbarefill` turns it off.
 - **The experimental flags** (`itlawdlsched=1`, `-btleadvnodupfilter`, see [Experimental](#experimental)) are still off unless you add them.
 - **To turn AirDrop off** and keep normal Wi-Fi, add `-itlawdloff`. It wins over every other AirDrop flag, old ones and the experimental ones included, and the driver then behaves like AirportItlwm. `ItlwmAWDLBuildCheck` says "off: -itlawdloff". It doesn't touch BTLEAdvFixup: with `-btleadv` still set, the Mac and the iPhone can still list each other over Bluetooth, but transfers fail. Leave out `-btleadv` too to turn AirDrop off completely.
 - **To turn one flag of the set off,** add its name with `no` after `-itlawdl`: `-itlawdlnocoexmulti` turns `-itlawdlcoexmulti` off, for example. That wins over the flag itself. For troubleshooting only.
@@ -106,7 +107,8 @@ These restore earlier behaviour, for A/B testing only. Leave them off.
 | `-itlawdlnosharedba` | Turns off block ack when the listener shares your Wi-Fi's channel (without `-itlawdlcoexmulti`), as before 0.5.4 |
 | `itlawdlpooltype=N` | AirDrop packet pool type: 0 (quantum, Tahoe's default) or 1 (packet, the default on Sequoia and Sonoma from 0.5.1). Sequoia doesn't create `awdl0` with 0 |
 | `-itlawdlcoexnoorder` | Lets short frames overtake a paused aggregate queue, as older builds did |
-| `-itlawdlcoexbarefill`, `-itlawdlcoexawhold`, `-itlawdlcoexbafilterhyst`, `-itlawdlcoexawsync0` | Older experiments. No gain was measured |
+| `-itlawdlcoexawhold`, `-itlawdlcoexbafilterhyst`, `-itlawdlcoexawsync0` | Older experiments. No gain was measured |
+| `-itlawdlnocoexbarefill` | Turns off Block Ack refill (on by default from 0.7.0-alpha.4), so frames reach the firmware only at the driver's next pass, as before |
 
 ## Diagnostics and upstream flags
 
