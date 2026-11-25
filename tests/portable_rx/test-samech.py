@@ -142,4 +142,6 @@ a=s.index('iwx_rx_mpdu_mq(struct');b=s.index("\nvoid ItlIwx::",a);assert hashlib
 # timing calibration and BA setup remain unchanged. Receive address and length checks are unchanged.
 # Step 2b (-itlschedsecondtx only): sync frames heard during an executed second-channel visit also keep the peers'
 # schedules (still home presence; timing checked against the second channel's entries, never calibrated there).
-a=s.index('iwx_rx_frame(struct');b=s.index("\nvoid ItlIwx::",a);assert hashlib.sha256(s[a:b].encode()).hexdigest()=='237a8823b80b383fb742a842dc10f5ffd1acd3cbc96eef629cbb9ff63dcb9faf'
+# Step 2d (-itlschedsecondsync only): Block Ack requests, teardowns and answers are also accepted when heard during
+# an executed second-channel visit (the frame's own channel); the home-channel condition is unchanged.
+a=s.index('iwx_rx_frame(struct');b=s.index("\nvoid ItlIwx::",a);assert hashlib.sha256(s[a:b].encode()).hexdigest()=='24479569ccc526ae500dfcf876c17c5ac17be7bfd6058a08a4a83def27e647c5'

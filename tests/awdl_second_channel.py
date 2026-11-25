@@ -13,10 +13,14 @@ def function(signature):
 
 
 implementations = "\n".join([
+    function("static bool awdlPeerScheduleCurrent(const ItlAWDL::PeerSlot &p)\n{"),
+    function("static bool awdlCoexScheduleCurrent()\n{"),
+    function("static const ItlAWDL::PeerSchedule *awdlSlotSchedule("),
     function("static bool awdlSchedSecondAwayTxOpen()"),
     function("static bool awdlSchedSecondTxBlocked()"),
     function("static bool awdlSchedSecondSyncOn()"),
     function("static bool awdlSchedSecondSyncOpen()"),
+    function("static bool awdlSchedSecondHoldAtHome("),
     function("static bool awdlSchedSecondTxAllowed("),
     function("static bool awdlSchedSecondPeerThere("),
     function("static inline unsigned awdlCoexUnii("),
@@ -26,6 +30,7 @@ implementations = "\n".join([
     function("static bool awdlSchedSecondOwnsPhy()"),
     function("bool ItlIwx::\nawdlSchedSecondRetune("),
     function("void ItlIwx::\nawdlSchedFollowTask("),
+    function("void ItlIwx::\nawdlSchedSecondMgmtStep("),
 ])
 
 program = r'''
@@ -38,6 +43,7 @@ program = r'''
 #include <AWDLSessionFollow.hpp>
 #include <AWDLPeerSlot.hpp>
 #include <AWDLTxPass.hpp>
+#include <AWDLObservation.hpp>
 #define nitems(x) (sizeof(x) / sizeof((x)[0]))
 enum { IEEE80211_CHAN_DFS = 1, IEEE80211_CHAN_PASSIVE = 2, IEEE80211_CHAN_NOADHOC = 4,
        IWX_PHY_VHT_CHANNEL_MODE20 = 0, IWX_PHY_VHT_CHANNEL_MODE80 = 2,
@@ -88,6 +94,7 @@ static bool widthFits = true; static uint8_t widthAllowed = 2;
 struct iwx_softc;
 static bool awdlCoexWidthFor(iwx_softc *, unsigned, bool, uint8_t *w, uint8_t *) { *w = widthAllowed; return widthFits; }
 static ItlAWDL::PeerSlot awdlPeers[ItlAWDL::kMaxPeerSlots];
+static ItlAWDL::PeerSlot &awdlPeer = awdlPeers[0];
 static uint64_t awdlUptimeUS() { return nowUS; }
 static void awdlSchedSpPublish() {}
 static unsigned commands;
@@ -107,6 +114,15 @@ static constexpr uint64_t kAwdlSchedSecondTxStopUS = 4000;
 static uint32_t awdlSchedSecondPausedPass, awdlSchedSecondPauseUnsettled;
 static constexpr uint64_t kAwdlSchedSecondPauseSettleUS = 6000;
 static bool awdlSchedSecondSync;
+static ItlAWDL::PeerSchedule awdlCoexPeerSchedule;
+static uint8_t awdlCoexSchedPeer[6];
+static uint32_t awdlCoexSchedToken, awdlSchedSecondAnswersSent, awdlCoexBaAnswers, awdlCoexBaAnswerErrors;
+static unsigned awdlSchedSecondNow, awdlPeerSlotsUsable = 2;
+static int awdlCoexBaGen = 7;
+enum { kCoexSlotBaAnswer = 3 };
+#define ITL_AWDL_NATIVE 1
+static unsigned mgmtSends; static bool mgmtFail;
+static bool awdlSchedSecondSyncOpen();
 static unsigned awdlSchedFollowFired, awdlSchedOffStale, awdlSchedFollowStale, awdlSchedFollowLateN, awdlSchedFollowAligned;
 static ItlAWDL::Clock awdlSchedFollowArmedClock, awdlSchedPlanClockNow;
 static uint32_t awdlCoexChannel = 149;
@@ -127,6 +143,11 @@ public:
     WorkLoop *getMainWorkLoop() { return &loop; }
     Gate *getMainCommandGate() { return &gate; }
     bool awdlSchedSecondRetune(iwx_softc *, unsigned);
+    void awdlSchedSecondMgmtStep(iwx_softc *);
+    bool awdlCoexSendMgmt(iwx_softc *, const uint8_t *frame, size_t, uint8_t kind, bool visit) {
+        assert(visit && kind == kCoexSlotBaAnswer && awdlSchedSecondSyncOpen() && awdlSchedSecondPass.contains(frame + 4));
+        ++mgmtSends; return !mgmtFail;
+    }
     static void awdlSchedFollowTask(void *);
     int awdlSchedSpSend(iwx_softc *, uint32_t duration) { ++sessionCalls; sessionDuration=duration; return 0; }
     int awdlCoexBaRemoveAllPeers(iwx_softc *) { assert(!awdlSchedSecondSwitching && peerRemoves == commands); ++peerRemoves; return peerRemoveError; }
@@ -432,6 +453,72 @@ int main() {
         assert(driver.awdlSchedSecondRetune(&sc, 149) && !awdlSchedSecondTuned);
         assert(awdlSchedSecondTxAllowed(group, true));                                     // home: as before
         awdlSchedSecondSync = awdlSchedSecondTx = false; awdlSchedSpPlannedEndUS = 0;
+    }
+    {   // step 2d: a Block Ack answer for a peer whose schedule has it on the second channel waits at home and goes
+        // out during the next open visit, only to that peer; anyone else (or no schedule) is served at home.
+        static const uint8_t peerA[6] = {2, 0xa, 0, 0, 0, 1};
+        ItlAWDL::PeerSyncInfo info{}; info.awPeriodTU = 16; info.downCounterTU = 10;
+        for (unsigned i = 0; i < 16; ++i) info.channels[i] = 44;            // a peer only on 44
+        reset(sc); awdlSchedSecondTx = awdlSchedSecondSync = true; awdlSchedSecondNow = 44;
+        ItlAWDL::PeerSlot &p = awdlPeers[1];
+        p.added = true; memcpy(p.addr, peerA, 6); p.scheduleToken = awdlCoexToken;
+        p.schedule.reset(); p.schedule.assumeZero = true;
+        assert(!awdlSchedSecondHoldAtHome(p, nowUS));                       // no schedule yet: served at home
+        p.schedule.note(info, nowUS, 149);
+        assert(awdlSlotSchedule(p) == &p.schedule && awdlSchedSecondHoldAtHome(p, nowUS));
+        awdlSchedSecondSync = false;                                       // without the flag: as before
+        assert(!awdlSchedSecondHoldAtHome(p, nowUS));
+        awdlSchedSecondSync = true; awdlSchedSecondNow = 0;                 // no second channel this plan
+        assert(!awdlSchedSecondHoldAtHome(p, nowUS));
+        awdlSchedSecondNow = 44;
+        for (unsigned i = 0; i < 16; ++i) info.channels[i] = 149;           // on home now: served at home
+        p.schedule.note(info, nowUS, 149);
+        assert(!awdlSchedSecondHoldAtHome(p, nowUS));
+        for (unsigned i = 0; i < 16; ++i) info.channels[i] = 6;             // elsewhere (6): not held for the visit
+        p.schedule.note(info, nowUS, 149);
+        assert(!awdlSchedSecondHoldAtHome(p, nowUS));
+        for (unsigned i = 0; i < 16; ++i) info.channels[i] = 44;
+        p.schedule.note(info, nowUS, 149);
+        // slot 0 uses the schedule peer's schedule, only while that is the same peer
+        ItlAWDL::PeerSlot &z = awdlPeers[0];
+        z.added = true; memcpy(z.addr, peerA, 6);
+        awdlCoexSchedToken = awdlCoexToken; awdlCoexPeerSchedule = p.schedule; memcpy(awdlCoexSchedPeer, peerA, 6);
+        assert(awdlSlotSchedule(z) == &awdlCoexPeerSchedule && awdlSchedSecondHoldAtHome(z, nowUS));
+        awdlCoexSchedPeer[5] = 9;
+        assert(!awdlSlotSchedule(z));
+        z = ItlAWDL::PeerSlot{};
+        // the visit: held answer sent once, only while open and to a peer on the pass list
+        static uint8_t answer[33] = {0xd0, 0, 0, 0, 2, 0xa, 0, 0, 0, 1};
+        memcpy(p.answer, answer, sizeof(answer)); p.answerLength = 33; p.answerRetryUS = 0;
+        mgmtSends = 0; awdlSchedSecondAnswersSent = 0;
+        driver.awdlSchedSecondMgmtStep(&sc);                               // home: nothing
+        assert(!mgmtSends && p.answerLength);
+        assert(driver.awdlSchedSecondRetune(&sc, 44));
+        awdlSchedSpPlannedEndUS = nowUS + 50000;
+        awdlSchedSecondPass.clear(); awdlSchedSecondPass.active = true;
+        driver.awdlSchedSecondMgmtStep(&sc);                               // nobody on the list: nothing
+        assert(!mgmtSends);
+        awdlSchedSecondPass.add(peerA);
+        mgmtFail = true;
+        driver.awdlSchedSecondMgmtStep(&sc);                               // failed: retried 5 ms later
+        assert(mgmtSends == 1 && p.answerLength && p.answerRetryUS == nowUS + 5000 && awdlCoexBaAnswerErrors);
+        driver.awdlSchedSecondMgmtStep(&sc);
+        assert(mgmtSends == 1);
+        nowUS += 5000; mgmtFail = false;
+        driver.awdlSchedSecondMgmtStep(&sc);
+        assert(mgmtSends == 2 && !p.answerLength && awdlSchedSecondAnswersSent == 1);
+        driver.awdlSchedSecondMgmtStep(&sc);                               // sent once
+        assert(mgmtSends == 2);
+        p.answerLength = 33; awdlSchedSecondSync = false;                   // flag off: nothing during a visit
+        driver.awdlSchedSecondMgmtStep(&sc);
+        assert(mgmtSends == 2);
+        awdlSchedSecondSync = true; sc.sc_generation = 8;                  // another generation: nothing
+        driver.awdlSchedSecondMgmtStep(&sc);
+        assert(mgmtSends == 2);
+        sc.sc_generation = 7;
+        awdlSchedSecondPass.clear(); p = ItlAWDL::PeerSlot{};
+        assert(driver.awdlSchedSecondRetune(&sc, 149));
+        awdlSchedSecondSync = awdlSchedSecondTx = false; awdlSchedSpPlannedEndUS = 0; awdlSchedSecondNow = 0;
     }
     {   // step 2b: a peer is "there" only during an open visit and when its schedule names the tuned channel now
         ItlAWDL::PeerSchedule s{}; s.assumeZero = true;

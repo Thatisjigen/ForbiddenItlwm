@@ -638,6 +638,9 @@ static uint32_t awdlSchedSecondPauseUnsettled;
 // a refused or failed retune stops it, so we never keep advertising a channel we don't go to.
 static bool awdlSchedSecondSync;
 static uint32_t awdlSchedSecondSyncSent, awdlSchedSecondAdvertised;
+// Step 2d (with -itlschedsecondsync): Block Ack frames heard during a visit (requests, teardowns, answers); our
+// answers held at home because the peer's schedule has it on the second channel then, and answers sent there.
+static uint32_t awdlSchedSecondBaRx, awdlSchedSecondAnswersHeld, awdlSchedSecondAnswersSent;
 static unsigned awdlSchedFollowArmedChannel;
 static uint32_t awdlSchedFollowArmedToken, awdlSchedFollowArmedPlan;
 static ItlAWDL::Clock awdlSchedFollowArmedClock;
@@ -7163,6 +7166,14 @@ static bool awdlCoexScheduleCurrent()
         awdlCoexPeerSchedule.ourChannel == awdlCoexChannel &&
         (!awdlPeer.added || ItlAWDL::sameAddress(awdlCoexSchedPeer, awdlPeer.addr));
 }
+
+static const ItlAWDL::PeerSchedule *awdlSlotSchedule(const ItlAWDL::PeerSlot &p)
+{
+    if (&p == &awdlPeers[0])
+        return awdlCoexScheduleCurrent() && ItlAWDL::sameAddress(awdlCoexSchedPeer, p.addr) ? &awdlCoexPeerSchedule :
+            nullptr;
+    return awdlPeerScheduleCurrent(p) ? &p.schedule : nullptr;
+}
 static uint32_t awdlCoexPeerSyncFrames, awdlCoexAwSyncFrames, awdlCoexIdleSyncFrames;
 static uint32_t awdlCoexPeerSequenceRejected;
 static bool awdlCoexScheduleCalibrated;
@@ -8320,6 +8331,24 @@ static bool awdlSchedSecondSyncOpen()
     return awdlSchedSecondSyncOn() && awdlSchedSecondAwayTxOpen();
 }
 
+// Step 2d: the schedule we keep for a slot's peer, or null: slot 0's is the schedule peer's while that is the same
+// peer, a further slot's its own.
+static bool awdlPeerScheduleCurrent(const ItlAWDL::PeerSlot &p);
+static bool awdlCoexScheduleCurrent();
+static const ItlAWDL::PeerSchedule *awdlSlotSchedule(const ItlAWDL::PeerSlot &p);
+
+// Step 2d: at home, whether a frame for this peer should wait for the next visit: with -itlschedsecondsync, its
+// fresh schedule has it on the second channel we visit now (a frame sent here would go to an empty channel). A
+// peer with no known schedule, or anywhere else, is served at home as before.
+static bool awdlSchedSecondHoldAtHome(const ItlAWDL::PeerSlot &p, uint64_t nowUS)
+{
+    if (!awdlSchedSecondSyncOn() || awdlSchedSecondTuned || !awdlSchedSecondNow)
+        return false;
+    const ItlAWDL::PeerSchedule *where = awdlSlotSchedule(p);
+    const uint8_t ch = where ? where->channelAt(nowUS) : 0;
+    return ch && ch != awdlCoexChannel && ch == awdlSchedSecondNow;
+}
+
 // Home-channel traffic must never enter a firmware queue during a retune or a listen-only visit. With
 // -itlschedsecondtx an open visit lets the pass list's peers' data through (awdlSchedSecondTxAllowed).
 static bool awdlSchedSecondTxBlocked()
@@ -8879,6 +8908,7 @@ awdlCoexTxTask(void *arg)
             for (unsigned i = 1; i < awdlPeerSlotsUsable; ++i)
                 that->awdlCoexPeerPauseStep(sc, awdlPeers[i]);
             that->awdlCoexDataPump(sc);
+            that->awdlSchedSecondMgmtStep(sc);   // step 2d: held Block Ack answers, on the second channel
         }
         if (awdlCoexBaTraceEnabled && !awdlStopping && awdlCoexAdded && awdlCoexGeneration == sc->sc_generation) {
             const uint64_t now = awdlUptimeUS();
@@ -9657,11 +9687,18 @@ awdlCoexBaAddPeer(struct iwx_softc *sc, ItlAWDL::PeerSlot &awdlPeer, const uint8
 
 // Sends one of our 33-byte Block Ack frames from the listener's queue, tagged as management.
 bool ItlIwx::
-awdlCoexSendMgmt(struct iwx_softc *sc, const uint8_t *frame, size_t length, uint8_t kind)
+awdlCoexSendMgmt(struct iwx_softc *sc, const uint8_t *frame, size_t length, uint8_t kind, bool visit)
 {
     struct ieee80211com *ic = &sc->sc_ic;
-    if (awdlSchedSecondTxBlocked() || (awdlSchedSecond && awdlSchedSecondTuned) || awdlUptimeUS() < awdlCoexTxPauseUntilUS)
+    if (visit) {
+        // Step 2d: during an open visit with -itlschedsecondsync, to a peer on the pass list (there now).
+        if (!awdlSchedSecondSyncOpen() || length < 10 || !awdlSchedSecondPass.contains(frame + 4) ||
+            awdlUptimeUS() < awdlCoexTxPauseUntilUS)
+            return false;
+    } else if (awdlSchedSecondTxBlocked() || (awdlSchedSecond && awdlSchedSecondTuned) ||
+               awdlUptimeUS() < awdlCoexTxPauseUntilUS) {
         return false;   // management and Block Ack frames wait for home
+    }
     if (awdlCoexQueue < 0 || awdlCoexQueue >= int(nitems(sc->txq)) || sc->txq[awdlCoexQueue].queued >= 64)
         return false;
     mbuf_t m = nullptr;
@@ -9689,6 +9726,33 @@ awdlCoexSendMgmt(struct iwx_softc *sc, const uint8_t *frame, size_t length, uint
         return false;
     }
     return true;
+}
+
+// Step 2d (-itlschedsecondsync): during an open visit, a Block Ack answer held for a peer that is there now goes
+// out on this channel (the same answer, built and committed to the firmware at home). Its station and receive
+// session were set up at home; only the frame waits. A failed send retries after 5 ms, as at home after 20 ms.
+void ItlIwx::
+awdlSchedSecondMgmtStep(struct iwx_softc *sc)
+{
+#if defined(ITL_AWDL_NATIVE)
+    if (!awdlSchedSecondSyncOpen() || !awdlSchedSecondPass.active || !awdlSchedSecondPass.count ||
+        !awdlCoexAdded || awdlCoexGeneration != sc->sc_generation || awdlCoexBaGen != sc->sc_generation)
+        return;
+    const uint64_t now = awdlUptimeUS();
+    for (unsigned i = 0; i < awdlPeerSlotsUsable && i < ItlAWDL::kMaxPeerSlots; ++i) {
+        ItlAWDL::PeerSlot &p = awdlPeers[i];
+        if (!p.added || !p.answerLength || now < p.answerRetryUS || !awdlSchedSecondPass.contains(p.addr))
+            continue;
+        if (awdlCoexSendMgmt(sc, p.answer, p.answerLength, kCoexSlotBaAnswer, true)) {
+            ++awdlCoexBaAnswers;
+            ++awdlSchedSecondAnswersSent;
+            p.answerLength = 0;
+        } else {
+            ++awdlCoexBaAnswerErrors;
+            p.answerRetryUS = now + 5000ULL;
+        }
+    }
+#endif
 }
 
 // Only the AWDL peer station's aggregate queue is paused. The listener's
@@ -10094,6 +10158,12 @@ awdlCoexBaRxPeer(struct iwx_softc *sc, ItlAWDL::PeerSlot &awdlPeer, int gen, uin
     }
     const uint64_t answerNow = awdlUptimeUS();
     if (awdlPeer.answerLength && stillOurs() && answerNow >= awdlCoexTxPauseUntilUS &&
+        answerNow >= awdlPeer.answerRetryUS && awdlSchedSecondHoldAtHome(awdlPeer, answerNow)) {
+        // Step 2d: the peer is on the second channel now; the answer goes there on the next visit
+        // (awdlSchedSecondMgmtStep), not to an empty channel here.
+        ++awdlSchedSecondAnswersHeld;
+        awdlPeer.answerRetryUS = answerNow + 5000ULL;
+    } else if (awdlPeer.answerLength && stillOurs() && answerNow >= awdlCoexTxPauseUntilUS &&
         answerNow >= awdlPeer.answerRetryUS) {
         if (awdlCoexSendMgmt(sc, awdlPeer.answer, awdlPeer.answerLength, kCoexSlotBaAnswer)) {
             ++awdlCoexBaAnswers;
@@ -11578,8 +11648,13 @@ iwx_rx_frame(struct iwx_softc *sc, mbuf_t m, int chanidx,
                 bool delbaPeerWasSender = false;
                 uint8_t delbaTid = 0;
                 ItlAWDL::PeerSlot *delbaSlot = nullptr;
+                // Step 2d (-itlschedsecondsync): also during an executed second-channel visit, where a peer that is
+                // only there asks for Block Ack. The frame's own channel says where it was heard.
+                const bool baThere = chanValid && awdlSchedSecondSyncOn() &&
+                    awdlSchedSecondReceiveChannel(ic, unsigned(chanidx));
                 if (awdlCoexData && awdlCoexAddrKnown && !mbuf_next(m) && chanValid &&
-                    unsigned(chanidx) == awdlCoexChannel && awdlCoexPeerKnown(cf + 10, awdlUptimeUS())) {
+                    (unsigned(chanidx) == awdlCoexChannel || baThere) && awdlCoexPeerKnown(cf + 10, awdlUptimeUS())) {
+                    awdlSchedSecondBaRx += baThere;
                     if (ItlAWDL::parseAddbaRequest(cf, coexLen, awdlCoexAddr, &request) && awdlFrame) {
                         ++awdlCoexBaRequests;
                         awdlCoexBaEvent('Q', request.token, request.tid, 0);
@@ -18709,7 +18784,7 @@ static void awdlSchedSpPublish()
         if (awdlSchedSecond) {
             // -itlschedsecond: the second channel's runs and what retuning the listener's PHY cost.
             const uint32_t retunes = awdlSchedSecondAway + awdlSchedSecondHome;
-            char sec[1024];
+            char sec[1280];
             snprintf(sec, sizeof(sec),
                      "%s%s second %u%s; runs %u, retunes away %u home %u (mean %llu us, max %llu us), refused %u "
                      "(last ch %u why 0x%x flags 0x%x), "
@@ -18717,7 +18792,8 @@ static void awdlSchedSpPublish()
                      "variant %u: settle waits %u, peer removals %u, MAC errors %u; "
                      "tx there %s: sent %u, refused %u, not open %u, nobody there %u, peers there peak %u; "
                      "schedules there %u, pauses lifted %u, paused queues passed %u (too recent %u); "
-                     "sync there %s: advertised %u, sync frames sent %u",
+                     "sync there %s: advertised %u, sync frames sent %u; "
+                     "block ack there: frames heard %u, answers held at home %u, answers sent there %u",
                      awdlSchedSecondBootOff ? "off for this boot (a retune failed), " :
                      awdlSchedSecondOffGen >= 0 && awdlSchedSecondOffGen == awdlSchedSpGen ? "off for this generation, " : "",
                      awdlSimSecondChan ? "[SIMULATION]" : "on", awdlSchedSecondNow,
@@ -18733,7 +18809,8 @@ static void awdlSchedSpPublish()
                      awdlSchedSecondTxSent, awdlSchedSecondTxRefused, awdlSchedSecondTxNearEnd, awdlSchedSecondTxIdle,
                      awdlSchedSecondPassPeak, awdlSchedSecondSchedFrames, awdlSchedSecondPeerHere,
                      awdlSchedSecondPausedPass, awdlSchedSecondPauseUnsettled, awdlSchedSecondSync ? "on" : "off",
-                     awdlSchedSecondAdvertised, awdlSchedSecondSyncSent);
+                     awdlSchedSecondAdvertised, awdlSchedSecondSyncSent, awdlSchedSecondBaRx,
+                     awdlSchedSecondAnswersHeld, awdlSchedSecondAnswersSent);
             IORegistryEntry::getRegistryRoot()->setProperty("ITLAWDLSchedSecond", sec);
         }
     }

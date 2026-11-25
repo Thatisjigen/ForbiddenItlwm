@@ -96,6 +96,8 @@ static bool awdlCoexBaPeerPauseEnabled = true, awdlCoexMovePending, awdlCoexTxHa
 // Step 2b (-itlschedsecondtx) is off here: no peer is ever on a visited second channel.
 static uint32_t awdlSchedSecondPeerHere;
 static bool awdlSchedSecondPeerThere(ieee80211com *, const ItlAWDL::PeerSchedule &, uint64_t) { return false; }
+static uint32_t awdlSchedSecondAnswersHeld;
+static bool awdlSchedSecondHoldAtHome(const ItlAWDL::PeerSlot &, uint64_t) { return false; }   // step 2d off
 static int awdlCoexBaGen = 7;
 static unsigned awdlCoexChannel = 149;
 constexpr uint64_t kAwdlGateAwWindowUS = 4000, kAwdlGateAwakeUS = 100000;
