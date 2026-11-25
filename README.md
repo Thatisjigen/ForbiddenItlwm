@@ -6,7 +6,7 @@
 
 **AirDrop for Intel Wi-Fi cards on macOS.** ForbiddenItlwm is a fork of AirportItlwm that adds AWDL, the peer-to-peer Wi-Fi link AirDrop runs on. Apple's own Wi-Fi stack does the rest. Normal Wi-Fi stays connected while AirDrop works.
 
-> **New alpha: [0.7.0-alpha.2](https://github.com/retropineaple/ForbiddenItlwm/releases/tag/v0.7.0-alpha.2).** For testers: AirDrop now needs only `-btleadv` in `boot-args`; the driver turns the rest on by itself. The experimental scheduler also runs on AX200-family cards and keeps AirDrop at 80 MHz beside your router, and a new experimental flag gives each nearby Apple device its own fast session. The experimental parts stay off unless you add their [boot flags](docs/BOOT-FLAGS.md#experimental).
+> **New alpha: [0.7.0-alpha.3](https://github.com/retropineaple/ForbiddenItlwm/releases/tag/v0.7.0-alpha.3).** For testers: fixes for 0.7.0-alpha.2's experimental multi-device mode and for switching Wi-Fi networks with the scheduler on, opt-in WPA3 (`-itlwmwpa3`), a fix for a firmware crash while scanning (#69), a Bluetooth address fix (BTLEAdvFixup 0.9.7, #102) and a new experimental flag that accepts packed frames (A-MSDU) from Apple devices. AirDrop still needs only `-btleadv` in `boot-args`; the experimental parts stay off unless you add their [boot flags](docs/BOOT-FLAGS.md#experimental). See the [CHANGELOG](CHANGELOG.md).
 
 > **Public beta: [0.6.0-beta.4](https://github.com/retropineaple/ForbiddenItlwm/releases/tag/v0.6.0-beta.4).** Works on macOS Tahoe 26.7.x and Sequoia 15.8.x, with a Sonoma 14.8.9 test build. Each macOS version has its own kexts. Fixes come out often: before reporting a problem, update to the newest release (**Watch → Custom → Releases** to be notified).
 
@@ -41,7 +41,7 @@ Users also report **AirPlay** working over this driver, from an iPad to the hack
 
 | macOS | Builds | AirDrop |
 | --- | --- | --- |
-| Tahoe | 26.7.1, 26.7.2, 26.7.3; 26.7 from 0.7.0-alpha.2 | Works (tested on 26.7.1, users on 26.7.2 and 26.7.3). 0.7.0-alpha.2 adds 26.7 (25G229, the same Wi-Fi stack and kernel as 26.7.1) and 26.7.2's other build (25G330), checked offline |
+| Tahoe | 26.7.1, 26.7.2, 26.7.3; 26.7 from 0.7.0-alpha.2; 26.7.4 beta (25G422) from 0.7.0-alpha.3 | Works (tested on 26.7.1, users on 26.7.2 and 26.7.3). 0.7.0-alpha.2 adds 26.7 (25G229, the same Wi-Fi stack and kernel as 26.7.1) and 26.7.2's other build (25G330), checked offline. 0.7.0-alpha.3 adds the 26.7.4 beta 25G422 from a user's check-my-mac report; the final 26.7.4 may be another build |
 | Sequoia | 15.8, 15.8.1, 15.8.2, 15.8.3; 15.7.3, 15.7.4, 15.7.8, 15.7.9 from 0.7.0-alpha.2 | Works from 0.5.1-test1 (users on 15.8.1 to 15.8.3). Up to 0.7.0-alpha.1, 15.8.1 and 15.8.2 weren't on the list, so the announcement copy stays off there (from 0.6.0-beta.1) and other devices may not list the Mac. 0.7.0-alpha.2 adds them, checked offline (15.8.1 runs 15.8's Wi-Fi stack, 15.8.2 15.8.3's), and 15.7.3, 15.7.4, 15.7.8 and 15.7.9 (the same AirDrop code as 15.8, and new BTLEAdvFixup patterns for 15.7.3, 15.7.8 and 15.7.9) |
 | Sonoma | 14.8.9; 14.8.3, 14.8.4, 14.8.7, 14.8.8 from 0.7.0-alpha.2 | Test build. From 0.6.0-beta.3 macOS creates `awdl0`, and one user reports AirDrop working both ways on an AX200 at 5–7 MB/s ([PR #77](https://github.com/retropineaple/ForbiddenItlwm/pull/77), [#55](https://github.com/retropineaple/ForbiddenItlwm/issues/55)). Not tested here. 0.7.0-alpha.2 adds 14.8.3, 14.8.4, 14.8.7 and 14.8.8, checked offline, with new BTLEAdvFixup patterns for 14.8.7 |
 

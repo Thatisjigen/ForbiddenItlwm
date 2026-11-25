@@ -64,6 +64,10 @@ int main() {
     assert(buildPairVerified(k1, "25G241") && buildPairVerified(k2, "25G332") && buildPairVerified(k2, "25G342"));
     assert(!buildPairVerified(k2, "25G350") && !buildPairVerified(k2, "") && !buildPairVerified(k2, nullptr));
     assert(!buildPairVerified(k1, "25G332") && !buildPairVerified(kx, "25H10"));
+    // 26.7.4 beta (25G422) with its own kernel; not on another build or kernel.
+    const char *k3 = "Darwin Kernel Version 25.6.0: root:xnu-12377.161.15.702.20~1/RELEASE_X86_64";
+    assert(checkBuild(k3, "25G422") == BuildCheck::Verified && buildPairVerified(k3, "25G422"));
+    assert(!buildPairVerified(k2, "25G422") && !buildPairVerified(k3, "25G342"));
     assert(checkBuild(kx, "25H10") == BuildCheck::UnknownKernel);
     assert(checkBuild(kx, "") == BuildCheck::UnknownKernel);
     assert(checkBuild(nullptr, "25G241") == BuildCheck::UnknownKernel);

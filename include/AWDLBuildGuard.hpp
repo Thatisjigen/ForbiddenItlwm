@@ -9,7 +9,9 @@
 // Tahoe: 25G241 on hardware; 25G229, 25G330, 25G332 and 25G342 offline, from Apple's Kernel Debug Kits
 // (IOSkywalkFamily identical, IO80211Family's AWDL, interface, buffer and registration code
 // instruction-identical, all virtual table slots and all kernel imports matching). 25G229 carries 25G241's
-// kernel and IO80211Family; 25G330 is binary-identical to 25G332.
+// kernel and IO80211Family; 25G330 is binary-identical to 25G332. 25G422 (26.7.4 beta, from 0.7.0-alpha.3) from a
+// user's tools/check-my-mac.pl report: its IO80211Family code differs from 26.7.1's, but the six IO80211 tables'
+// sizes and names, the AWDL layouts it checks and every import of the kext the user ran match.
 // Sequoia: 24H23 (15.8) and 24H241 (15.8.3) offline, from their Kernel Debug Kits (identical
 // IO80211Family virtual tables; the AWDL subclass audited against them). 24H32 is binary-identical to 24H23,
 // and 24H230 and 24H232 carry 24H241's kernel and IO80211Family. The 15.7.x builds 24G419, 24G517 and 24G830:
@@ -62,6 +64,7 @@ constexpr VerifiedBuild kVerifiedBuilds[] = {
     {"25G330", "xnu-12377.161.15.701.48~2/RELEASE_X86_64"},   // macOS 26.7.2
     {"25G332", "xnu-12377.161.15.701.48~2/RELEASE_X86_64"},   // macOS 26.7.2
     {"25G342", "xnu-12377.161.15.701.48~2/RELEASE_X86_64"},   // macOS 26.7.3
+    {"25G422", "xnu-12377.161.15.702.20~1/RELEASE_X86_64"},   // macOS 26.7.4 beta (check-my-mac report)
 };
 #endif
 

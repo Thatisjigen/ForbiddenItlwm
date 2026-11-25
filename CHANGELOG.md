@@ -2,6 +2,38 @@
 
 **Release names.** `x.y.z-stage.n`: `alpha` releases bring new or untested changes for testers; `beta` releases are tested on the project's hackintosh; `n` counts the builds of one version. `z` counts fixes after a stable release, so it stays 0 until a version is declared stable, and 1.0.0 will be the first stable release. Releases up to 0.5.3 were named `-test1` (now alpha) and `-beta1`.
 
+## 0.7.0-alpha.3
+
+Fixes for 0.7.0-alpha.2's experimental flags, two fixes found by testers, opt-in WPA3, and new diagnostics. Without the experimental flags the driver behaves as in 0.7.0-alpha.2. **BTLEAdvFixup 0.9.7.**
+
+**macOS builds:** Tahoe 26.7.4 beta (25G422) is added, from fabio1922's `check-my-mac.pl` report in [discussion #98](https://github.com/retropineaple/ForbiddenItlwm/discussions/98): its Wi-Fi code differs from 26.7.1's, but the six IO80211 tables, the AWDL layouts the driver depends on and every import match, and BTLEAdvFixup's 26.7.3 patterns match its `bluetoothd`. The final 26.7.4 may be another build; please run `check-my-mac.pl` on it.
+
+**Wi-Fi**
+- **WPA3-Personal (SAE), opt-in with `-itlwmwpa3`** ([PR #82](https://github.com/retropineaple/ForbiddenItlwm/pull/82), thanks to ann0see; [#80](https://github.com/retropineaple/ForbiddenItlwm/issues/80)). SAE with hash-to-element (H2E) and protected management frames, ported from Eric-AirportItlwm (its SAE is OpenBSD's). Without the flag nothing changes. With it, WPA3-only and mixed WPA2/WPA3 networks join with SAE when the router offers H2E; mixed networks without H2E still join as WPA2, and WPA2 networks that offer protected management frames use them. WPA3-only routers without H2E can't be joined yet. The review added: protected management frames from the router are now received (they were dropped), only the action frames the standard protects are protected, the firmware's key flag for such stations, and a failed SAE exchange no longer cancels the next attempt. Tested by ann0see on an AX201 (26.7.3), and here on an AX211 (26.7.1): a WPA3-only hotspot joins, with Block Ack and no decryption errors, and AirDrop works both ways.
+- **No more firmware crash while scanning without a connection** ([#69](https://github.com/retropineaple/ForbiddenItlwm/issues/69), found and tested by runmain). An active scan now asks for the network name on every channel, including passive and radar channels, as Linux's iwlwifi and OpenBSD do; the firmware still only listens on the channels where it may not send. Leaving the name off those channels made an AX210's firmware assert (UMAC 0x20002806) during scans while not connected: 72 times in about 55 minutes before, none in 14 hours after, in runmain's test. AX200 cards and newer; the older card families are unchanged. It can't be reproduced on the project's hackintosh.
+- **Block Ack from the router before an 802.1X login finishes** ([#69](https://github.com/retropineaple/ForbiddenItlwm/issues/69)). A router's early request to aggregate is answered, as Linux does, instead of being ignored until the keys are in place; other data is still held back until then.
+- **WPA3 key handling:** EAPOL key data with descriptor version 0 (used by SAE) is decrypted.
+
+**AirDrop with the experimental flags**
+- **`-itlawdlmultipeer` fixes** ([#103](https://github.com/retropineaple/ForbiddenItlwm/issues/103), [#81](https://github.com/retropineaple/ForbiddenItlwm/issues/81)), found in review after 0.7.0-alpha.2: a failed aggregated send no longer loses its first frame, and after 8 failures in a row the driver falls back to single frames; a paused, full queue no longer stops sending to every device; receive reorder state is cleared fully when a session ends and stale firmware notices for it are ignored; duplicate detection is kept per sending device; when the firmware has no room for another receive session, the request is declined and Block Ack stays on for the others; a failed send agreement is retried after 30 s.
+- **Switching Wi-Fi networks with `itlawdlsched=1` no longer restarts the firmware** ([#103](https://github.com/retropineaple/ForbiddenItlwm/issues/103)). The scheduler kept its airtime request on the AirDrop listener while the driver removed the listener for the switch, and the firmware asserted; the first join to the new network then failed. The request is now cancelled first. Tested here: network switches with the scheduler on, every join first time, AirDrop both ways.
+- **New experimental flag `-itlawdlamsdurx`: accept A-MSDU from Apple devices.** When an Apple device asks to pack several packets into one frame (A-MSDU) for its transfer to the Mac, the driver now agrees, as a real Mac's receiver can; the card already unpacks such frames on receive. Off by default. Tested here with one iPhone, which asked in every request: about 500,000 packed pieces received in one boot, with 6 frames rejected; no clear speed change in that small test. `ITLAWDLAmsduRx` shows what happened. The Mac still doesn't pack its own frames.
+
+**Bluetooth: BTLEAdvFixup 0.9.7** ([#102](https://github.com/retropineaple/ForbiddenItlwm/issues/102))
+- **An advertising set no longer gets another set's address.** A set with no address of its own got the last address `bluetoothd` gave any set, so the Mac could advertise twice with one address. The only fallback is now `bluetoothd`'s general random address.
+- **The address goes again before a set is first switched on.** BTLEAdvFixup can't see whether the controller accepted the address it added, and `bluetoothd` can switch the set on before it arrives. A set whose address only BTLEAdvFixup sent now gets it once more, just before its first enable. `BTLEAdvEnableAddresses` counts these. Intel's own Windows driver also waits for this address to be accepted, which matches the reading. Tested here: Bluetooth and AirDrop work, no failed sends.
+
+**Diagnostics (read-only)**
+- `ITLRxBaSessions`: receive Block Ack sessions of the Wi-Fi connection and of AirDrop devices side by side (the firmware has one pool), and AirDrop requests declined for lack of room.
+- `ItlwmRxErrors` ([#69](https://github.com/retropineaple/ForbiddenItlwm/issues/69)): what the Wi-Fi input errors are (decryption, replay, wrong network, too short, Block Ack window and more).
+- `ItlwmWCLTrace`: the last 64 exchanges between macOS's Wi-Fi stack and the driver, for joins that fail without a trace in the driver's log.
+- `ITLAWDLChainRssi`: received signal per antenna, for AirDrop frames and the router, and which antenna management frames go out on.
+- `ITLAWDLPeerChannels`, `ITLAWDLSchedPlan5G` ([#45](https://github.com/retropineaple/ForbiddenItlwm/issues/45)): how many nearby devices use 44 and 149, and how often macOS plans a second 5 GHz channel. Groundwork for using both channels; the driver still uses one 5 GHz AirDrop channel at a time.
+- `ITLAWDLMultiPeerGuards`: the multi-peer safety counters above.
+- With `-itlfwcrashrec`, `ITLFwCrashRaw`: the newest firmware crash's error tables in full, as raw words (300 and 76 bytes, the sizes the firmware declares; the decoded fields cover the first 152 and 60), for the restarts in [#97](https://github.com/retropineaple/ForbiddenItlwm/issues/97) and [#87](https://github.com/retropineaple/ForbiddenItlwm/issues/87).
+
+**Tested on** the project's hackintosh (Tahoe 26.7.1, AX211, one iPhone) with `-btleadv -btleadvnodupfilter itlawdlsched=3 -itlawdlmultipeer -itlwmwpa3 -itlfwcrashrec -itlawdlamsdurx`: AirDrop both ways, including after the iPhone was idle (iPhone → Mac 17–26 MB/s, Mac → iPhone about 18 MB/s after a slower first send while both devices were scanning), Wi-Fi network switches, Bluetooth, no firmware crash. Not tested here: the Sequoia and Sonoma builds (built and checked offline as before), more than one Apple device, and the #69 scan fix (this machine never hit that crash).
+
 ## 0.7.0-alpha.2
 
 **The tested set is now the default.** Up to 0.7.0-alpha.1 AirDrop needed 18 flags in `boot-args`; from this release the driver turns them on by itself, so only BTLEAdvFixup's `-btleadv` is still needed. Old flags left in `boot-args` are still read and change nothing, and a value you set yourself (`itlawdlintcoal`, `itlawdltxqueue`) still wins. `-itlawdlnodefaults` goes back to the old rule, and `ItlwmAWDLDefaults` says which rule is in use. One flag of the set can be turned off by adding `no` after `-itlawdl` (`-itlawdlnocoexmulti`). **`-itlawdloff`** turns AirDrop off whatever else is set, so the driver works as plain Wi-Fi (`ItlwmAWDLBuildCheck` "off: -itlawdloff"). `check_compat.sh` knows the new rule, and names `-itlawdlmultipeer`, `-itlawdlpeerhandoff` and `-itlawdlstatest` among the experimental flags it finds.
@@ -93,11 +125,6 @@ Still the same with the flag: one 5 GHz AirDrop channel at a time, and Block Ack
 **Tested on** the project's hackintosh (Tahoe 26.7.1, AX211, the tested flag set): AirDrop both ways, Bluetooth headphones, the listener on 149 at 80 MHz, `ItlwmCardStreams` 2. The channel-6 search was tested here with an earlier build (it found an iPhone in airplane mode and stopped). Not tested here: the Sonoma fix (one user's report), shared mode without `-itlawdlcoexmulti` (#63), SHA-256 networks (#84), one-antenna cards (#87), and the Sequoia and Sonoma builds (built and checked offline).
 
 BTLEAdvFixup is unchanged (0.9.3).
-
-## Unreleased
-
-**Wi-Fi**
-- **WPA3-Personal (SAE), opt-in with `-itlwmwpa3` ([#80](https://github.com/retropineaple/ForbiddenItlwm/issues/80)).** SAE/H2E with PMF on iwx. Flag off: WPA2 behaviour. Flag on: WPA3-only and mixed networks join with SAE when the AP offers hash-to-element (H2E); mixed networks without it still join as WPA2, and WPA2 networks that offer protected management frames use them. Tested on macOS 26.7.3 / AX201; WPA3-only APs without H2E are unsupported.
 
 ## 0.6.0-beta.2
 
