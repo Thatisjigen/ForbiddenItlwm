@@ -1,0 +1,171 @@
+name: Build
+
+# The upstream repository has no workflow, and a pull request from a fork is
+# not built there. This workflow builds the branch that carries the hidden
+# network support and the enterprise 802.1X support, so that a kext can be
+# handed to somebody else.
+#
+# Only ForbiddenItlwm is built here. BTLEAdvFixup and Lilu are taken from the
+# projects that publish them, so that the three kexts stay in step with the
+# upstream release.
+on:
+  push:
+    branches:
+      - feat/hidden-ssid-enterprise
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag of the release to publish (empty: build only)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: macos-15-intel
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [tahoe, sequoia, sonoma]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install MacKernelSDK
+        uses: actions/checkout@v4
+        with:
+          repository: acidanthera/MacKernelSDK
+          ref: 3f750085caa17ec3a7880f11c11bf4f48cd6a164
+          path: MacKernelSDK
+
+      - name: Build ForbiddenItlwm for ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          mkdir -p logs
+          python3 tools/build.py --target ${{ matrix.target }} --out "build/${{ matrix.target }}" \
+            > "logs/ForbiddenItlwm-${{ matrix.target }}.log" 2>&1 || {
+              tail -120 "logs/ForbiddenItlwm-${{ matrix.target }}.log"; exit 1; }
+          tail -3 "logs/ForbiddenItlwm-${{ matrix.target }}.log"
+
+      - name: Get the Lilu SDK
+        # BTLEAdvFixup is a Lilu plugin and is built against the headers of
+        # Lilu's DEBUG release.
+        run: |
+          set -euo pipefail
+          mkdir -p build/deps
+          curl -sL --retry 3 -o build/deps/lilu-debug.zip \
+            "https://github.com/acidanthera/Lilu/releases/download/1.7.2/Lilu-1.7.2-DEBUG.zip"
+          unzip -q build/deps/lilu-debug.zip -d build/deps/lilu-debug
+
+      - name: Get Lilu for the bundle
+        # The kext that goes into the bundle is the release build, the debug
+        # one is only used to compile against.
+        run: |
+          set -euo pipefail
+          mkdir -p build/deps
+          curl -sL --retry 3 -o build/deps/lilu.zip \
+            "https://github.com/acidanthera/Lilu/releases/download/1.7.2/Lilu-1.7.2-RELEASE.zip"
+
+      - name: Build BTLEAdvFixup for ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          tree="$PWD/build/tree"
+          rm -rf "$tree"
+          mkdir -p "$tree"
+          cp -R MacKernelSDK "$tree/"
+          cp -R "$(find build/deps/lilu-debug -maxdepth 2 -name 'Lilu.kext' | head -1)" "$tree/"
+          python3 tools/build_btleadv.py --out "build/btleadv-${{ matrix.target }}" \
+            --tree "$tree" --target ${{ matrix.target }} \
+            > "logs/BTLEAdvFixup-${{ matrix.target }}.log" 2>&1 || {
+              tail -120 "logs/BTLEAdvFixup-${{ matrix.target }}.log"; exit 1; }
+          tail -3 "logs/BTLEAdvFixup-${{ matrix.target }}.log"
+
+      - name: Assemble the bundle
+        run: |
+          set -euo pipefail
+          bundle="build/dist/ForbiddenItlwm-hssid-${{ matrix.target }}"
+          rm -rf "$bundle"
+          mkdir -p "$bundle"
+          cp -R "build/${{ matrix.target }}/ForbiddenItlwm.kext" "$bundle/"
+          # The version of the upstream release is the same, so the build of
+          # this branch is marked apart from it.
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 0.7.0-hssid1" \
+            "$bundle/ForbiddenItlwm.kext/Contents/Info.plist"
+          cp -R "build/btleadv-${{ matrix.target }}/BTLEAdvFixup.kext" "$bundle/"
+          unzip -q build/deps/lilu.zip -d build/deps/lilu
+          find build/deps/lilu -maxdepth 2 -name 'Lilu.kext' -exec cp -R {} "$bundle/" \;
+          cat > "$bundle/README.txt" << 'TXT'
+          ForbiddenItlwm with hidden network and enterprise 802.1X support
+          ==================================================================
+          Target macOS: see the name of the archive.
+
+          The three kexts in this folder go into the EFI partition, into
+          EFI/OC/Kexts, next to each other. Lilu has to load before
+          BTLEAdvFixup, which is a Lilu plugin.
+
+          ForbiddenItlwm replaces AirportItlwm.kext, so remove the old one.
+          Do not keep IntelBTPatcher.kext: it hooks the same function as
+          BTLEAdvFixup and Lilu panics when two plugins do.
+
+          Boot with -btleadv added to the boot-args of config.plist, or
+          BTLEAdvFixup does nothing.
+
+          A kext built for one macOS version refuses to start on another
+          one, so use the archive that matches the system.
+          TXT
+          (cd "$bundle" && shasum -a 256 * > SHA256SUMS.txt)
+          cd build/dist
+          zip -q -r "ForbiddenItlwm-hssid-${{ matrix.target }}.zip" "ForbiddenItlwm-hssid-${{ matrix.target }}"
+          shasum -a 256 "ForbiddenItlwm-hssid-${{ matrix.target }}.zip" >> SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ForbiddenItlwm-hssid-${{ matrix.target }}
+          path: build/dist/*.zip
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: logs-${{ matrix.target }}
+          path: logs
+
+  release:
+    name: Publish
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && inputs.tag != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 5
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ForbiddenItlwm-hssid-*
+          path: artifacts
+          merge-multiple: true
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          printf '%s\n\n' 'ForbiddenItlwm with hidden network and enterprise 802.1X support.' > ReleaseNotes.md
+          printf '%s\n\n' 'ForbiddenItlwm replaces AirportItlwm.kext. Lilu has to load before' >> ReleaseNotes.md
+          printf '%s\n\n' 'BTLEAdvFixup, which is a Lilu plugin. Do not keep IntelBTPatcher.kext:' >> ReleaseNotes.md
+          printf '%s\n\n' 'it hooks the same function and Lilu panics when two plugins do. Boot with' >> ReleaseNotes.md
+          printf '%s\n\n' '-btleadv in the boot-args, or BTLEAdvFixup does nothing.' >> ReleaseNotes.md
+          printf '\n%s\n' 'Changes:' >> ReleaseNotes.md
+          git log -5 --format='- %h %s' >> ReleaseNotes.md
+          cp artifacts/SHA256SUMS.txt . 2>/dev/null || true
+          gh release create "$TAG" artifacts/*.zip ReleaseNotes.md \
+            --title "$TAG" --notes-file ReleaseNotes.md --prerelease
+          gh release upload "$TAG" artifacts/SHA256SUMS.txt --clobber || true
