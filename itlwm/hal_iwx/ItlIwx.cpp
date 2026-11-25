@@ -627,6 +627,17 @@ static uint32_t awdlSchedSecondBusy, awdlSchedSecondStale, awdlSchedSecondRx;
 // peer's schedule has it on the visited channel; retunes that passed a paused peer's queue (its station sends
 // nothing, so its frames can't go out on the wrong channel).
 static uint32_t awdlSchedSecondSchedFrames, awdlSchedSecondPeerHere, awdlSchedSecondPausedPass;
+// A paused peer's queue passes a retune only once the pause has stood this long: the DISABLE_TX command is asynchronous
+// and an A-MPDU the firmware already started may still be on the air (a VHT TXOP is at most ~5.5 ms). The 2026-11-24
+// mixed-channel review: a host pause flag alone doesn't prove no old frame can go out.
+static constexpr uint64_t kAwdlSchedSecondPauseSettleUS = 6000;
+static uint32_t awdlSchedSecondPauseUnsettled;
+// -itlschedsecondsync (step 2c, needs -itlschedsecondtx): our TLVs advertise the entries the listener visits on the
+// second channel (instead of the station's channel), and our sync and MI frames go out there during an open visit, as a
+// real Mac sends in its AWs on each channel of its plan. Advertised only while the experiment is on for the generation:
+// a refused or failed retune stops it, so we never keep advertising a channel we don't go to.
+static bool awdlSchedSecondSync;
+static uint32_t awdlSchedSecondSyncSent, awdlSchedSecondAdvertised;
 static unsigned awdlSchedFollowArmedChannel;
 static uint32_t awdlSchedFollowArmedToken, awdlSchedFollowArmedPlan;
 static ItlAWDL::Clock awdlSchedFollowArmedClock;
@@ -8296,6 +8307,19 @@ static bool awdlSchedSecondPeerThere(struct ieee80211com *ic, const ItlAWDL::Pee
     return ch && ch == uint8_t(ieee80211_chan2ieee(ic, awdlSchedSecondTuned));
 }
 
+// -itlschedsecondsync: the second channel's entries are advertised (this generation, nothing refused).
+static bool awdlSchedSecondSyncOn()
+{
+    return awdlSchedSecond && awdlSchedSecondTx && awdlSchedSecondSync && !awdlSchedSecondBootOff &&
+        awdlSchedSecondOffGen != awdlCoexGeneration && awdlCoexPhyUncertainGen != awdlCoexGeneration;
+}
+
+// Our sync/MI frames may go out on the second channel now: an open visit while its entries are advertised.
+static bool awdlSchedSecondSyncOpen()
+{
+    return awdlSchedSecondSyncOn() && awdlSchedSecondAwayTxOpen();
+}
+
 // Home-channel traffic must never enter a firmware queue during a retune or a listen-only visit. With
 // -itlschedsecondtx an open visit lets the pass list's peers' data through (awdlSchedSecondTxAllowed).
 static bool awdlSchedSecondTxBlocked()
@@ -8306,12 +8330,14 @@ static bool awdlSchedSecondTxBlocked()
 
 // Whether a frame to `dest` may enter a firmware queue now (iwx_tx's last check). Home: unless blocked. On the
 // second channel: only unicast to a peer on the pass list.
-static bool awdlSchedSecondTxAllowed(const uint8_t *dest)
+static bool awdlSchedSecondTxAllowed(const uint8_t *dest, bool syncFrame = false)
 {
     if (awdlSchedSecondTxBlocked())
         return false;
     if (!awdlSchedSecond || !awdlSchedSecondTuned)
         return true;
+    if (syncFrame)   // -itlschedsecondsync: our own sync/MI frame (group-addressed), during an open visit
+        return awdlSchedSecondSyncOpen();
     return dest && !(dest[0] & 1) && awdlSchedSecondPass.contains(dest);
 }
 
@@ -8339,6 +8365,9 @@ static bool awdlCoexChannelEligible(struct ieee80211com *ic, struct ieee80211_ch
     if (awdlSchedSecond && awdlSchedSecondTuned) {
         if (awdlSchedSecondAwayTxOpen() && channel == awdlSchedSecondTuned && phase && !strcmp(phase, "data"))
             return true;
+        if (awdlSchedSecondSyncOpen() && channel == awdlSchedSecondTuned && phase &&
+            (!strcmp(phase, "before-build") || !strcmp(phase, "before-send")))
+            return true;   // -itlschedsecondsync: our sync/MI frame in a visited AW
         ++awdlSchedSecondTxHeld;
         return false;
     }
@@ -8456,10 +8485,19 @@ bool itlAWDLExecPlan(uint8_t *out)
         return false;
     }
     const bool ch6 = awdlSchedCh6 && !awdlSchedCh6Off && awdlSchedCh6Added && awdlSchedCh6Gen == awdlCoexGeneration;
-    // A simulated excursion replaces home slots too. Do not tell the peer we remain home in those slots;
-    // second-channel availability itself stays unadvertised until its TX/ACK path has been validated.
-    if (awdlSchedSecond && awdlSimSecondChan && awdlSchedSecondOffGen != awdlCoexGeneration) {
-        uint8_t secondPlan[16];
+    // A simulated excursion replaces home slots too. Do not tell the peer we remain home in those slots.
+    // -itlschedsecondsync: the second channel's entries (macOS's, or the simulated ones) are advertised as that
+    // channel, the ones the listener visits; without it they stay unadvertised (the station's channel).
+    unsigned advertisedSecond = 0;
+    uint8_t secondPlan[16] = {};
+    if (awdlSchedSecondSyncOn()) {
+        advertisedSecond = ItlAWDL::secondChannelPlan(plan, awdlCoexChannel, awdlSchedSpStation, awdlPlanMix.now.second,
+                                                      awdlSimSecondChan, awdlSimSecondMask, secondPlan);
+        if (advertisedSecond && !ItlAWDL::fixedScheduleChannel(uint8_t(advertisedSecond)))
+            advertisedSecond = 0;   // can't be encoded: every frame keeps the station's channel there
+        if (advertisedSecond)
+            ++awdlSchedSecondAdvertised;   // frames built with the second channel's entries
+    } else if (awdlSchedSecond && awdlSimSecondChan && awdlSchedSecondOffGen != awdlCoexGeneration) {
         (void)ItlAWDL::secondChannelPlan(plan, awdlCoexChannel, awdlSchedSpStation, 0,
                                        awdlSimSecondChan, awdlSimSecondMask, secondPlan);
     }
@@ -8475,8 +8513,8 @@ bool itlAWDLExecPlan(uint8_t *out)
         const bool advertise6 = ch6 && plan[i] == kAwdlSchedCh6Channel;
         if (advertise6 && awdlSchedCh6Quiet)
             ++awdlSchedCh6QuietSlots;   // listened on, not advertised
-        out[i] = plan[i] == awdlCoexChannel ? uint8_t(awdlCoexChannel) :
-                 advertise6 && !awdlSchedCh6Quiet ? kAwdlSchedCh6Channel : uint8_t(awdlSchedSpStation);
+        out[i] = ItlAWDL::advertisedEntry(plan[i], secondPlan[i], awdlCoexChannel, advertisedSecond,
+                                          advertise6 && !awdlSchedCh6Quiet, kAwdlSchedCh6Channel, awdlSchedSpStation);
     }
     ++awdlSchedAdvertiseServed;
     return true;
@@ -14532,14 +14570,19 @@ iwx_tx(struct iwx_softc *sc, mbuf_t m, struct ieee80211_node *ni, int ac, int mo
     // network traffic to a newly allocated firmware queue.
     ItlAWDL::PeerSlot *aggSlot = awdlCoexData && !awdlRx ? awdlPeerForTxQueue(monitorQueue) : nullptr;
     if ((aggSlot || (!awdlRx && awdlCoexTx && monitorQueue >= 0 && monitorQueue == awdlCoexQueue)) &&
-        !awdlSchedSecondTxAllowed(mbuf_len(m) >= 10 ? static_cast<const uint8_t *>(mbuf_data(m)) + 4 : nullptr)) {
+        !awdlSchedSecondTxAllowed(mbuf_len(m) >= 10 ? static_cast<const uint8_t *>(mbuf_data(m)) + 4 : nullptr,
+                                  !aggSlot && awdlCoexSending && !awdlCoexSendingData)) {
         if (awdlSchedSecondTuned)
             ++awdlSchedSecondTxRefused;
         mbuf_freem(m);
         return EAGAIN;
     }
-    if (awdlSchedSecondTuned && (aggSlot || (!awdlRx && awdlCoexTx && monitorQueue == awdlCoexQueue)))
-        ++awdlSchedSecondTxSent;
+    if (awdlSchedSecondTuned && (aggSlot || (!awdlRx && awdlCoexTx && monitorQueue == awdlCoexQueue))) {
+        if (!aggSlot && awdlCoexSending && !awdlCoexSendingData)
+            ++awdlSchedSecondSyncSent;
+        else
+            ++awdlSchedSecondTxSent;
+    }
     if (aggSlot) {
         // A listener peer's aggregation queue: only AWDL data the pump converted, while the session is up.
         ItlAWDL::PeerSlot &awdlPeer = *aggSlot;
@@ -18666,14 +18709,15 @@ static void awdlSchedSpPublish()
         if (awdlSchedSecond) {
             // -itlschedsecond: the second channel's runs and what retuning the listener's PHY cost.
             const uint32_t retunes = awdlSchedSecondAway + awdlSchedSecondHome;
-            char sec[896];
+            char sec[1024];
             snprintf(sec, sizeof(sec),
                      "%s%s second %u%s; runs %u, retunes away %u home %u (mean %llu us, max %llu us), refused %u "
                      "(last ch %u why 0x%x flags 0x%x), "
                      "errors %u (last %d); our frames held while away %u; drain waits %u, stale %u, second RX %u; "
                      "variant %u: settle waits %u, peer removals %u, MAC errors %u; "
                      "tx there %s: sent %u, refused %u, not open %u, nobody there %u, peers there peak %u; "
-                     "schedules there %u, pauses lifted %u, paused queues passed %u",
+                     "schedules there %u, pauses lifted %u, paused queues passed %u (too recent %u); "
+                     "sync there %s: advertised %u, sync frames sent %u",
                      awdlSchedSecondBootOff ? "off for this boot (a retune failed), " :
                      awdlSchedSecondOffGen >= 0 && awdlSchedSecondOffGen == awdlSchedSpGen ? "off for this generation, " : "",
                      awdlSimSecondChan ? "[SIMULATION]" : "on", awdlSchedSecondNow,
@@ -18688,7 +18732,8 @@ static void awdlSchedSpPublish()
                      awdlSchedSecondPeerRemovals, awdlSchedSecondMacErrors, awdlSchedSecondTx ? "on" : "off",
                      awdlSchedSecondTxSent, awdlSchedSecondTxRefused, awdlSchedSecondTxNearEnd, awdlSchedSecondTxIdle,
                      awdlSchedSecondPassPeak, awdlSchedSecondSchedFrames, awdlSchedSecondPeerHere,
-                     awdlSchedSecondPausedPass);
+                     awdlSchedSecondPausedPass, awdlSchedSecondPauseUnsettled, awdlSchedSecondSync ? "on" : "off",
+                     awdlSchedSecondAdvertised, awdlSchedSecondSyncSent);
             IORegistryEntry::getRegistryRoot()->setProperty("ITLAWDLSchedSecond", sec);
         }
     }
@@ -19385,10 +19430,14 @@ awdlSchedSecondRetune(struct iwx_softc *sc, unsigned channel)
             // Step 2b (-itlschedsecondtx): a paused peer's station sends nothing (its pause command is queued
             // ahead of the PHY command), so its frames wait on either channel. Otherwise a peer away from the
             // listener's channel, paused with frames queued, would hold the listener there.
-            if (awdlSchedSecondTx && peer.added && peer.pause.paused && peer.txQueue < int(nitems(sc->txq)))
+            if (awdlSchedSecondTx && peer.added && peer.pause.paused && peer.txQueue < int(nitems(sc->txq)) &&
+                awdlUptimeUS() >= peer.pause.pausedSinceUS + kAwdlSchedSecondPauseSettleUS) {
                 pausedPass = true;
-            else
+            } else {
+                if (awdlSchedSecondTx && peer.added && peer.pause.paused)
+                    ++awdlSchedSecondPauseUnsettled;   // paused too recently: waits, as an unpaused queue does
                 queued = true;
+            }
         }
     }
     if (!queued && pausedPass)
@@ -25255,6 +25304,8 @@ iwx_attach(struct iwx_softc *sc, struct pci_attach_args *pa)
                 if (awdlSchedSecond && PE_parse_boot_argn("itlsecondvar", &variant, sizeof(variant)))
                     awdlSchedSecondVariant = variant & 3;
                 awdlSchedSecondTx = awdlSchedSecond && PE_parse_boot_argn("-itlschedsecondtx", &dummy, sizeof(dummy));
+                awdlSchedSecondSync = awdlSchedSecondTx &&
+                    PE_parse_boot_argn("-itlschedsecondsync", &dummy, sizeof(dummy));
             }
             awdlSchedSkew = itlResFlag("-itlschedskew", kItlResDiag);
             awdlSchedSyncTx = itlResFlag("-itlschedsynctx", kItlResWork);

@@ -177,4 +177,17 @@ inline unsigned secondChannelPlan(uint8_t (&listenerPlan)[16], unsigned home, un
     return entries ? second : 0;
 }
 
+// The channel our TLVs advertise for one entry of the plan the radio follows (itlAWDLExecPlan): the listener's home
+// channel where the plan has it; the second channel where the listener visits it (`secondEntry` from
+// secondChannelPlan, `second` 0 when not advertised, -itlschedsecondsync); channel 6 where it is advertised; else the
+// station's channel, where the radio really is.
+inline uint8_t advertisedEntry(uint8_t planEntry, uint8_t secondEntry, unsigned home, unsigned second, bool advertise6,
+                               uint8_t ch6, unsigned station) {
+    if (planEntry == home)
+        return uint8_t(home);
+    if (second && secondEntry == second)
+        return uint8_t(second);
+    return advertise6 ? ch6 : uint8_t(station);
+}
+
 }  // namespace ItlAWDL

@@ -126,5 +126,31 @@ int main() {
         assert(secondChannelPlan(again, 149, 36, 0, 44, 0x0001, sec) == 44 && again[0] == 44 && sec[0] == 44);
         cases += 8;
     }
+    {
+        // step 2c: the advertised plan for macOS's mixed plan (home 149, second 44, Wi-Fi 36, channel 6).
+        uint8_t plan[16] = {149, 149, 44, 0, 0, 0, 0, 36, 6, 149, 149, 44, 44, 0, 0, 36}, sec[16];
+        const unsigned second = secondChannelPlan(plan, 149, 36, 44, 0, 0, sec);
+        assert(second == 44);
+        uint8_t on[16], off[16];
+        for (unsigned i = 0; i < 16; ++i) {
+            on[i] = advertisedEntry(plan[i], sec[i], 149, second, plan[i] == 6, 6, 36);
+            off[i] = advertisedEntry(plan[i], sec[i], 149, 0, plan[i] == 6, 6, 36);   // without -itlschedsecondsync
+        }
+        const uint8_t wantOn[16] = {149, 149, 44, 36, 36, 36, 36, 36, 6, 149, 149, 44, 44, 36, 36, 36};
+        const uint8_t wantOff[16] = {149, 149, 36, 36, 36, 36, 36, 36, 6, 149, 149, 36, 36, 36, 36, 36};
+        assert(!memcmp(on, wantOn, 16) && !memcmp(off, wantOff, 16));
+        // channel 6 quiet (not advertised): the station's channel there
+        assert(advertisedEntry(6, 0, 149, 44, false, 6, 36) == 36);
+        // simulation: the moved entries are advertised as the simulated channel, the others unchanged
+        uint8_t busy[16], ssec[16];
+        memset(busy, 149, 16);
+        const unsigned sim = secondChannelPlan(busy, 149, 36, 0, 44, 0x3000, ssec);
+        assert(sim == 44 && advertisedEntry(busy[12], ssec[12], 149, sim, false, 6, 36) == 44 &&
+               advertisedEntry(busy[13], ssec[13], 149, sim, false, 6, 36) == 44 &&
+               advertisedEntry(busy[11], ssec[11], 149, sim, false, 6, 36) == 149);
+        // a home entry is never replaced, even if it matched
+        assert(advertisedEntry(149, 149, 149, 149, false, 6, 36) == 149);
+        cases += 6;
+    }
     printf("AWDL channel mix: %u cases passed (host only)\n", cases);
 }

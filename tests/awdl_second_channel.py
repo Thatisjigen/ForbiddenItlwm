@@ -15,6 +15,8 @@ def function(signature):
 implementations = "\n".join([
     function("static bool awdlSchedSecondAwayTxOpen()"),
     function("static bool awdlSchedSecondTxBlocked()"),
+    function("static bool awdlSchedSecondSyncOn()"),
+    function("static bool awdlSchedSecondSyncOpen()"),
     function("static bool awdlSchedSecondTxAllowed("),
     function("static bool awdlSchedSecondPeerThere("),
     function("static inline unsigned awdlCoexUnii("),
@@ -102,7 +104,9 @@ static uint64_t awdlSchedFollowLateSumUS, awdlSchedFollowLateMaxUS, awdlSchedSpR
 static bool awdlSchedSecondTx;
 static ItlAWDL::TxPassList awdlSchedSecondPass;
 static constexpr uint64_t kAwdlSchedSecondTxStopUS = 4000;
-static uint32_t awdlSchedSecondPausedPass;
+static uint32_t awdlSchedSecondPausedPass, awdlSchedSecondPauseUnsettled;
+static constexpr uint64_t kAwdlSchedSecondPauseSettleUS = 6000;
+static bool awdlSchedSecondSync;
 static unsigned awdlSchedFollowFired, awdlSchedOffStale, awdlSchedFollowStale, awdlSchedFollowLateN, awdlSchedFollowAligned;
 static ItlAWDL::Clock awdlSchedFollowArmedClock, awdlSchedPlanClockNow;
 static uint32_t awdlCoexChannel = 149;
@@ -386,6 +390,12 @@ int main() {
         awdlSchedSecondTx = true; awdlSchedSecondPausedPass = 0;
         assert(driver.awdlSchedSecondRetune(&sc, 44) && commands == 1 && awdlSchedSecondPausedPass == 1);
         assert(driver.awdlSchedSecondRetune(&sc, 149) && commands == 2 && sc.txq[3].queued == 5);   // never flushed
+        awdlPeers[1].pause.pausedSinceUS = nowUS - 1000; awdlSchedSecondPauseUnsettled = 0;   // paused 1 ms ago: waits
+        assert(!driver.awdlSchedSecondRetune(&sc, 44) && commands == 2 && awdlSchedSecondPauseUnsettled == 1);
+        nowUS += 5000;                                                               // 6 ms: passes
+        assert(driver.awdlSchedSecondRetune(&sc, 44) && commands == 3);
+        assert(driver.awdlSchedSecondRetune(&sc, 149) && commands == 4);
+        awdlPeers[1].pause.pausedSinceUS = 0; commands = 2;
         awdlPeers[1].pause.paused = false;                                           // sending: waits
         assert(!driver.awdlSchedSecondRetune(&sc, 44) && commands == 2);
         awdlPeers[1].pause.paused = true; awdlPeers[1].resumePending = true;           // a resume on its way: waits
@@ -395,6 +405,33 @@ int main() {
         awdlPeers[1].added = true; sc.txq[2].queued = 1;                              // the listener's own queue: waits
         assert(!driver.awdlSchedSecondRetune(&sc, 44) && commands == 2);
         awdlSchedSecondTx = false;
+    }
+    {   // step 2c (-itlschedsecondsync): our group sync frame goes out on the second channel only during an open
+        // visit with the flag, never other group frames; a refusal for the generation or the boot stops it.
+        static const uint8_t group[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+        reset(sc); awdlSchedSecondTx = true; awdlSchedSecondSync = false;
+        assert(driver.awdlSchedSecondRetune(&sc, 44));
+        awdlSchedSpPlannedEndUS = nowUS + 50000;
+        assert(!awdlSchedSecondSyncOpen() && !awdlSchedSecondTxAllowed(group, true));     // flag off
+        awdlSchedSecondSync = true;
+        assert(awdlSchedSecondSyncOn() && awdlSchedSecondSyncOpen());
+        assert(awdlSchedSecondTxAllowed(group, true) && !awdlSchedSecondTxAllowed(group, false));
+        nowUS = awdlSchedSpPlannedEndUS - kAwdlSchedSecondTxStopUS;                       // closing
+        assert(!awdlSchedSecondSyncOpen() && !awdlSchedSecondTxAllowed(group, true));
+        awdlSchedSpPlannedEndUS = nowUS + 50000;
+        awdlSchedSecondOffGen = awdlCoexGeneration;                                        // off for the generation
+        assert(!awdlSchedSecondSyncOn() && !awdlSchedSecondTxAllowed(group, true));
+        awdlSchedSecondOffGen = -1; awdlSchedSecondBootOff = true;                          // off for the boot
+        assert(!awdlSchedSecondSyncOn());
+        awdlSchedSecondBootOff = false; awdlCoexPhyUncertainGen = awdlCoexGeneration;       // PHY uncertain
+        assert(!awdlSchedSecondSyncOn() && awdlSchedSecondTxBlocked());
+        awdlCoexPhyUncertainGen = -1;
+        awdlSchedSecondTx = false;                                                         // needs -itlschedsecondtx
+        assert(!awdlSchedSecondSyncOn());
+        awdlSchedSecondTx = true;
+        assert(driver.awdlSchedSecondRetune(&sc, 149) && !awdlSchedSecondTuned);
+        assert(awdlSchedSecondTxAllowed(group, true));                                     // home: as before
+        awdlSchedSecondSync = awdlSchedSecondTx = false; awdlSchedSpPlannedEndUS = 0;
     }
     {   // step 2b: a peer is "there" only during an open visit and when its schedule names the tuned channel now
         ItlAWDL::PeerSchedule s{}; s.assumeZero = true;
