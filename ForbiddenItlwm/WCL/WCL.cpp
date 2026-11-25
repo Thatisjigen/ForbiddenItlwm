@@ -561,7 +561,9 @@ void AirportItlwmSkywalkInterface::publishWCLBeacon(const ieee80211_node *node, 
     // neither the BSSID nor the SSID reach the 802.1X supplicant, and the
     // join ends in "join failure".
     bool bssMatches = IEEE80211_ADDR_EQ(node->ni_bssid, joinBSSID);
-    if (!bssMatches && wclHasHiddenSsid)
+    // The hidden network's BSS counts only while that network is the one being joined.
+    if (!bssMatches && wclHasHiddenSsid &&
+        AirportWCL::sameSsid(ic->ic_des_essid, ic->ic_des_esslen, wclHiddenSsid, wclHiddenSsidLength))
         bssMatches = IEEE80211_ADDR_EQ(node->ni_bssid, wclHiddenBssid);
     if ((joinPending || assocNotified) && bssMatches) {
         wclBssValid = messageSize <= sizeof(wclBssInfo);
@@ -574,14 +576,12 @@ void AirportItlwmSkywalkInterface::publishWCLBeacon(const ieee80211_node *node, 
     // of the network it found. The beacons of a hidden network do not carry
     // that name, so without remembering it the scan results of that network
     // stay nameless and the system never lists it.
-    if (ic->ic_wcl_scan_active && ic->ic_wcl_scan_ssid_length &&
-        node->ni_esslen == ic->ic_wcl_scan_ssid_length &&
-        memcmp(node->ni_essid, ic->ic_wcl_scan_ssid,
-               ic->ic_wcl_scan_ssid_length) == 0) {
-        bool nonzero = false;
-        for (unsigned i = 0; i < 6; ++i)
-            nonzero |= node->ni_bssid[i] != 0;
-        if (nonzero) {
+    // Only a network whose beacons really hide the name is remembered: the name came from its answer to the
+    // directed scan's probe, and this frame doesn't carry it.
+    if (ic->ic_wcl_scan_active &&
+        AirportWCL::sameSsid(node->ni_essid, node->ni_esslen, ic->ic_wcl_scan_ssid, ic->ic_wcl_scan_ssid_length) &&
+        AirportWCL::hidesSsid(ies, length)) {
+        if (!AirportWCL::zeroAddress(node->ni_bssid)) {
             memcpy(wclHiddenSsid, ic->ic_wcl_scan_ssid, ic->ic_wcl_scan_ssid_length);
             wclHiddenSsidLength = ic->ic_wcl_scan_ssid_length;
             wclHasHiddenSsid = true;
@@ -594,12 +594,9 @@ void AirportItlwmSkywalkInterface::publishWCLBeacon(const ieee80211_node *node, 
 
 void AirportItlwmSkywalkInterface::publishEarlyBssid()
 {
-    if (wclStopping || !earlyBssidPending || !joinPending || assocNotified)
+    if (wclStopping || !earlyBssidPending || !joinPending || assocNotified || !AirportWCL::zeroAddress(joinBSSID))
         return;
-    bool nonzero = false;
-    for (unsigned i = 0; i < 6; ++i)
-        nonzero |= earlyBssid[i] != 0;
-    if (!nonzero) {
+    if (AirportWCL::zeroAddress(earlyBssid)) {
         earlyBssidPending = false;
         return;
     }
@@ -1183,19 +1180,14 @@ void AirportItlwmSkywalkInterface::handleWCLEvent(int code, void *data)
             // A join request does not always name the BSSID of the network it
             // wants. The beacon of the network carries it, so it is taken
             // from there while the network is still being scanned.
-            if (joinPending && !assocNotified && ic->ic_des_esslen &&
-                beacon->node->ni_esslen == ic->ic_des_esslen &&
-                memcmp(beacon->node->ni_essid, ic->ic_des_essid,
-                       ic->ic_des_esslen) == 0) {
-                bool nonzero = false;
-                for (unsigned i = 0; i < 6; ++i)
-                    nonzero |= beacon->node->ni_bssid[i] != 0;
-                if (nonzero) {
+            // Only when the join named no BSSID: one it named stays, even if another access point of the
+            // same network beacons first.
+            if (joinPending && !assocNotified && AirportWCL::zeroAddress(joinBSSID) &&
+                AirportWCL::sameSsid(beacon->node->ni_essid, beacon->node->ni_esslen, ic->ic_des_essid,
+                                     ic->ic_des_esslen)) {
+                if (!AirportWCL::zeroAddress(beacon->node->ni_bssid)) {
                     memcpy(earlyBssid, beacon->node->ni_bssid, sizeof(earlyBssid));
                     earlyBssidPending = true;
-                    if (wclHasHiddenSsid)
-                        memcpy(wclHiddenBssid, beacon->node->ni_bssid,
-                               sizeof(wclHiddenBssid));
                     if (instance && instance->getWorkQueue() &&
                         instance->getWorkQueue()->inGate()) {
                         publishEarlyBssid();
@@ -1291,10 +1283,8 @@ IOReturn AirportItlwmSkywalkInterface::setPM_MODE(apple80211_pm_mode *data)
     // whatever the framework had in its buffer. The values are therefore only
     // recorded, they are not acted upon.
     //
-    // A USB attached adapter has no power save mode of its own, its power
-    // management is done by the USB stack, so there is nothing to switch here.
-    // Accepting the request only keeps the framework from reporting a failure
-    // on every join.
+    // The driver has no power mode of its own to switch, so accepting the
+    // request only keeps the framework from reporting a failure on every join.
     pmMode = data->mode;
     pmModeFlags = data->flags;
     itlWCLTrace('P', pmMode, pmModeFlags, 0);
@@ -1306,10 +1296,11 @@ IOReturn AirportItlwmSkywalkInterface::getWCL_FW_HOT_CHANNELS(apple80211_fw_hot_
     if (!data)
         return kIOReturnBadArgument;
     // The framework builds its neighbour cache from the list of hot channels
-    // the firmware reports. A USB attached adapter has no such list, it does
-    // not report channels by activity. An empty list keeps the behaviour of
-    // the driver unchanged, it only stops the framework from reporting a
-    // failure on every join.
+    // the firmware reports. Intel's firmware keeps no such list for the host.
+    // An empty list keeps the driver's behaviour unchanged; it only stops the
+    // framework from reporting a failure on every join. IO80211's
+    // WCLNeighborCacheManager::constructNeighborCacheFromFWHotChannels asks
+    // with 0x14 bytes on Sequoia 24H241 and Tahoe 25G342 (checked).
     memset(data, 0, sizeof(*data));
     data->count = 0;
     itlWCLTrace('W', data->count, 0, 0);

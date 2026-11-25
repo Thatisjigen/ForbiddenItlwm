@@ -398,6 +398,34 @@ inline bool advertisesSAEH2E(const uint8_t *ies, size_t length) {
     return false;
 }
 
+// True if a beacon's IEs hide the network's name: no SSID element, an empty one, or one of zero bytes only
+// (the two ways access points hide it). Such a network answers only a probe that names it.
+inline bool hidesSsid(const uint8_t *ies, size_t length) {
+    if (!validIEs(ies, length))
+        return false;
+    for (size_t offset = 0; offset < length; offset += size_t(ies[offset + 1]) + 2) {
+        if (ies[offset] != 0)
+            continue;
+        for (size_t i = 0; i < ies[offset + 1]; ++i)
+            if (ies[offset + 2 + i])
+                return false;
+        return true;
+    }
+    return true;
+}
+
+inline bool zeroAddress(const uint8_t *address) {
+    for (unsigned i = 0; i < 6; ++i)
+        if (address[i])
+            return false;
+    return true;
+}
+
+// Two network names are the same and not empty.
+inline bool sameSsid(const uint8_t *a, size_t aLength, const uint8_t *b, size_t bLength) {
+    return aLength && aLength == bLength && aLength <= 32 && !memcmp(a, b, aLength);
+}
+
 inline size_t selectWPA2TransitionMode(uint8_t *ies, size_t length) {
     if (!validIEs(ies, length))
         return length;

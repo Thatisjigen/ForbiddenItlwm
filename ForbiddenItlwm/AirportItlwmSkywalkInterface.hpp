@@ -541,7 +541,8 @@ private:
     uint32_t pmMode = 0;
     uint32_t pmModeFlags = 0;
     // The power save level the framework asked for with APPLE80211_IOC_POWERSAVE.
-    uint32_t wclPowersaveLevel = APPLE80211_POWERSAVE_MODE_80211;
+    // Disabled until the framework sets a level: the driver does no power saving of its own.
+    uint32_t wclPowersaveLevel = APPLE80211_POWERSAVE_MODE_DISABLED;
     uint8_t wclPermanentMAC[6] = {};
     bool wclStopping;
 #endif
