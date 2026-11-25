@@ -179,15 +179,21 @@ struct PeerSchedule {
         uint64_t into = 0;
         return channels[(eawAt(t, &into) + entryOffset()) % kPeerSeqEntries];
     }
-    // Every frame heard from the peer. Feeds calibration, then checks it.
-    void notePeerFrame(uint64_t t) {
+    // Every frame heard from the peer. Feeds calibration, then checks it. `heardOn` (-itlschedsecond): the channel
+    // the frame was heard on when it isn't ourChannel (a second-channel visit). Such a frame checks the timing
+    // against the entry naming that channel, and never feeds calibration, whose bins count frames on ourChannel.
+    void notePeerFrame(uint64_t t, uint8_t heardOn = 0) {
         if (!fresh(t) || !eawUS) return;
         uint64_t into = 0;
         const uint32_t eaw = eawAt(t, &into);
         if (into < kPeerEdgeUS || eawUS - into < kPeerEdgeUS) return;
+        const bool elsewhere = heardOn && heardOn != ourChannel;
+        if (elsewhere && !known()) return;
         if (known()) {
             ++checkedFrames;
-            if (!presentInEntry(eaw)) {
+            const bool where = elsewhere ? channels[(eaw + entryOffset()) % kPeerSeqEntries] == heardOn :
+                presentInEntry(eaw);
+            if (!where) {
                 multipleAwayEntries |= awayFrames && lastAwayEntry != eaw;
                 lastAwayEntry = eaw;
                 ++awayFrames;
@@ -205,7 +211,7 @@ struct PeerSchedule {
                 multipleAwayEntries = false;
             }
         }
-        if (!calibrated) {
+        if (!calibrated && !elsewhere) {
             if (binFrames >= 4096) clearEvidence();
             ++bins[eaw % kPeerSeqEntries];
             if (++binFrames >= kPeerCalibrateFrames) calibrate();

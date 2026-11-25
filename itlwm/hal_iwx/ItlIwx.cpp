@@ -605,6 +605,10 @@ static uint64_t awdlSchedSecondTookSumUS, awdlSchedSecondTookMaxUS;
 // A PHY command can sleep with the gate released. Stop every listener submission while draining/switching.
 static bool awdlSchedSecondSwitching, awdlSchedSecondDraining;
 static uint32_t awdlSchedSecondBusy, awdlSchedSecondStale, awdlSchedSecondRx;
+// Step 2b (-itlschedsecondtx): sync frames heard there that kept a schedule; Block Ack pauses lifted because the
+// peer's schedule has it on the visited channel; retunes that passed a paused peer's queue (its station sends
+// nothing, so its frames can't go out on the wrong channel).
+static uint32_t awdlSchedSecondSchedFrames, awdlSchedSecondPeerHere, awdlSchedSecondPausedPass;
 static unsigned awdlSchedFollowArmedChannel;
 static uint32_t awdlSchedFollowArmedToken, awdlSchedFollowArmedPlan;
 static ItlAWDL::Clock awdlSchedFollowArmedClock;
@@ -8245,6 +8249,16 @@ static bool awdlSchedSecondAwayTxOpen()
         awdlUptimeUS() + kAwdlSchedSecondTxStopUS < awdlSchedSpPlannedEndUS;
 }
 
+// Step 2b: during an open visit, whether a peer's schedule has it on the visited channel now. Its Block Ack queue
+// is then not paused for being away from home.
+static bool awdlSchedSecondPeerThere(struct ieee80211com *ic, const ItlAWDL::PeerSchedule &schedule, uint64_t nowUS)
+{
+    if (!awdlSchedSecondAwayTxOpen())
+        return false;
+    const uint8_t ch = schedule.channelAt(nowUS);
+    return ch && ch == uint8_t(ieee80211_chan2ieee(ic, awdlSchedSecondTuned));
+}
+
 // Home-channel traffic must never enter a firmware queue during a retune or a listen-only visit. With
 // -itlschedsecondtx an open visit lets the pass list's peers' data through (awdlSchedSecondTxAllowed).
 static bool awdlSchedSecondTxBlocked()
@@ -9619,9 +9633,16 @@ awdlCoexBaPauseStep(struct iwx_softc *sc)
     // iface161: frames already in the aggregate queue are held through the phone's away time too.
     const bool queuedForPeer = awdlCoexGate && awdlPeer.txQueue >= 0 && awdlPeer.txQueue < int(nitems(sc->txq)) &&
         sc->txq[awdlPeer.txQueue].queued > 0;
-    const bool want = (aggActive || queuedForPeer) && awdlPeer.txState == kCoexBaTxAgreed &&
+    bool want = (aggActive || queuedForPeer) && awdlPeer.txState == kCoexBaTxAgreed &&
         !awdlCoexMovePending && !awdlCoexTxHalted && awdlCoexScheduleCurrent() &&
         awdlCoexPeerSchedule.shouldPause(now);
+    // Step 2b: on the second channel with the peer there, its frames may go (the pass list admits it too).
+    if (want && ItlAWDL::sameAddress(awdlCoexSchedPeer, awdlPeer.addr) &&
+        awdlSchedSecondPeerThere(&sc->sc_ic, awdlCoexPeerSchedule, now)) {
+        want = false;
+        if (awdlPeer.pause.paused)
+            ++awdlSchedSecondPeerHere;
+    }
     const auto before = awdlPeer.pause;
     const int change = awdlPeer.pause.step(want, now, awdlCoexPeerSchedule.pauseLimitUS(now));
     if (!change)
@@ -9696,8 +9717,13 @@ awdlCoexPeerPauseStep(struct iwx_softc *sc, ItlAWDL::PeerSlot &awdlPeer)
     const bool queuedForPeer = awdlCoexGate && awdlPeer.txQueue >= 0 && awdlPeer.txQueue < int(nitems(sc->txq)) &&
         sc->txq[awdlPeer.txQueue].queued > 0;
     const bool scheduled = awdlPeerScheduleCurrent(awdlPeer);
-    const bool want = (aggActive || queuedForPeer) && awdlPeer.txState == kCoexBaTxAgreed &&
+    bool want = (aggActive || queuedForPeer) && awdlPeer.txState == kCoexBaTxAgreed &&
         !awdlCoexMovePending && !awdlCoexTxHalted && scheduled && awdlPeer.schedule.shouldPause(now);
+    if (want && awdlSchedSecondPeerThere(&sc->sc_ic, awdlPeer.schedule, now)) {   // step 2b, as slot 0's
+        want = false;
+        if (awdlPeer.pause.paused)
+            ++awdlSchedSecondPeerHere;
+    }
     const auto before = awdlPeer.pause;
     const int change = awdlPeer.pause.step(want, now, scheduled ? awdlPeer.schedule.pauseLimitUS(now) :
                                            ItlAWDL::kPeerPauseMaxUS);
@@ -11362,8 +11388,15 @@ iwx_rx_frame(struct iwx_softc *sc, mbuf_t m, int chanidx,
                         awdlCoexPeer5GUS = heardUS;
                     }
                 }
-                if (!(cf[10] & 1) && ourChannel && !fromOwnAddr) {
-                    awdlCoexPeerHeard(cf + 10, heardUS);
+                // -itlschedsecondtx (step 2b): a peer's sync frames heard during an executed second-channel visit
+                // keep its schedule too, so a peer that is only there gets one. The schedule still describes
+                // presence on the home channel (ourChannel); those frames check its timing against the entries
+                // naming the second channel and never calibrate it.
+                const bool secondSchedule = secondChannel && awdlSchedSecondTx;
+                const uint8_t heardOn = secondSchedule ? uint8_t(chanidx) : 0;
+                if (!(cf[10] & 1) && (ourChannel || secondSchedule) && !fromOwnAddr) {
+                    if (ourChannel)
+                        awdlCoexPeerHeard(cf + 10, heardUS);   // second-channel frames were counted above
                     // The phone's schedule, from its sync frames, as dedicated mode tracks it: its BA peer
                     // once there is one, otherwise the first peer heard.
                     if ((!awdlPeer.added || ItlAWDL::sameAddress(cf + 10, awdlPeer.addr)) &&
@@ -11377,15 +11410,16 @@ iwx_rx_frame(struct iwx_softc *sc, mbuf_t m, int chanidx,
                                 awdlCoexSchedToken = awdlCoexToken;
                                 memcpy(awdlCoexSchedPeer, cf + 10, sizeof(awdlCoexSchedPeer));
                             }
-                            awdlCoexPeerSchedule.notePeerFrame(heardUS);
+                            awdlCoexPeerSchedule.notePeerFrame(heardUS, heardOn);
                             awdlCoexPeerSchedule.note(peerSync, heardUS, uint8_t(awdlCoexChannel));
                             ++awdlCoexPeerSyncFrames;
+                            awdlSchedSecondSchedFrames += secondSchedule;
                         } else if (awdlCoexScheduleCurrent() && ItlAWDL::sameAddress(cf + 10, awdlCoexSchedPeer)) {
                             if (badSequence) {
                                 ++awdlCoexPeerSequenceRejected;
                                 awdlCoexPeerSchedule.invalidate();
                             } else {
-                                awdlCoexPeerSchedule.notePeerFrame(heardUS);
+                                awdlCoexPeerSchedule.notePeerFrame(heardUS, heardOn);
                             }
                         }
                     }
@@ -11400,13 +11434,14 @@ iwx_rx_frame(struct iwx_softc *sc, mbuf_t m, int chanidx,
                                 schedSlot->schedule.reset();
                                 schedSlot->scheduleToken = awdlCoexToken;
                             }
-                            schedSlot->schedule.notePeerFrame(heardUS);
+                            schedSlot->schedule.notePeerFrame(heardUS, heardOn);
                             schedSlot->schedule.note(slotSync, heardUS, uint8_t(awdlCoexChannel));
+                            awdlSchedSecondSchedFrames += secondSchedule;
                         } else if (awdlPeerScheduleCurrent(*schedSlot)) {
                             if (slotBadSequence)
                                 schedSlot->schedule.invalidate();
                             else
-                                schedSlot->schedule.notePeerFrame(heardUS);
+                                schedSlot->schedule.notePeerFrame(heardUS, heardOn);
                         }
                     }
                 }
@@ -18578,13 +18613,14 @@ static void awdlSchedSpPublish()
         if (awdlSchedSecond) {
             // -itlschedsecond: the second channel's runs and what retuning the listener's PHY cost.
             const uint32_t retunes = awdlSchedSecondAway + awdlSchedSecondHome;
-            char sec[720];
+            char sec[896];
             snprintf(sec, sizeof(sec),
                      "%s%s second %u%s; runs %u, retunes away %u home %u (mean %llu us, max %llu us), refused %u "
                      "(last ch %u why 0x%x flags 0x%x), "
                      "errors %u (last %d); our frames held while away %u; drain waits %u, stale %u, second RX %u; "
                      "variant %u: settle waits %u, peer removals %u, MAC errors %u; "
-                     "tx there %s: sent %u, refused %u, not open %u, nobody there %u, peers there peak %u",
+                     "tx there %s: sent %u, refused %u, not open %u, nobody there %u, peers there peak %u; "
+                     "schedules there %u, pauses lifted %u, paused queues passed %u",
                      awdlSchedSecondBootOff ? "off for this boot (a retune failed), " :
                      awdlSchedSecondOffGen >= 0 && awdlSchedSecondOffGen == awdlSchedSpGen ? "off for this generation, " : "",
                      awdlSimSecondChan ? "[SIMULATION]" : "on", awdlSchedSecondNow,
@@ -18598,7 +18634,8 @@ static void awdlSchedSpPublish()
                      awdlSchedSecondRx, awdlSchedSecondVariant, awdlSchedSecondSettleWaits,
                      awdlSchedSecondPeerRemovals, awdlSchedSecondMacErrors, awdlSchedSecondTx ? "on" : "off",
                      awdlSchedSecondTxSent, awdlSchedSecondTxRefused, awdlSchedSecondTxNearEnd, awdlSchedSecondTxIdle,
-                     awdlSchedSecondPassPeak);
+                     awdlSchedSecondPassPeak, awdlSchedSecondSchedFrames, awdlSchedSecondPeerHere,
+                     awdlSchedSecondPausedPass);
             IORegistryEntry::getRegistryRoot()->setProperty("ITLAWDLSchedSecond", sec);
         }
     }
@@ -19287,12 +19324,22 @@ awdlSchedSecondRetune(struct iwx_softc *sc, unsigned channel)
     bool queued = awdlCoexInFlight || awdlCoexQueue < 0 || awdlCoexQueue >= int(nitems(sc->txq));
     if (!queued)
         queued = sc->txq[awdlCoexQueue].queued != 0;
+    bool pausedPass = false;
     for (const auto &peer : awdlPeers) {
         if (peer.adding || peer.queueAllocPending || peer.resumePending)
             queued = true;
-        if (peer.txQueue >= 0 && (peer.txQueue >= int(nitems(sc->txq)) || sc->txq[peer.txQueue].queued))
-            queued = true;
+        if (peer.txQueue >= 0 && (peer.txQueue >= int(nitems(sc->txq)) || sc->txq[peer.txQueue].queued)) {
+            // Step 2b (-itlschedsecondtx): a paused peer's station sends nothing (its pause command is queued
+            // ahead of the PHY command), so its frames wait on either channel. Otherwise a peer away from the
+            // listener's channel, paused with frames queued, would hold the listener there.
+            if (awdlSchedSecondTx && peer.added && peer.pause.paused && peer.txQueue < int(nitems(sc->txq)))
+                pausedPass = true;
+            else
+                queued = true;
+        }
     }
+    if (!queued && pausedPass)
+        ++awdlSchedSecondPausedPass;
     if (queued) {
         ++awdlSchedSecondBusy;
         return false;   // completions keep running; the next decision may retry or skip this run

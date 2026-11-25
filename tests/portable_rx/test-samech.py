@@ -139,4 +139,6 @@ a=s.index('iwx_rx_mpdu_mq(struct');b=s.index("\nvoid ItlIwx::",a);assert hashlib
 # session alive.
 # Mixed-channel listen experiment: confirmed second-channel RX learns peers and delivers data; home-channel
 # timing calibration and BA setup remain unchanged. Receive address and length checks are unchanged.
-a=s.index('iwx_rx_frame(struct');b=s.index("\nvoid ItlIwx::",a);assert hashlib.sha256(s[a:b].encode()).hexdigest()=='360826d631fe040916ced05633625a2851b05413246521067d9b71a6be946b4d'
+# Step 2b (-itlschedsecondtx only): sync frames heard during an executed second-channel visit also keep the peers'
+# schedules (still home presence; timing checked against the second channel's entries, never calibrated there).
+a=s.index('iwx_rx_frame(struct');b=s.index("\nvoid ItlIwx::",a);assert hashlib.sha256(s[a:b].encode()).hexdigest()=='237a8823b80b383fb742a842dc10f5ffd1acd3cbc96eef629cbb9ff63dcb9faf'

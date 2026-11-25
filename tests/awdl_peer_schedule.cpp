@@ -290,6 +290,43 @@ int main() {
         }
         assert(c.channelAt(t1 + 100000000ULL) == 0);        // stale
     }
+    {   // step 2b: frames heard on the second channel check the timing against its entries and never calibrate
+        uint8_t two[16];
+        for (unsigned k = 0; k < 16; ++k) two[k] = k == 10 || k == 11 ? 44 : 149;
+        uint8_t h[200];
+        const size_t hn = buildFrame(h, 400, 20, 16, two);
+        PeerSyncInfo ti{};
+        assert(peerSyncFromAction(h, hn, &ti));
+        const uint64_t t1 = 30000000, eawLen = 65536, start101 = t1 + 20 * 1024;
+        auto mid = [&](uint32_t e) { return start101 + (e - 101) * eawLen + eawLen / 2; };
+        static PeerSchedule d; d.reset(); d.assumeZero = true;
+        d.note(ti, t1, 149);
+        // Heard on 44 in its 44 entries (106, 107 = entries 10, 11): consistent, no bins, no refutation.
+        for (unsigned n = 0; n < 600; ++n) {
+            const uint32_t e = 106 + (n & 1);
+            d.heardUS = mid(e) - 1000;
+            d.notePeerFrame(mid(e) + (n % 20) * 100, 44);
+        }
+        assert(d.binFrames == 0 && !d.calibrated && !d.refuted && d.known());
+        assert(d.ourChannel == 149);                          // the schedule still describes home presence
+        // Heard on 44 in entries that name 149, across entries: the timing is refuted, as on home.
+        for (unsigned n = 0; n < 600 && !d.refuted; ++n) {
+            const uint32_t e = 101 + (n % 4);
+            d.heardUS = mid(e) - 1000;
+            d.notePeerFrame(mid(e) + (n % 20) * 100, 44);
+        }
+        assert(d.refuted && d.refutations == 1 && !d.known());
+        // Not known: a second-channel frame does nothing at all.
+        const uint32_t checked = d.checkedFrames, binned = d.binFrames;
+        d.notePeerFrame(mid(106), 44);
+        assert(d.checkedFrames == checked && d.binFrames == binned);
+        // A home-channel frame (heardOn 0 or 149) still feeds calibration as before.
+        static PeerSchedule e2; e2.reset(); e2.assumeZero = true;
+        e2.note(ti, t1, 149);
+        e2.heardUS = mid(101) - 1000; e2.notePeerFrame(mid(101), 149);
+        e2.heardUS = mid(102) - 1000; e2.notePeerFrame(mid(102));
+        assert(e2.binFrames == 2);
+    }
     printf("AWDL peer schedule and pause: passed\n");
     return 0;
 }

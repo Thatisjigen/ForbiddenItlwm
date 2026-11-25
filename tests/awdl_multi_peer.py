@@ -93,6 +93,9 @@ static uint32_t awdlPeerSlotAdds, awdlPeerSlotRemoves, awdlPeerSlotFailures;
 static uint32_t awdlPeerTxQueues, awdlPeerGateHolds, awdlPeerGateForced, awdlPeerPauses, awdlCoexPauseResumeFailures,
     awdlCoexResumeRetirements;
 static bool awdlCoexBaPeerPauseEnabled = true, awdlCoexMovePending, awdlCoexTxHalted, awdlCoexGate = true;
+// Step 2b (-itlschedsecondtx) is off here: no peer is ever on a visited second channel.
+static uint32_t awdlSchedSecondPeerHere;
+static bool awdlSchedSecondPeerThere(ieee80211com *, const ItlAWDL::PeerSchedule &, uint64_t) { return false; }
 static int awdlCoexBaGen = 7;
 static unsigned awdlCoexChannel = 149;
 constexpr uint64_t kAwdlGateAwWindowUS = 4000, kAwdlGateAwakeUS = 100000;

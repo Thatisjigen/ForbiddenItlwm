@@ -16,6 +16,7 @@ implementations = "\n".join([
     function("static bool awdlSchedSecondAwayTxOpen()"),
     function("static bool awdlSchedSecondTxBlocked()"),
     function("static bool awdlSchedSecondTxAllowed("),
+    function("static bool awdlSchedSecondPeerThere("),
     function("static inline unsigned awdlCoexUnii("),
     function("static inline bool awdlCoexNoIr("),
     function("static bool\nawdlCoexChannelUsable("),
@@ -101,6 +102,7 @@ static uint64_t awdlSchedFollowLateSumUS, awdlSchedFollowLateMaxUS, awdlSchedSpR
 static bool awdlSchedSecondTx;
 static ItlAWDL::TxPassList awdlSchedSecondPass;
 static constexpr uint64_t kAwdlSchedSecondTxStopUS = 4000;
+static uint32_t awdlSchedSecondPausedPass;
 static unsigned awdlSchedFollowFired, awdlSchedOffStale, awdlSchedFollowStale, awdlSchedFollowLateN, awdlSchedFollowAligned;
 static ItlAWDL::Clock awdlSchedFollowArmedClock, awdlSchedPlanClockNow;
 static uint32_t awdlCoexChannel = 149;
@@ -376,6 +378,43 @@ int main() {
         assert(driver.awdlSchedSecondRetune(&sc, 149) && !awdlSchedSecondTuned);
         assert(awdlSchedSecondTxAllowed(home) && awdlSchedSecondTxAllowed(group));   // home: as before
         awdlSchedSecondTx = false; awdlSchedSpPlannedEndUS = 0; awdlSchedSecondPass.clear();
+    }
+    {   // step 2b: a paused peer's queue doesn't hold the listener (its station sends nothing); only with the flag
+        reset(sc);
+        awdlPeers[1].added = true; awdlPeers[1].txQueue = 3; sc.txq[3].queued = 5; awdlPeers[1].pause.paused = true;
+        assert(!driver.awdlSchedSecondRetune(&sc, 44) && !commands);                 // flag off: waits, as before
+        awdlSchedSecondTx = true; awdlSchedSecondPausedPass = 0;
+        assert(driver.awdlSchedSecondRetune(&sc, 44) && commands == 1 && awdlSchedSecondPausedPass == 1);
+        assert(driver.awdlSchedSecondRetune(&sc, 149) && commands == 2 && sc.txq[3].queued == 5);   // never flushed
+        awdlPeers[1].pause.paused = false;                                           // sending: waits
+        assert(!driver.awdlSchedSecondRetune(&sc, 44) && commands == 2);
+        awdlPeers[1].pause.paused = true; awdlPeers[1].resumePending = true;           // a resume on its way: waits
+        assert(!driver.awdlSchedSecondRetune(&sc, 44) && commands == 2);
+        awdlPeers[1].resumePending = false; awdlPeers[1].added = false;              // a leftover queue: waits
+        assert(!driver.awdlSchedSecondRetune(&sc, 44) && commands == 2);
+        awdlPeers[1].added = true; sc.txq[2].queued = 1;                              // the listener's own queue: waits
+        assert(!driver.awdlSchedSecondRetune(&sc, 44) && commands == 2);
+        awdlSchedSecondTx = false;
+    }
+    {   // step 2b: a peer is "there" only during an open visit and when its schedule names the tuned channel now
+        ItlAWDL::PeerSchedule s{}; s.assumeZero = true;
+        ItlAWDL::PeerSyncInfo info{}; info.awPeriodTU = 16; info.downCounterTU = 10; info.awCounter = 0;
+        for (unsigned i = 0; i < 16; ++i) info.channels[i] = 44;
+        reset(sc); awdlSchedSecondTx = true;
+        s.note(info, nowUS, 149);
+        assert(!awdlSchedSecondPeerThere(&sc.sc_ic, s, nowUS));                       // home
+        assert(driver.awdlSchedSecondRetune(&sc, 44));
+        awdlSchedSpPlannedEndUS = nowUS + 50000;
+        assert(awdlSchedSecondPeerThere(&sc.sc_ic, s, nowUS));
+        nowUS = awdlSchedSpPlannedEndUS - kAwdlSchedSecondTxStopUS;                   // closing: no longer
+        assert(!awdlSchedSecondPeerThere(&sc.sc_ic, s, nowUS));
+        awdlSchedSpPlannedEndUS = nowUS + 50000;
+        for (unsigned i = 0; i < 16; ++i) info.channels[i] = 149;
+        s.note(info, nowUS, 149);
+        assert(!awdlSchedSecondPeerThere(&sc.sc_ic, s, nowUS));                       // on home
+        ItlAWDL::PeerSchedule unknown{};                                               // no timing: never there
+        assert(!awdlSchedSecondPeerThere(&sc.sc_ic, unknown, nowUS));
+        awdlSchedSecondTx = false; awdlSchedSpPlannedEndUS = 0;
     }
     puts("Second-channel real retune: queue drains, TX barrier, regulatory refusal, session guards, stale ownership and failure quarantine passed (host only)");
 }
