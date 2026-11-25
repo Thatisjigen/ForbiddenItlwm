@@ -526,6 +526,17 @@ private:
     // that window deadlocks. Every entry point that takes the gate has to ask
     // this first and fail instead of waiting.
     bool canUseCommandGate() const;
+    // Publishes the BSSID that was captured while the network was still being
+    // scanned, for a join request that did not name one.
+    void publishEarlyBssid();
+    uint8_t earlyBssid[6] = {};
+    bool earlyBssidPending = false;
+    // The name of a network that hides it, learned from a directed scan that
+    // was asked for it by name.
+    uint8_t wclHiddenSsid[32] = {};
+    uint8_t wclHiddenSsidLength = 0;
+    uint8_t wclHiddenBssid[6] = {};
+    bool wclHasHiddenSsid = false;
     // The power mode the framework asked for with APPLE80211_IOC_PM_MODE.
     uint32_t pmMode = 0;
     uint32_t pmModeFlags = 0;

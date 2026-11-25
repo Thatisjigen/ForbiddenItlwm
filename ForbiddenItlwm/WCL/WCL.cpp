@@ -268,6 +268,7 @@ IOReturn AirportItlwmSkywalkInterface::wclCommandBody(OSObject *, void *a0, void
     if (self->wclStopping)
         return kIOReturnNotReady;
     switch (uintptr_t(a1)) {
+        case 18: self->publishEarlyBssid(); return kIOReturnSuccess;
         case 13: return self->copyWCLChannels(a2);
         case 16: {  // getWCL_VALID_CHANNEL_COUNT, under the gate (audit ST04)
             auto *count = static_cast<unsigned long *>(a2);
@@ -523,8 +524,18 @@ void AirportItlwmSkywalkInterface::publishWCLBeacon(const ieee80211_node *node, 
     metadata->ieLength = uint32_t(length);
     metadata->channelSpec = uint16_t(channel | (IEEE80211_IS_CHAN_5GHZ(node->ni_chan) ? 0xd000 : 0x1000));
     metadata->channel = channel;
-    metadata->ssidLength = node->ni_esslen;
-    memcpy(metadata->ssid, node->ni_essid, node->ni_esslen);
+    uint32_t ssidLength = node->ni_esslen;
+    const uint8_t *ssid = node->ni_essid;
+    if (ssidLength == 0 && wclHasHiddenSsid &&
+        IEEE80211_ADDR_EQ(node->ni_bssid, wclHiddenBssid)) {
+        // Hidden network: the beacon carries no name, but we know it from the
+        // join request. Without the name the system neither lists the network
+        // nor matches it against its preferred networks.
+        ssidLength = wclHiddenSsidLength;
+        ssid = wclHiddenSsid;
+    }
+    metadata->ssidLength = ssidLength;
+    memcpy(metadata->ssid, ssid, ssidLength);
     memcpy(metadata->bssid, node->ni_bssid, 6);
     metadata->rssi = IWM_MIN_DBM + node->ni_rssi;
     metadata->interval = node->ni_intval;
@@ -539,15 +550,62 @@ void AirportItlwmSkywalkInterface::publishWCLBeacon(const ieee80211_node *node, 
         metadata->ieLength = uint32_t(AirportWCL::selectWPA2TransitionMode(
             reinterpret_cast<uint8_t *>(metadata + 1), length));
     size_t messageSize = sizeof(*metadata) + metadata->ieLength;
-    if (assocNotified && IEEE80211_ADDR_EQ(node->ni_bssid, joinBSSID)) {
+    // The framework asks the driver for the BSS information as soon as the
+    // link comes up and it gives up on the network when that fails ("Update
+    // Bss fail"). The information is taken from the beacons of the network,
+    // so it has to be collected while the network is still being scanned:
+    // waiting for the association to be complete is too late, the scan has
+    // usually finished by then and no beacon arrives any more.
+    //
+    // Without the information the framework never runs setCurrentBSS, so
+    // neither the BSSID nor the SSID reach the 802.1X supplicant, and the
+    // join ends in "join failure".
+    bool bssMatches = IEEE80211_ADDR_EQ(node->ni_bssid, joinBSSID);
+    if (!bssMatches && wclHasHiddenSsid)
+        bssMatches = IEEE80211_ADDR_EQ(node->ni_bssid, wclHiddenBssid);
+    if ((joinPending || assocNotified) && bssMatches) {
         wclBssValid = messageSize <= sizeof(wclBssInfo);
         if (wclBssValid) {
             bzero(wclBssInfo, sizeof(wclBssInfo));
             memcpy(wclBssInfo, metadata, messageSize);
         }
     }
+    // A directed scan that was asked for by name teaches the driver the name
+    // of the network it found. The beacons of a hidden network do not carry
+    // that name, so without remembering it the scan results of that network
+    // stay nameless and the system never lists it.
+    if (ic->ic_wcl_scan_active && ic->ic_wcl_scan_ssid_length &&
+        node->ni_esslen == ic->ic_wcl_scan_ssid_length &&
+        memcmp(node->ni_essid, ic->ic_wcl_scan_ssid,
+               ic->ic_wcl_scan_ssid_length) == 0) {
+        bool nonzero = false;
+        for (unsigned i = 0; i < 6; ++i)
+            nonzero |= node->ni_bssid[i] != 0;
+        if (nonzero) {
+            memcpy(wclHiddenSsid, ic->ic_wcl_scan_ssid, ic->ic_wcl_scan_ssid_length);
+            wclHiddenSsidLength = ic->ic_wcl_scan_ssid_length;
+            wclHasHiddenSsid = true;
+            memcpy(wclHiddenBssid, node->ni_bssid, sizeof(wclHiddenBssid));
+        }
+    }
     wclPost(AirportWCL::ScanResult, metadata, messageSize, true);
     IOFree(metadata, size);
+}
+
+void AirportItlwmSkywalkInterface::publishEarlyBssid()
+{
+    if (wclStopping || !earlyBssidPending || !joinPending || assocNotified)
+        return;
+    bool nonzero = false;
+    for (unsigned i = 0; i < 6; ++i)
+        nonzero |= earlyBssid[i] != 0;
+    if (!nonzero) {
+        earlyBssidPending = false;
+        return;
+    }
+    memcpy(joinBSSID, earlyBssid, sizeof(joinBSSID));
+    setCurrentApAddress(reinterpret_cast<ether_addr *>(joinBSSID));
+    earlyBssidPending = false;
 }
 
 void AirportItlwmSkywalkInterface::clearWCLPMKSA()
@@ -1121,6 +1179,31 @@ void AirportItlwmSkywalkInterface::handleWCLEvent(int code, void *data)
                 if (scanPending)
                     ++wclScanStats.beaconsWhilePending;
                 publishWCLBeacon(beacon->node, beacon->ies, beacon->length);
+            }
+            // A join request does not always name the BSSID of the network it
+            // wants. The beacon of the network carries it, so it is taken
+            // from there while the network is still being scanned.
+            if (joinPending && !assocNotified && ic->ic_des_esslen &&
+                beacon->node->ni_esslen == ic->ic_des_esslen &&
+                memcmp(beacon->node->ni_essid, ic->ic_des_essid,
+                       ic->ic_des_esslen) == 0) {
+                bool nonzero = false;
+                for (unsigned i = 0; i < 6; ++i)
+                    nonzero |= beacon->node->ni_bssid[i] != 0;
+                if (nonzero) {
+                    memcpy(earlyBssid, beacon->node->ni_bssid, sizeof(earlyBssid));
+                    earlyBssidPending = true;
+                    if (wclHasHiddenSsid)
+                        memcpy(wclHiddenBssid, beacon->node->ni_bssid,
+                               sizeof(wclHiddenBssid));
+                    if (instance && instance->getWorkQueue() &&
+                        instance->getWorkQueue()->inGate()) {
+                        publishEarlyBssid();
+                    } else if (_fCommandGate) {
+                        _fCommandGate->runAction(wclCommand, this,
+                                                 reinterpret_cast<void *>(18));
+                    }
+                }
             }
             if (joinPending && assocNotified && !firstBeaconNotified &&
                 IEEE80211_ADDR_EQ(beacon->node->ni_bssid, joinBSSID)) {
