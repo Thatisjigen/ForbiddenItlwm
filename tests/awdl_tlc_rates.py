@@ -42,7 +42,8 @@ struct iwx_tlc_config_cmd_v4 {
 };
 struct ieee80211_channel { int two_ghz; };
 #define IEEE80211_IS_CHAN_2GHZ(c) ((c)->two_ghz)
-struct iwx_softc {};
+struct ieee80211com_fixture { uint8_t ic_sup_mcs[2]; };
+struct iwx_softc { ieee80211com_fixture sc_ic{{0xff, 0xff}}; };
 static const uint8_t kAwdlBaStationId = 3;
 static uint8_t awdlBaTlcStation = kAwdlBaStationId;
 static ieee80211_channel *awdlCoexOwnChan;
@@ -89,8 +90,16 @@ int main() {
         awdl_branch(&sc, cfg);
         assert(cfg.max_mpdu_len == 3895);
         awdlAmsduTx = false;
+        // A one-stream card (#97, AX101): no two-stream rates at all, the one-stream ones as before.
+        iwx_softc one;
+        one.sc_ic.ic_sup_mcs[1] = 0;
+        fill_from_he160(cfg);
+        awdl_branch(&one, cfg);
+        assert(cfg.ht_rates[IWX_TLC_NSS_1][IWX_TLC_MCS_PER_BW_80] == expected80);
+        for (int bw = 0; bw < IWX_TLC_MCS_PER_BW_NUM_V4; ++bw)
+            assert(cfg.ht_rates[IWX_TLC_NSS_2][bw] == 0);
     }
-    puts("AWDL peer rate control: no 160 MHz rates left from an HE 160 MHz station, HT and VHT 80 (#83): passed (host fixture)");
+    puts("AWDL peer rate control: no 160 MHz rates left from an HE 160 MHz station, HT and VHT 80 (#83), one stream on one-stream cards (#97): passed (host fixture)");
     return 0;
 }
 '''
