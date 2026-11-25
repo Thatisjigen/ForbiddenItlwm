@@ -150,6 +150,30 @@ int main() {
         assert(buildAddbaResponse(out, sizeof(out), r, own, 5, kAddbaDeclined) == kAddbaResponseLength);
         assert(out[27] == 37 && out[28] == 0 && out[24] == 3 && out[25] == 1 && ((out[29] >> 2) & 0xf) == 3);
         cases += 3;
+        // A-MSDU (-itlawdlamsdurx): allowed only when the peer asked and the flag is on, never in a refusal.
+        AddbaRequest asked = r;
+        asked.amsdu = true;
+        assert(buildAddbaResponse(out, sizeof(out), asked, own, 5) && !(out[29] & 1));           // flag off
+        assert(buildAddbaResponse(out, sizeof(out), asked, own, 5, 0, true) && (out[29] & 1));   // asked + on
+        assert(((out[29] | out[30] << 8) >> 6) == r.window && (out[29] & 2));                    // window, immediate kept
+        assert(buildAddbaResponse(out, sizeof(out), r, own, 5, 0, true) && !(out[29] & 1));      // not asked
+        assert(buildAddbaResponse(out, sizeof(out), asked, own, 5, kAddbaDeclined, true) && !(out[29] & 1));
+        cases += 5;
+    }
+    // The request's A-MSDU bit (parameter bit 0) is read.
+    {
+        const uint8_t own[6] = {2, 9, 9, 9, 9, 9};
+        uint8_t f[33] = {0xd0};
+        memcpy(f + 4, own, 6);
+        f[10] = 2; f[15] = 10;
+        f[24] = 3; f[25] = 0; f[26] = 7;
+        const uint16_t params = uint16_t(1U | 2U | 0U << 2 | 64U << 6);
+        f[27] = uint8_t(params); f[28] = uint8_t(params >> 8);
+        AddbaRequest got{};
+        assert(parseAddbaRequest(f, sizeof(f), own, &got) && got.amsdu && got.immediate && got.window == 64);
+        f[27] &= ~1;
+        assert(parseAddbaRequest(f, sizeof(f), own, &got) && !got.amsdu);
+        cases += 2;
     }
     printf("AWDL peer slots: %u cases passed (host only)\n", cases);
 }

@@ -13,6 +13,7 @@ struct AddbaRequest {
     uint8_t peer[6], bssid[6];
     uint8_t token, tid;
     bool immediate;
+    bool amsdu;   // the peer may send A-MSDUs inside this session's A-MPDUs (parameter bit 0)
     uint16_t window, ssn;
 };
 
@@ -69,6 +70,7 @@ inline bool parseAddbaRequest(const uint8_t *f, size_t length, const uint8_t *ow
     out->token = f[26];
     out->tid = uint8_t(tid);
     out->immediate = params & 2U;
+    out->amsdu = params & 1U;
     const uint16_t asked = params >> 6;
     out->window = !asked || asked > kBaWindowMax ? kBaWindowMax : asked;
     out->ssn = sequenceControl >> 4;
@@ -187,11 +189,13 @@ inline bool isDelbaFrame(const uint8_t *f, size_t length) {
     return f && length == kDelbaLength && f[0] == 0xd0 && f[24] == 3 && f[25] == 2;
 }
 
-// Accepts with no A-MSDU and no timeout, or refuses with `status` (37: request declined, for example when the firmware
-// has no room for another session). Returns the length written, or 0 if it doesn't fit.
+// Accepts with no timeout, or refuses with `status` (37: request declined, for example when the firmware has no room
+// for another session). A-MSDU is allowed only if the peer asked for it and `allowAmsdu` (-itlawdlamsdurx): the
+// firmware splits received A-MSDUs into their MSDUs, as on the station's path. Returns the length written, or 0 if
+// it doesn't fit.
 constexpr uint16_t kAddbaDeclined = 37;
 inline size_t buildAddbaResponse(uint8_t *out, size_t capacity, const AddbaRequest &request, const uint8_t *own, uint16_t sequence,
-                                 uint16_t status = 0) {
+                                 uint16_t status = 0, bool allowAmsdu = false) {
     if (!out || !own || capacity < kAddbaResponseLength)
         return 0;
     memset(out, 0, kAddbaResponseLength);
@@ -207,7 +211,8 @@ inline size_t buildAddbaResponse(uint8_t *out, size_t capacity, const AddbaReque
     out[26] = request.token;
     out[27] = uint8_t(status);
     out[28] = uint8_t(status >> 8);
-    const uint16_t params = uint16_t(2U | unsigned(request.tid) << 2 | unsigned(request.window) << 6);
+    const uint16_t params = uint16_t((!status && allowAmsdu && request.amsdu ? 1U : 0U) | 2U |
+                                     unsigned(request.tid) << 2 | unsigned(request.window) << 6);
     out[29] = uint8_t(params);
     out[30] = uint8_t(params >> 8);
     // Bytes 31 and 32 are timeout 0, none.

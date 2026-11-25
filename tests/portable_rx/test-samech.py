@@ -119,8 +119,9 @@ import hashlib
 # listener session start (awdlSchedStartedGen), which the overlap exceptions wait for. Then a frame-release
 # notification for a cleared or unused reorder entry is dropped instead of released (added lines only).
 a=s.index('iwx_rx_pkt(struct');b=s.index("\nvoid ItlIwx::",a);assert hashlib.sha256(s[a:b].encode()).hexdigest()=='89fd1546f8cafd8676d6a05295b7adde8581291c2045a306fd12cf4db97625cf'
-# iwx_rx_mpdu_mq: the next release adds only a read-only per-antenna signal tap (ITLAWDLChainRssi) after the RSSI.
-a=s.index('iwx_rx_mpdu_mq(struct');b=s.index("\nvoid ItlIwx::",a);assert hashlib.sha256(s[a:b].encode()).hexdigest()=='08111bde101978bbaabf233464b82e83d93f4c87a80332d0698e8184c892e01c'
+# iwx_rx_mpdu_mq: the next release adds only a read-only per-antenna signal tap (ITLAWDLChainRssi) after the RSSI,
+# and a read-only count of A-MSDU subframes with AWDL's BSSID inside the existing A-MSDU branch (ITLAWDLAmsduRx).
+a=s.index('iwx_rx_mpdu_mq(struct');b=s.index("\nvoid ItlIwx::",a);assert hashlib.sha256(s[a:b].encode()).hexdigest()=='7639048af6c0864698f341a5a8bce663ea86802dca8ac8dea490a3f12f7fa545'
 # iwx_rx_frame: 0.6.0 adds only the phone's 5 GHz channel tracking from its TLV 18 sequence (PR #21). The AWDL
 # scheduler adds, each behind its own flag: frame counts while the follower runs (-itlschedsp); each peer's election v2
 # and sync TLV for the election (-itlschedclock), with the frame's RSSI, band and version (-itlschedelecrssi,
