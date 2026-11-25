@@ -119,7 +119,7 @@ jobs:
           A kext built for one macOS version refuses to start on another
           one, so use the archive that matches the system.
           TXT
-          (cd "$bundle" && shasum -a 256 * > SHA256SUMS.txt)
+          (cd "$bundle" && find . -type f ! -name SHA256SUMS.txt -exec shasum -a 256 {} \; > SHA256SUMS.txt)
           cd build/dist
           zip -q -r "ForbiddenItlwm-hssid-${{ matrix.target }}.zip" "ForbiddenItlwm-hssid-${{ matrix.target }}"
           shasum -a 256 "ForbiddenItlwm-hssid-${{ matrix.target }}.zip" >> SHA256SUMS.txt
