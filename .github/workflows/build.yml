@@ -154,6 +154,16 @@ jobs:
                               comes back. Use it when the link speed matters
                               more than AirDrop.
 
+                              This is not the same as turning AirDrop off in
+                              the system settings. The driver keeps an
+                              AirDrop listener beside the WiFi station and
+                              the firmware time-shares the radio between the
+                              two channels, which is what costs the speed.
+                              The listener is added by the driver when the
+                              WiFi connection comes up, so a setting in
+                              macOS does not remove it. This flag stops the
+                              driver from creating any of it.
+
           A kext built for one macOS version refuses to start on another
           one, so use the archive that matches the system.
           TXT
