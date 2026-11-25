@@ -943,7 +943,16 @@ getPOWERSAVE(struct apple80211_powersave_data *pd)
     if (!pd)     // audit P-V03
         return kIOReturnBadArgument;
     pd->version = APPLE80211_VERSION;
+    // The link may only report itself as idle when the framework has not
+    // asked for the power saving to be turned off. The level is only kept by
+    // the WCL builds, the others have no power saving of their own.
+#ifdef AIRPORT_WCL
+    pd->powersave_level = (wclPowersaveLevel != APPLE80211_POWERSAVE_MODE_DISABLED)
+                               ? APPLE80211_POWERSAVE_MODE_80211
+                               : APPLE80211_POWERSAVE_MODE_DISABLED;
+#else
     pd->powersave_level = APPLE80211_POWERSAVE_MODE_DISABLED;
+#endif
     return kIOReturnSuccess;
 }
 

@@ -128,7 +128,11 @@ void AirportItlwmSkywalkInterface::wclCountryUpdateThread(void *arg, void *)
     auto update = static_cast<CountryUpdate *>(arg);
     // Native country notifications synchronously query WCL. Holding the gate
     // is necessary, but executing on the driver's workloop thread is forbidden.
-    update->gate->runAction(wclCountryUpdateGated, update);
+    // While the interface is going down the gate may be held by the
+    // framework, which in turn waits for the driver to finish, so the
+    // notification is dropped instead of waiting for it.
+    if (!update->interface->wclStopping)
+        update->gate->runAction(wclCountryUpdateGated, update);
     thread_call_free(update->call);
     update->interface->release();
     update->controller->release();
@@ -157,12 +161,21 @@ bool AirportItlwmSkywalkInterface::initWCL()
     return instance->getWorkQueue()->addEventSource(joinTimer) == kIOReturnSuccess;
 }
 
+bool AirportItlwmSkywalkInterface::canUseCommandGate() const
+{
+    return !wclStopping && _fCommandGate;
+}
+
 void AirportItlwmSkywalkInterface::stopWCL()
 {
+    // The flag is set before the gate is taken: a request that arrives while
+    // the stop runs must fail instead of waiting for the gate, because the
+    // framework holds the gate while it tears the interface down and waits
+    // for the driver in return.
+    wclStopping = true;
     // Pending country tasks must observe shutdown under the same gate.
     if (_fCommandGate)
         _fCommandGate->runAction(stopWCLGated, this);
-    wclStopping = true;
     if (joinTimer) {
         joinTimer->cancelTimeout();
         if (joinTimer->getWorkLoop())
@@ -255,6 +268,7 @@ IOReturn AirportItlwmSkywalkInterface::wclCommandBody(OSObject *, void *a0, void
     if (self->wclStopping)
         return kIOReturnNotReady;
     switch (uintptr_t(a1)) {
+        case 18: self->publishEarlyBssid(); return kIOReturnSuccess;
         case 13: return self->copyWCLChannels(a2);
         case 16: {  // getWCL_VALID_CHANNEL_COUNT, under the gate (audit ST04)
             auto *count = static_cast<unsigned long *>(a2);
@@ -321,16 +335,22 @@ IOReturn AirportItlwmSkywalkInterface::wclCommandBody(OSObject *, void *a0, void
 
 IOReturn AirportItlwmSkywalkInterface::setWCL_SCAN_REQ(apple80211ScanRequest *request)
 {
+    if (!canUseCommandGate())
+        return kIOReturnNotReady;
     return _fCommandGate->runAction(wclCommand, this, nullptr, request);
 }
 
 IOReturn AirportItlwmSkywalkInterface::setWCL_SCAN_ABORT(void *)
 {
+    if (!canUseCommandGate())
+        return kIOReturnNotReady;
     return _fCommandGate->runAction(wclCommand, this, reinterpret_cast<void *>(4));
 }
 
 IOReturn AirportItlwmSkywalkInterface::setWCL_ASSOCIATE(apple80211AssocCandidates *request)
 {
+    if (!canUseCommandGate())
+        return kIOReturnNotReady;
     return _fCommandGate->runAction(wclCommand, this, reinterpret_cast<void *>(1), request);
 }
 
@@ -340,11 +360,15 @@ IOReturn AirportItlwmSkywalkInterface::setWCL_JOIN_ABORT(void *)
 IOReturn AirportItlwmSkywalkInterface::setWCL_JOIN_ABORT(apple80211_wcl_abort_join *)
 #endif
 {
+    if (!canUseCommandGate())
+        return kIOReturnNotReady;
     return _fCommandGate->runAction(wclCommand, this, reinterpret_cast<void *>(2));
 }
 
 IOReturn AirportItlwmSkywalkInterface::setWCL_LEAVE_NETWORK(apple80211_leave_network *)
 {
+    if (!canUseCommandGate())
+        return kIOReturnNotReady;
     return _fCommandGate->runAction(wclCommand, this, reinterpret_cast<void *>(3));
 }
 
@@ -500,8 +524,18 @@ void AirportItlwmSkywalkInterface::publishWCLBeacon(const ieee80211_node *node, 
     metadata->ieLength = uint32_t(length);
     metadata->channelSpec = uint16_t(channel | (IEEE80211_IS_CHAN_5GHZ(node->ni_chan) ? 0xd000 : 0x1000));
     metadata->channel = channel;
-    metadata->ssidLength = node->ni_esslen;
-    memcpy(metadata->ssid, node->ni_essid, node->ni_esslen);
+    uint32_t ssidLength = node->ni_esslen;
+    const uint8_t *ssid = node->ni_essid;
+    if (ssidLength == 0 && wclHasHiddenSsid &&
+        IEEE80211_ADDR_EQ(node->ni_bssid, wclHiddenBssid)) {
+        // Hidden network: the beacon carries no name, but we know it from the
+        // join request. Without the name the system neither lists the network
+        // nor matches it against its preferred networks.
+        ssidLength = wclHiddenSsidLength;
+        ssid = wclHiddenSsid;
+    }
+    metadata->ssidLength = ssidLength;
+    memcpy(metadata->ssid, ssid, ssidLength);
     memcpy(metadata->bssid, node->ni_bssid, 6);
     metadata->rssi = IWM_MIN_DBM + node->ni_rssi;
     metadata->interval = node->ni_intval;
@@ -516,15 +550,59 @@ void AirportItlwmSkywalkInterface::publishWCLBeacon(const ieee80211_node *node, 
         metadata->ieLength = uint32_t(AirportWCL::selectWPA2TransitionMode(
             reinterpret_cast<uint8_t *>(metadata + 1), length));
     size_t messageSize = sizeof(*metadata) + metadata->ieLength;
-    if (assocNotified && IEEE80211_ADDR_EQ(node->ni_bssid, joinBSSID)) {
+    // The framework asks the driver for the BSS information as soon as the
+    // link comes up and it gives up on the network when that fails ("Update
+    // Bss fail"). The information is taken from the beacons of the network,
+    // so it has to be collected while the network is still being scanned:
+    // waiting for the association to be complete is too late, the scan has
+    // usually finished by then and no beacon arrives any more.
+    //
+    // Without the information the framework never runs setCurrentBSS, so
+    // neither the BSSID nor the SSID reach the 802.1X supplicant, and the
+    // join ends in "join failure".
+    bool bssMatches = IEEE80211_ADDR_EQ(node->ni_bssid, joinBSSID);
+    // The hidden network's BSS counts only while that network is the one being joined.
+    if (!bssMatches && wclHasHiddenSsid &&
+        AirportWCL::sameSsid(ic->ic_des_essid, ic->ic_des_esslen, wclHiddenSsid, wclHiddenSsidLength))
+        bssMatches = IEEE80211_ADDR_EQ(node->ni_bssid, wclHiddenBssid);
+    if ((joinPending || assocNotified) && bssMatches) {
         wclBssValid = messageSize <= sizeof(wclBssInfo);
         if (wclBssValid) {
             bzero(wclBssInfo, sizeof(wclBssInfo));
             memcpy(wclBssInfo, metadata, messageSize);
         }
     }
+    // A directed scan that was asked for by name teaches the driver the name
+    // of the network it found. The beacons of a hidden network do not carry
+    // that name, so without remembering it the scan results of that network
+    // stay nameless and the system never lists it.
+    // Only a network whose beacons really hide the name is remembered: the name came from its answer to the
+    // directed scan's probe, and this frame doesn't carry it.
+    if (ic->ic_wcl_scan_active &&
+        AirportWCL::sameSsid(node->ni_essid, node->ni_esslen, ic->ic_wcl_scan_ssid, ic->ic_wcl_scan_ssid_length) &&
+        AirportWCL::hidesSsid(ies, length)) {
+        if (!AirportWCL::zeroAddress(node->ni_bssid)) {
+            memcpy(wclHiddenSsid, ic->ic_wcl_scan_ssid, ic->ic_wcl_scan_ssid_length);
+            wclHiddenSsidLength = ic->ic_wcl_scan_ssid_length;
+            wclHasHiddenSsid = true;
+            memcpy(wclHiddenBssid, node->ni_bssid, sizeof(wclHiddenBssid));
+        }
+    }
     wclPost(AirportWCL::ScanResult, metadata, messageSize, true);
     IOFree(metadata, size);
+}
+
+void AirportItlwmSkywalkInterface::publishEarlyBssid()
+{
+    if (wclStopping || !earlyBssidPending || !joinPending || assocNotified || !AirportWCL::zeroAddress(joinBSSID))
+        return;
+    if (AirportWCL::zeroAddress(earlyBssid)) {
+        earlyBssidPending = false;
+        return;
+    }
+    memcpy(joinBSSID, earlyBssid, sizeof(joinBSSID));
+    setCurrentApAddress(reinterpret_cast<ether_addr *>(joinBSSID));
+    earlyBssidPending = false;
 }
 
 void AirportItlwmSkywalkInterface::clearWCLPMKSA()
@@ -540,6 +618,8 @@ void AirportItlwmSkywalkInterface::clearWCLPMKSA()
 
 IOReturn AirportItlwmSkywalkInterface::setCLEAR_PMKSA_CACHE(void *)
 {
+    if (!canUseCommandGate())
+        return kIOReturnNotReady;
     return _fCommandGate->runAction(wclCommand, this, reinterpret_cast<void *>(11));
 }
 
@@ -736,6 +816,7 @@ IOReturn AirportItlwmSkywalkInterface::startWCLJoin(AirportWCL::JoinRequest &joi
     wclBssValid = false;
     joinPending = true;
     assocNotified = firstBeaconNotified = portAuthorized = false;
+    wclFirstBeaconHeld = false;
     wclAssociatedBeacons = 0;
     bzero(wclBeaconInfo, sizeof(wclBeaconInfo));
     disassocIsVoluntary = false;
@@ -930,6 +1011,22 @@ void AirportItlwmSkywalkInterface::handleWCLLink(bool up)
     if (wclStopping)
         return;
     portAuthorized = up;
+    // The link status that was held back until the four way handshake was
+    // done is reported now. The first beacon is reported as well, because
+    // the beacon branch skipped it while the notification was held back.
+    if (up && wclFirstBeaconHeld) {
+        wclFirstBeaconHeld = false;
+        firstBeaconNotified = true;
+        AirportWCL::LinkStatusEvent link = {};
+        memcpy(link.bssid, joinBSSID, sizeof(link.bssid));
+        link.up = 1;
+        link.reason = 255;
+        wclLinkIndicated = true;
+        wclPost(AirportWCL::LinkStatus, &link, sizeof(link), true);
+        AirportWCL::FirstBeaconEvent event = {};
+        memcpy(event.peer.bssid, joinBSSID, 6);
+        wclPost(AirportWCL::FirstBeacon, &event, sizeof(event), true);
+    }
     // itlwm_lqmint: a new link (or none) starts over, so the first update after a join is never held back.
     wclLqmLastPostNs = 0;
     if (!up)
@@ -1080,12 +1177,49 @@ void AirportItlwmSkywalkInterface::handleWCLEvent(int code, void *data)
                     ++wclScanStats.beaconsWhilePending;
                 publishWCLBeacon(beacon->node, beacon->ies, beacon->length);
             }
+            // A join request does not always name the BSSID of the network it
+            // wants. The beacon of the network carries it, so it is taken
+            // from there while the network is still being scanned.
+            // Only when the join named no BSSID: one it named stays, even if another access point of the
+            // same network beacons first.
+            if (joinPending && !assocNotified && AirportWCL::zeroAddress(joinBSSID) &&
+                AirportWCL::sameSsid(beacon->node->ni_essid, beacon->node->ni_esslen, ic->ic_des_essid,
+                                     ic->ic_des_esslen)) {
+                if (!AirportWCL::zeroAddress(beacon->node->ni_bssid)) {
+                    memcpy(earlyBssid, beacon->node->ni_bssid, sizeof(earlyBssid));
+                    earlyBssidPending = true;
+                    if (instance && instance->getWorkQueue() &&
+                        instance->getWorkQueue()->inGate()) {
+                        publishEarlyBssid();
+                    } else if (_fCommandGate) {
+                        _fCommandGate->runAction(wclCommand, this,
+                                                 reinterpret_cast<void *>(18));
+                    }
+                }
+            }
             if (joinPending && assocNotified && !firstBeaconNotified &&
                 IEEE80211_ADDR_EQ(beacon->node->ni_bssid, joinBSSID)) {
                 AirportWCL::FirstBeaconEvent event = {};
                 memcpy(event.peer.bssid, joinBSSID, 6);
                 if (!wclBssValid)
                     break;
+                // A personal network must not report the link up before the
+                // four way handshake is done. IO80211 sometimes leaves the
+                // network right away when it sees the link up, the port is
+                // authorized a few milliseconds too late and the join of
+                // airportd then runs into its ten second timeout. The link
+                // status is therefore held back until the port is
+                // authorized.
+                //
+                // An enterprise network needs the opposite: the link status
+                // is what makes the framework run setCurrentBSS, and that
+                // is the only way the BSSID and the SSID reach the 802.1X
+                // supplicant. It was already sent when the association
+                // completed, so nothing is held back there.
+                if (!portAuthorized && !ic->ic_wcl_enterprise) {
+                    wclFirstBeaconHeld = true;
+                    break;
+                }
                 firstBeaconNotified = true;
                 AirportWCL::LinkStatusEvent link = {};
                 memcpy(link.bssid, joinBSSID, sizeof(link.bssid));
@@ -1139,6 +1273,54 @@ void AirportItlwmSkywalkInterface::handleWCLEvent(int code, void *data)
     }
 }
 
+IOReturn AirportItlwmSkywalkInterface::setPM_MODE(apple80211_pm_mode *data)
+{
+    if (!data)
+        return kIOReturnBadArgument;
+    // The framework sends 0x188 (392) bytes with APPLE80211_IOC_PM_MODE, but
+    // the layout of the structure has never been published: only the first
+    // two words are known to carry the request, the rest of the payload is
+    // whatever the framework had in its buffer. The values are therefore only
+    // recorded, they are not acted upon.
+    //
+    // The driver has no power mode of its own to switch, so accepting the
+    // request only keeps the framework from reporting a failure on every join.
+    pmMode = data->mode;
+    pmModeFlags = data->flags;
+    itlWCLTrace('P', pmMode, pmModeFlags, 0);
+    return kIOReturnSuccess;
+}
+
+IOReturn AirportItlwmSkywalkInterface::getWCL_FW_HOT_CHANNELS(apple80211_fw_hot_channels *data)
+{
+    if (!data)
+        return kIOReturnBadArgument;
+    // The framework builds its neighbour cache from the list of hot channels
+    // the firmware reports. Intel's firmware keeps no such list for the host.
+    // An empty list keeps the driver's behaviour unchanged; it only stops the
+    // framework from reporting a failure on every join. IO80211's
+    // WCLNeighborCacheManager::constructNeighborCacheFromFWHotChannels asks
+    // with 0x14 bytes on Sequoia 24H241 and Tahoe 25G342 (checked).
+    memset(data, 0, sizeof(*data));
+    data->count = 0;
+    itlWCLTrace('W', data->count, 0, 0);
+    return kIOReturnSuccess;
+}
+
+IOReturn AirportItlwmSkywalkInterface::setPOWERSAVE(apple80211_powersave_data *data)
+{
+    if (!data)
+        return kIOReturnBadArgument;
+    // The framework tells the driver which power save level the radio should
+    // use. The level is remembered here: with the power saving turned off
+    // the link must not report itself as idle any more, otherwise the
+    // framework keeps the radio busy although the user asked for the
+    // opposite.
+    wclPowersaveLevel = data->powersave_level;
+    itlWCLTrace('S', wclPowersaveLevel, 0, 0);
+    return kIOReturnSuccess;
+}
+
 IOReturn AirportItlwmSkywalkInterface::getWCL_VALID_CHANNEL_COUNT(unsigned long *count)
 {
     if (!count)
@@ -1147,6 +1329,8 @@ IOReturn AirportItlwmSkywalkInterface::getWCL_VALID_CHANNEL_COUNT(unsigned long 
     if (!_fCommandGate)
         return kIOReturnNotReady;
     // Read under the command gate with the stop check, like its siblings (audit ST04).
+    if (!canUseCommandGate())
+        return kIOReturnNotReady;
     return _fCommandGate->runAction(wclCommand, this, reinterpret_cast<void *>(16), count);
 }
 
@@ -1179,6 +1363,8 @@ IOReturn AirportItlwmSkywalkInterface::getWCL_BSS_INFO(apple80211_beacon_msg *da
 {
     if (!data)
         return kIOReturnBadArgument;
+    if (!canUseCommandGate())
+        return kIOReturnNotReady;
     return _fCommandGate->runAction(wclCommand, this, reinterpret_cast<void *>(5), data);
 }
 
@@ -1186,6 +1372,8 @@ IOReturn AirportItlwmSkywalkInterface::getWCL_EXTENDED_BSS_INFO(apple80211_exten
 {
     if (!data)
         return kIOReturnBadArgument;
+    if (!canUseCommandGate())
+        return kIOReturnNotReady;
     return _fCommandGate->runAction(wclCommand, this, reinterpret_cast<void *>(6), data);
 }
 
@@ -1279,6 +1467,8 @@ IOReturn AirportItlwmSkywalkInterface::getWCL_CHANNELS_INFO(apple80211ChannelInf
     if (!_fCommandGate)
         return kIOReturnNotReady;
     // Read under the command gate with the stop check, like its siblings (audit ST04).
+    if (!canUseCommandGate())
+        return kIOReturnNotReady;
     return _fCommandGate->runAction(wclCommand, this, reinterpret_cast<void *>(17), data);
 }
 
@@ -1287,6 +1477,8 @@ IOReturn AirportItlwmSkywalkInterface::getCHANNELS_INFO(apple80211_channels_info
     if (!data)
         return kIOReturnBadArgument;
     if (!_fCommandGate)
+        return kIOReturnNotReady;
+    if (!canUseCommandGate())
         return kIOReturnNotReady;
     return _fCommandGate->runAction(wclCommand, this, reinterpret_cast<void *>(13), data);
 }
@@ -1330,6 +1522,8 @@ IOReturn AirportItlwmSkywalkInterface::getWCL_TRAFFIC_COUNTERS(apple80211_wcl_tr
         return kIOReturnBadArgument;
     if (!_fCommandGate)
         return kIOReturnNotReady;
+    if (!canUseCommandGate())
+        return kIOReturnNotReady;
     return _fCommandGate->runAction(wclCommand, this, reinterpret_cast<void *>(14), data);
 }
 
@@ -1350,6 +1544,8 @@ IOReturn AirportItlwmSkywalkInterface::setWCL_SET_SCAN_HOME_AWAY_TIME(scanHomeAn
         return kIOReturnBadArgument;
     if (!_fCommandGate)
         return kIOReturnNotReady;
+    if (!canUseCommandGate())
+        return kIOReturnNotReady;
     return _fCommandGate->runAction(wclCommand, this, reinterpret_cast<void *>(15), data);
 }
 #endif
@@ -1358,6 +1554,8 @@ IOReturn AirportItlwmSkywalkInterface::setWCL_SET_SCAN_HOME_AWAY_TIME(scanHomeAn
 IOReturn AirportItlwmSkywalkInterface::getBEACON_INFO(apple80211_beacon_info_t *data)
 {
     if (!_fCommandGate || !data)
+        return kIOReturnNotReady;
+    if (!canUseCommandGate())
         return kIOReturnNotReady;
     return _fCommandGate->runAction(wclCommand, this, reinterpret_cast<void *>(7), data);
 }
