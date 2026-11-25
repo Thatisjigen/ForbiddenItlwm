@@ -405,6 +405,10 @@ static constexpr size_t kAwdlAmsduTxBuffer = 4096;
 static uint32_t awdlAmsduTxSent, awdlAmsduTxSubframes, awdlAmsduTxNotReady, awdlAmsduTxNoRoom, awdlAmsduTxNoNext,
     awdlAmsduTxSplit;
 static constexpr uint16_t kAwdlAmsduTxMaxMpdu = uint16_t(ItlAWDL::kAmsduBaselineMpdu);
+// The last A-MSDU TX command as handed to the hardware (length, offload_assist, TB1 length, payload segments and the
+// first two segment lengths, queue): if the firmware still rejects one, ITLAWDLAmsduTx shows what it was given.
+static uint32_t awdlAmsduTxLastLen, awdlAmsduTxLastOffload, awdlAmsduTxLastTb1, awdlAmsduTxLastSegs,
+    awdlAmsduTxLastSeg0, awdlAmsduTxLastSeg1, awdlAmsduTxLastQueue;
 // The station's receive Block Ack sessions (sc_rx_ba_sessions, mirrored for ITLRxBaSessions): the firmware's
 // receive sessions are one pool for the station and every AWDL peer, so the key shows them side by side.
 static uint32_t itlStationRxBa;
@@ -7249,9 +7253,12 @@ static void awdlCoexPublish()
             char tx[768];
             int n = snprintf(tx, sizeof(tx), "on; offered %u, agreed %u, refused %u; tlc updates %u (unmatched %u); "
                              "sent %u (subframes %u); not packed: not ready %u, no room %u, nothing next %u, split %u; "
-                             "slots:", awdlAmsduTxOffers, awdlAmsduTxAgreed, awdlAmsduTxRefused,
+                             "last: len %u offload 0x%04x tb1 %u segs %u (%u, %u) queue %u; slots:",
+                             awdlAmsduTxOffers, awdlAmsduTxAgreed, awdlAmsduTxRefused,
                              awdlAmsduTxTlcUpdates, awdlAmsduTxTlcUnmatched, awdlAmsduTxSent, awdlAmsduTxSubframes,
-                             awdlAmsduTxNotReady, awdlAmsduTxNoRoom, awdlAmsduTxNoNext, awdlAmsduTxSplit);
+                             awdlAmsduTxNotReady, awdlAmsduTxNoRoom, awdlAmsduTxNoNext, awdlAmsduTxSplit,
+                             awdlAmsduTxLastLen, awdlAmsduTxLastOffload, awdlAmsduTxLastTb1, awdlAmsduTxLastSegs,
+                             awdlAmsduTxLastSeg0, awdlAmsduTxLastSeg1, awdlAmsduTxLastQueue);
             for (unsigned i = 0; i < ItlAWDL::kMaxPeerSlots && n > 0 && size_t(n) < sizeof(tx); ++i) {
                 const ItlAWDL::PeerSlot &p = awdlPeers[i];
                 if (!p.added)
@@ -14713,8 +14720,11 @@ iwx_tx(struct iwx_softc *sc, mbuf_t m, struct ieee80211_node *ni, int ac, int mo
     totlen = mbuf_pkthdr_len(m);
     
     offload_assist = itlTxOffloadHeader(hdrlen);
-    if (awdlAmsduFrame)
-        offload_assist |= IWX_TX_CMD_OFFLD_AMSDU;   // as Linux marks host-built A-MSDUs for the firmware
+    if (awdlAmsduFrame) {
+        // A-MSDU subheaders provide alignment; Linux omits MAC-header padding.
+        offload_assist &= ~IWX_TX_CMD_OFFLD_PAD;
+        offload_assist |= IWX_TX_CMD_OFFLD_AMSDU;
+    }
     
     if (sc->sc_device_family >= IWX_DEVICE_FAMILY_AX210) {
         tx_gen3 = (struct iwx_tx_cmd_gen3 *)cmd->data;
@@ -14786,14 +14796,25 @@ iwx_tx(struct iwx_softc *sc, mbuf_t m, struct ieee80211_node *ni, int ac, int mo
     memcpy(&desc->tbs[0].addr, &paddr, sizeof(paddr));
     if (data->cmd_paddr >> 32 != (data->cmd_paddr + le32toh(desc->tbs[0].tb_len)) >> 32)
         DPRINTF(("%s: TB0 crosses 32bit boundary\n", __func__));
-    desc->tbs[1].tb_len = htole16(_ALIGN(sizeof(struct iwx_cmd_header) +
-                                  cmd_size + hdrlen - IWX_FIRST_TB_SIZE, 4));
+    const unsigned commandTbLength = sizeof(struct iwx_cmd_header) +
+        cmd_size + hdrlen - IWX_FIRST_TB_SIZE;
+    desc->tbs[1].tb_len = htole16(awdlAmsduFrame ? commandTbLength : _ALIGN(commandTbLength, 4));
     paddr = htole64(data->cmd_paddr + IWX_FIRST_TB_SIZE);
     memcpy(&desc->tbs[1].addr, &paddr, sizeof(paddr));
     
     if (data->cmd_paddr >> 32 != (data->cmd_paddr + le32toh(desc->tbs[1].tb_len)) >> 32)
         DPRINTF(("%s: TB1 crosses 32bit boundary\n", __func__));
     
+    if (awdlAmsduFrame) {
+        awdlAmsduTxLastLen = totlen;
+        awdlAmsduTxLastOffload = offload_assist;
+        awdlAmsduTxLastTb1 = le16toh(desc->tbs[1].tb_len);
+        awdlAmsduTxLastSegs = uint32_t(nsegs);
+        awdlAmsduTxLastSeg0 = nsegs > 0 ? uint32_t(segs[0].length) : 0;
+        awdlAmsduTxLastSeg1 = nsegs > 1 ? uint32_t(segs[1].length) : 0;
+        awdlAmsduTxLastQueue = uint32_t(ring->qid);
+    }
+
     /* Other DMA segments are for data payload. */
     for (i = 0; i < nsegs; i++) {
         seg = &segs[i];
