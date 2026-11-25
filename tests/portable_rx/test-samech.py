@@ -144,4 +144,7 @@ a=s.index('iwx_rx_mpdu_mq(struct');b=s.index("\nvoid ItlIwx::",a);assert hashlib
 # schedules (still home presence; timing checked against the second channel's entries, never calibrated there).
 # Step 2d (-itlschedsecondsync only): Block Ack requests, teardowns and answers are also accepted when heard during
 # an executed second-channel visit (the frame's own channel); the home-channel condition is unchanged.
-a=s.index('iwx_rx_frame(struct');b=s.index("\nvoid ItlIwx::",a);assert hashlib.sha256(s[a:b].encode()).hexdigest()=='24479569ccc526ae500dfcf876c17c5ac17be7bfd6058a08a4a83def27e647c5'
+# -itlawdlamsdutx (A-MSDU send, step A2): our send agreement keeps the answer's A-MSDU bit per slot and clears it on
+# a DELBA of that session (added lines only; the answer's matching and every receive check are unchanged).
+# Both merged for 0.7.0-alpha.4 (second-channel steps 2b-2d and the A-MSDU send agreement).
+a=s.index('iwx_rx_frame(struct');b=s.index("\nvoid ItlIwx::",a);assert hashlib.sha256(s[a:b].encode()).hexdigest()=='7567eeb97bf2f9a167f10cafa9b96faa7b5279de990300ed9e55405c54260795'

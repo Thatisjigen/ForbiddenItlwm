@@ -33,6 +33,10 @@ public:
     // Under the shared gate. Converts the oldest queued frame into a caller-owned buffer.
     bool popTransmit(uint8_t *, size_t, size_t *, const uint8_t *holdPayloadFor, bool holdEverySize = false,
                      const ItlAWDL::TxPassList *pass = nullptr);
+    // -itlawdlamsdutx: takes the oldest queued frame only if it is unicast data for `destination` that converts to at
+    // most `maxLength` bytes, and nothing is parked (so it is the frame popTransmit would return next). Otherwise
+    // nothing changes: no frame is taken to be put back.
+    bool popTransmitFor(uint8_t *, size_t, size_t *, const uint8_t *destination, size_t maxLength);
     // Frames macOS has queued that the driver hasn't taken yet.
     unsigned queuedTransmit() const { return transmitQueued + parkedQueued; }
     unsigned heldShortTransmit() const { return transmitHeldShort; }

@@ -82,8 +82,11 @@ inline bool isAddbaFrame(const uint8_t *f, size_t length) {
     return f && length == kAddbaResponseLength && f[0] == 0xd0 && f[24] == 3 && (f[25] == 0 || f[25] == 1);
 }
 // Asks `peer` for a session to send to it: immediate, no A-MSDU, no timeout. The same length as an answer.
+// `offerAmsdu` (-itlawdlamsdutx): parameter bit 0, we may send A-MSDUs inside this session's A-MPDUs; the peer's answer
+// says whether it accepts them (AddbaAnswer::amsdu). Off, the frame is byte-for-byte as before.
 inline size_t buildAddbaRequest(uint8_t *out, size_t capacity, const uint8_t *peer, const uint8_t *own, const uint8_t *bssid,
-                                uint8_t token, uint8_t tid, uint16_t window, uint16_t startSequence, uint16_t sequence) {
+                                uint8_t token, uint8_t tid, uint16_t window, uint16_t startSequence, uint16_t sequence,
+                                bool offerAmsdu = false) {
     if (!out || !peer || !own || !bssid || capacity < kAddbaResponseLength || tid >= 8)
         return 0;
     memset(out, 0, kAddbaResponseLength);
@@ -97,7 +100,7 @@ inline size_t buildAddbaRequest(uint8_t *out, size_t capacity, const uint8_t *pe
     out[24] = 3;
     out[25] = 0;
     out[26] = token;
-    const uint16_t params = uint16_t(2U | unsigned(tid) << 2 | unsigned(window) << 6);
+    const uint16_t params = uint16_t((offerAmsdu ? 1U : 0U) | 2U | unsigned(tid) << 2 | unsigned(window) << 6);
     out[27] = uint8_t(params);
     out[28] = uint8_t(params >> 8);
     // Bytes 29 and 30 are timeout 0.
@@ -110,6 +113,7 @@ struct AddbaAnswer {
     uint8_t token, tid;
     uint16_t status, window;
     bool immediate; // Block Ack policy bit: immediate (the only kind supported) when set.
+    bool amsdu;     // parameter bit 0: the peer accepts A-MSDUs inside A-MPDUs from us (only meaningful if we offered)
 };
 // The peer's answer to our request: category 3, action 1, to `own`.
 inline bool parseAddbaAnswer(const uint8_t *f, size_t length, const uint8_t *own, AddbaAnswer *out) {
@@ -121,6 +125,7 @@ inline bool parseAddbaAnswer(const uint8_t *f, size_t length, const uint8_t *own
     out->tid = uint8_t((params >> 2) & 15U);
     out->window = params >> 6;
     out->immediate = params & 2U;
+    out->amsdu = params & 1U;
     return true;
 }
 // A peer ending a session: category 3, action 2. `peerWasSender` says which direction: true is its

@@ -38,6 +38,7 @@ struct iwx_tlc_config_cmd_v4 {
     uint8_t sta_id, max_ch_width, mode, chains, sgi_ch_width_supp;
     uint16_t flags, non_ht_rates;
     uint16_t ht_rates[IWX_TLC_NSS_MAX][IWX_TLC_MCS_PER_BW_NUM_V4];
+    uint16_t max_mpdu_len;
 };
 struct ieee80211_channel { int two_ghz; };
 #define IEEE80211_IS_CHAN_2GHZ(c) ((c)->two_ghz)
@@ -47,6 +48,8 @@ static uint8_t awdlBaTlcStation = kAwdlBaStationId;
 static ieee80211_channel *awdlCoexOwnChan;
 static bool awdlBaTx80Active;
 static unsigned awdlBaTxMinMcs = 4;
+static bool awdlAmsduTx;
+static constexpr uint16_t kAwdlAmsduTxMaxMpdu = 3895;
 static uint8_t iwx_rs_fw_set_active_chains(uint8_t ant) { return ant; }
 static uint8_t iwx_fw_valid_tx_ant(iwx_softc *) { return 3; }
 static uint16_t iwx_rs_fw_get_config_flags(iwx_softc *) { return 0; }
@@ -77,6 +80,15 @@ int main() {
         assert(cfg.ht_rates[IWX_TLC_NSS_1][IWX_TLC_MCS_PER_BW_80] == expected80);
         assert(cfg.ht_rates[IWX_TLC_NSS_2][IWX_TLC_MCS_PER_BW_80] == expected80);
         assert(cfg.max_ch_width == (wide ? IWX_TLC_MNG_CH_WIDTH_80MHZ : IWX_TLC_MNG_CH_WIDTH_20MHZ));
+        // -itlawdlamsdutx: the VHT baseline MPDU length lets the firmware enable A-MSDU; off, 0 as before (even if the
+        // BSS's branch above had set one).
+        cfg.max_mpdu_len = 7991;
+        awdl_branch(&sc, cfg);
+        assert(cfg.max_mpdu_len == 0);
+        awdlAmsduTx = true;
+        awdl_branch(&sc, cfg);
+        assert(cfg.max_mpdu_len == 3895);
+        awdlAmsduTx = false;
     }
     puts("AWDL peer rate control: no 160 MHz rates left from an HE 160 MHz station, HT and VHT 80 (#83): passed (host fixture)");
     return 0;

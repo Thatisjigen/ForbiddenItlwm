@@ -1212,6 +1212,28 @@ bool ItlAWDLInterface::popTransmit(uint8_t *output, size_t available, size_t *wr
     return false;
 }
 
+bool ItlAWDLInterface::popTransmitFor(uint8_t *output, size_t available, size_t *written, const uint8_t *destination,
+                                      size_t maxLength)
+{
+    if (!output || !written || !destination || parkedQueued || !transmitQueued)
+        return false;
+    const auto &frame = transmitFrames[transmitHead];
+    if (frame.length < 14 || !ItlAWDL::sameAddress(frame.bytes, destination))
+        return false;
+    size_t length = 0;
+    const auto result = ItlAWDL::buildDataFrameFromEthernet(frame.bytes, frame.length, localFrameAddress,
+                                                            transmitSequence, output, available, &length);
+    if (result != ItlAWDL::BuildResult::Ready || length > maxLength || output[0] != 0x08 || (output[4] & 1) ||
+        !ItlAWDL::sameAddress(output + 4, destination))
+        return false;   // left for popTransmit, which handles it as before (a bad one is dropped there)
+    transmitHead = (transmitHead + 1) % transmitFrameCount;
+    --transmitQueued;
+    ++transmitPopped;
+    ++transmitSequence;
+    *written = length;
+    return true;
+}
+
 bool ItlAWDLInterface::serviceTransmit()
 {
     if (transmitDoneCount) {
@@ -1986,6 +2008,37 @@ IOReturn AirportItlwm::buildAWDLTransmit(mbuf_t *packet, const uint8_t *holdPayl
     interface->retain();
     const bool ready = interface->popTransmit(static_cast<uint8_t *>(mbuf_data(result)), mbuf_maxlen(result), &length, holdPayloadFor,
                                                  holdEverySize, pass);
+    interface->release();
+    if (!ready) {
+        mbuf_freem(result);
+        return kIOReturnNotFound;
+    }
+    mbuf_setlen(result, length);
+    mbuf_pkthdr_setlen(result, length);
+    *packet = result;
+    return kIOReturnSuccess;
+}
+
+IOReturn itlAWDLBuildTransmitFor(IOEthernetController *owner, mbuf_t *packet, const uint8_t *destination,
+                                 size_t maxLength)
+{
+    auto *controller = OSDynamicCast(AirportItlwm, owner);
+    return controller ? controller->buildAWDLTransmitFor(packet, destination, maxLength) : kIOReturnNotReady;
+}
+
+IOReturn AirportItlwm::buildAWDLTransmitFor(mbuf_t *packet, const uint8_t *destination, size_t maxLength)
+{
+    if (!packet || *packet || !destination || !_fWorkloop || !_fWorkloop->inGate() || !awdlManagementInputEnabled ||
+        !fAWDLInterface)
+        return kIOReturnNotReady;
+    mbuf_t result = nullptr;
+    if (mbuf_getpacket(MBUF_DONTWAIT, &result) || !result)
+        return kIOReturnNoMemory;
+    size_t length = 0;
+    auto *interface = static_cast<ItlAWDLInterface *>(fAWDLInterface);
+    interface->retain();
+    const bool ready = interface->popTransmitFor(static_cast<uint8_t *>(mbuf_data(result)), mbuf_maxlen(result), &length,
+                                                 destination, maxLength);
     interface->release();
     if (!ready) {
         mbuf_freem(result);

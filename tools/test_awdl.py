@@ -7,7 +7,7 @@ import tempfile
 
 root = Path(__file__).resolve().parents[1]
 with tempfile.TemporaryDirectory(prefix="forbiddenitlwm-tests-") as directory:
-    for name in ("awdl_requested_configuration", "awdl_protocol", "awdl_frame_builder", "awdl_sync_prefix", "awdl_local_schedule", "awdl_probe_policy", "awdl_data_payload", "awdl_data_frame", "awdl_observation", "awdl_regulatory", "awdl_tx_burst", "awdl_peer_schedule", "awdl_peer_slots", "awdl_channel_mix", "awdl_rx_dup", "awdl_chain_rssi", "awdl_session_follow", "awdl_exec_plan", "awdl_election", "awdl_build_guard", "btleadv_hci", "btleadv_verify", "eapol_key_length", "ptk_derive", "wcl_transition", "wcl_sae", "wcl_scan_ssid", "counted_copy", "scan_cursor"):
+    for name in ("awdl_requested_configuration", "awdl_protocol", "awdl_frame_builder", "awdl_sync_prefix", "awdl_local_schedule", "awdl_probe_policy", "awdl_data_payload", "awdl_data_frame", "awdl_observation", "awdl_regulatory", "awdl_tx_burst", "awdl_peer_schedule", "awdl_peer_slots", "awdl_amsdu", "awdl_channel_mix", "awdl_rx_dup", "awdl_chain_rssi", "awdl_session_follow", "awdl_exec_plan", "awdl_election", "awdl_build_guard", "btleadv_hci", "btleadv_verify", "eapol_key_length", "ptk_derive", "wcl_transition", "wcl_sae", "wcl_scan_ssid", "counted_copy", "scan_cursor"):
         output = Path(directory) / name
         subprocess.run([
             "xcrun", "clang++", "-std=c++14",
@@ -75,3 +75,4 @@ with tempfile.TemporaryDirectory(prefix="forbidden-lqm-") as directory:
                     str(root / "tests/wcl_lqm_merge.cpp"), "-o", output], check=True)
     subprocess.run([output], check=True)
 subprocess.run(["python3", str(root / "tests/awdl_tx_park.py")], check=True)
+subprocess.run(["python3", str(root / "tests/awdl_amsdu_send.py")], check=True)
